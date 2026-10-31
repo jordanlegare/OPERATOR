@@ -1,10 +1,10 @@
-# StreamNote TUI
+# STREENOTE TUI
 
 A Rust terminal workspace combining a live **Debian shell**, a persistent command/output transcript, and a fast append-only note stream. Built with **Ratatui**, **Crossterm**, and **portable-pty**.
 
 ## What's new: embedded Debian shell
 
-StreamNote starts the configured interactive shell (`$SHELL`, falling back to `/bin/bash`) in a real pseudo-terminal (PTY) when the application initializes. The PTY gives commands a TTY rather than plain stdin/stdout pipes.
+STREENOTE starts the configured interactive shell (`$SHELL`, falling back to `/bin/bash`) in a real pseudo-terminal (PTY) when the application initializes. The PTY gives commands a TTY rather than plain stdin/stdout pipes.
 
 - Type a shell command in the footer and press Enter.
 - Each non-secret submitted command is recorded as a `CMD` journal entry. Secret input submitted while PTY echo is disabled is deliberately omitted.
@@ -26,8 +26,8 @@ The default input mode is **TERMINAL**.
 - In NOTES mode, an ordinary submitted line becomes a note.
 - `/note text` saves a note without changing mode. `/note` by itself switches to NOTES mode.
 - Prefix a line with `!` to run it as a shell command even while in NOTES mode.
-- Recognized StreamNote commands (such as `/search`, `/save`, and `/stats`) are handled locally in either mode.
-- Absolute shell paths such as `/usr/bin/ls` are sent to the shell in TERMINAL mode; they are not mistaken for local StreamNote commands.
+- Recognized STREENOTE commands (such as `/search`, `/save`, and `/stats`) are handled locally in either mode.
+- Absolute shell paths such as `/usr/bin/ls` are sent to the shell in TERMINAL mode; they are not mistaken for local STREENOTE commands.
 
 ## Other features
 
@@ -65,7 +65,7 @@ cargo run --release -- --file ~/Notes/work-log.jsonl
 By default, the journal is stored at:
 
 ```text
-~/.local/share/streamnote/journal.jsonl
+~/.local/share/STREENOTE/journal.jsonl
 ```
 
 ## Commands
@@ -105,7 +105,7 @@ By default, the journal is stored at:
 | `Ctrl+S` | Save / retry pending writes |
 | `Ctrl+C` | Send Ctrl+C (SIGINT) to the embedded shell in TERMINAL mode; clear the draft in NOTES mode |
 | `Ctrl+D` | Send end-of-input to the shell when the terminal input is empty |
-| `Ctrl+Q` | Quit StreamNote |
+| `Ctrl+Q` | Quit STREENOTE |
 
 ## Journal format
 
@@ -117,7 +117,7 @@ Each line in `journal.jsonl` is an independent JSON object. Example:
 {"timestamp":"2026-10-31T17:31:00-04:00","kind":"note","text":"Investigate kernel update"}
 ```
 
-Kinds are `note`, `terminal_command`, `terminal_output`, and `system`. Old records without `kind` are treated as notes. The journal is append-only from the application's perspective; malformed lines are skipped at load and counted in the startup status. It is never truncated by StreamNote. Input entered while terminal echo is off is intentionally not included.
+Kinds are `note`, `terminal_command`, `terminal_output`, and `system`. Old records without `kind` are treated as notes. The journal is append-only from the application's perspective; malformed lines are skipped at load and counted in the startup status. It is never truncated by STREENOTE. Input entered while terminal echo is off is intentionally not included.
 
 ## Cache and persistence semantics
 
@@ -127,11 +127,11 @@ There is no literal infinite memory on a finite computer. The in-memory vector g
 
 ## Security and privacy
 
-Commands run with the permissions of the user who launched StreamNote. Terminal output is saved to the journal, which may include paths, host information, command output, or other sensitive data. When the PTY's ECHO flag is off (as with normal `sudo` password prompts), StreamNote masks the footer and does not save the submitted input to the command journal or input history. This is a safeguard, not a complete secret-management system: avoid entering secrets as ordinary command arguments, and remember that a program can itself print sensitive data to its output. The journal file inherits the creating user's umask and directory permissions.
+Commands run with the permissions of the user who launched STREENOTE. Terminal output is saved to the journal, which may include paths, host information, command output, or other sensitive data. When the PTY's ECHO flag is off (as with normal `sudo` password prompts), STREENOTE masks the footer and does not save the submitted input to the command journal or input history. This is a safeguard, not a complete secret-management system: avoid entering secrets as ordinary command arguments, and remember that a program can itself print sensitive data to its output. The journal file inherits the creating user's umask and directory permissions.
 
 ## Implementation notes
 
-- PTY stdout and stderr are merged by design; StreamNote records what the shell terminal visibly emits.
+- PTY stdout and stderr are merged by design; STREENOTE records what the shell terminal visibly emits.
 - ANSI escape sequences are removed before storage. This keeps the transcript searchable and avoids injecting terminal control sequences into the UI.
 - PTY data can be emitted in partial chunks. An unfinished visible prompt/line is flushed after a brief idle interval and again when the shell exits.
 - UTF-8 characters split across PTY reads are reassembled; invalid byte sequences are represented with U+FFFD.
