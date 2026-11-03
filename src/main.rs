@@ -222,6 +222,7 @@ fn handle_key(
         }
         KeyCode::F(1) => app.show_help = true,
         KeyCode::Enter => app.submit(shell.as_mut()),
+        KeyCode::Tab => app.tab_complete(shell.as_ref()),
         KeyCode::Backspace => app.backspace(),
         KeyCode::Delete => app.delete(),
         KeyCode::Left if modifiers.contains(KeyModifiers::ALT) => app.scroll_feed_left(8),
