@@ -252,7 +252,7 @@ fn drain_shell(
     };
 
     let output = session.drain_output();
-    app.update_secret_input(session.input_is_echoed());
+    app.update_secret_input(session.input_is_echoed(), &output);
     if !output.is_empty() {
         app.capture_terminal_output(output);
     }
