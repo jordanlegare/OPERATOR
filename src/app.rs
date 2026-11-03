@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use crate::{
     shell::ShellSession,
@@ -45,9 +48,9 @@ pub struct App {
     pub input_mode: InputMode,
     /// True while the PTY has disabled echo (typically a password prompt).
     pub secret_input: bool,
-    /// Do not interpret ECHO=false as a secret prompt until this PTY has
-    /// first been observed with normal echo enabled.
-    terminal_echo_seen: bool,
+    /// A recent explicit password/passphrase prompt, used together with
+    /// ECHO=false to distinguish secrets from unrelated shell echo settings.
+    secret_prompt_deadline: Option<Instant>,
     pub status: String,
     pub show_help: bool,
     pub should_quit: bool,
@@ -79,7 +82,7 @@ impl App {
             history_position: None,
             input_mode: InputMode::Terminal,
             secret_input: false,
-            terminal_echo_seen: false,
+            secret_prompt_deadline: None,
             status,
             show_help: false,
             should_quit: false,
@@ -206,28 +209,36 @@ impl App {
         self.history_position = None;
     }
 
-    pub fn update_secret_input(&mut self, terminal_echo: Option<bool>) {
+    pub fn update_secret_input(&mut self, terminal_echo: Option<bool>, output: &[String]) {
         if self.input_mode != InputMode::Terminal {
             self.secret_input = false;
+            self.secret_prompt_deadline = None;
             return;
         }
 
+        // Do not treat every ECHO=false state as a password prompt. Shell
+        // startup files and terminal programs can disable echo for unrelated
+        // reasons. Require recognizable secret-prompt text as well.
+        if output.iter().any(|line| looks_like_secret_prompt(line)) {
+            self.secret_prompt_deadline = Some(Instant::now() + Duration::from_secs(5));
+        }
+
         match terminal_echo {
-            // A normal ECHO=true reading establishes a baseline. A later
-            // true -> false transition is what indicates a password prompt.
+            Some(false) => {
+                let prompt_is_recent = self
+                    .secret_prompt_deadline
+                    .is_some_and(|deadline| Instant::now() <= deadline);
+                if prompt_is_recent {
+                    self.secret_input = true;
+                }
+            }
             Some(true) => {
-                self.terminal_echo_seen = true;
+                self.secret_prompt_deadline = None;
                 if self.input.is_empty() {
                     self.secret_input = false;
                 }
             }
-            Some(false) if self.terminal_echo_seen => {
-                self.secret_input = true;
-            }
-            // Some PTYs report ECHO=false immediately after openpty(), before
-            // the child shell has initialized its line discipline. Ignore that
-            // startup state instead of locking the application into secret mode.
-            Some(false) | None => {}
+            None => {}
         }
     }
 
@@ -255,6 +266,7 @@ impl App {
         self.input_mode = mode;
         if mode == InputMode::Notes {
             self.secret_input = false;
+            self.secret_prompt_deadline = None;
         }
         self.status = format!("{} mode enabled.", self.input_mode.label());
     }
@@ -627,15 +639,40 @@ fn is_streamnote_command(line: &str) -> bool {
     )
 }
 
+fn looks_like_secret_prompt(line: &str) -> bool {
+    let normalized = line.to_ascii_lowercase();
+    [
+        "password",
+        "passphrase",
+        "passcode",
+        "secret",
+        "verification code",
+        "one-time code",
+        "security token",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+        || normalized
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|word| matches!(word, "pin" | "otp"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{App, InputMode};
+    use super::{looks_like_secret_prompt, App, InputMode};
     use crate::storage::Journal;
-    use std::{env, fs, path::PathBuf};
+    use std::{
+        env, fs,
+        path::PathBuf,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    static NEXT_TEST_ID: AtomicUsize = AtomicUsize::new(0);
 
     fn test_app() -> (App, PathBuf) {
+        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
         let path = env::temp_dir().join(format!(
-            "streamnote-secret-input-test-{}.jsonl",
+            "streamnote-secret-input-test-{}-{id}.jsonl",
             std::process::id()
         ));
         let _ = fs::remove_file(&path);
@@ -647,38 +684,60 @@ mod tests {
     fn initial_echo_disabled_does_not_enable_secret_mode() {
         let (mut app, path) = test_app();
 
-        app.update_secret_input(Some(false));
+        app.update_secret_input(Some(false), &[]);
 
         assert!(!app.secret_input);
         let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn echo_transition_to_disabled_enables_secret_mode() {
+    fn echo_disabled_without_secret_prompt_stays_visible() {
         let (mut app, path) = test_app();
 
-        app.update_secret_input(Some(true));
-        assert!(!app.secret_input);
+        app.update_secret_input(Some(true), &["Welcome to Debian".to_string()]);
+        app.update_secret_input(Some(false), &["Starting interactive shell".to_string()]);
 
-        app.update_secret_input(Some(false));
+        assert!(!app.secret_input);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn password_prompt_and_disabled_echo_enable_secret_mode() {
+        let (mut app, path) = test_app();
+
+        app.update_secret_input(Some(true), &[]);
+        app.update_secret_input(Some(false), &["[sudo] password for user:".to_string()]);
+
         assert!(app.secret_input);
-
         let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn secret_mode_clears_after_input_is_submitted_and_echo_returns() {
+    fn prompt_text_can_arrive_before_echo_is_disabled() {
         let (mut app, path) = test_app();
 
-        app.update_secret_input(Some(true));
-        app.update_secret_input(Some(false));
+        app.update_secret_input(Some(true), &["Enter passphrase for key:".to_string()]);
+        assert!(!app.secret_input);
+
+        app.update_secret_input(Some(false), &[]);
+
+        assert!(app.secret_input);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn restored_echo_clears_secret_mode_after_input_is_cleared() {
+        let (mut app, path) = test_app();
+
+        app.update_secret_input(Some(true), &[]);
+        app.update_secret_input(Some(false), &["Password:".to_string()]);
         assert!(app.secret_input);
 
         app.insert_char('x');
         app.clear_input();
-        app.update_secret_input(Some(true));
-        assert!(!app.secret_input);
+        app.update_secret_input(Some(true), &[]);
 
+        assert!(!app.secret_input);
         let _ = fs::remove_file(path);
     }
 
@@ -687,9 +746,19 @@ mod tests {
         let (mut app, path) = test_app();
 
         app.input_mode = InputMode::Notes;
-        app.update_secret_input(Some(false));
+        app.update_secret_input(Some(false), &["Password:".to_string()]);
 
         assert!(!app.secret_input);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn secret_prompt_detection_uses_prompt_terms() {
+        assert!(looks_like_secret_prompt("Password:"));
+        assert!(looks_like_secret_prompt("Enter passphrase for key"));
+        assert!(looks_like_secret_prompt("PIN:"));
+        assert!(looks_like_secret_prompt("Verification code:"));
+        assert!(!looks_like_secret_prompt("Welcome to Debian"));
+        assert!(!looks_like_secret_prompt("Compiling streamnote"));
     }
 }
