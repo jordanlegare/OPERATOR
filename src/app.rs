@@ -862,3 +862,25 @@ fn escape_shell_completion(value: &str) -> String {
     }
     escaped
 }
+
+
+#[cfg(test)]
+mod completion_tests {
+    use super::{completion_common_prefix, escape_shell_completion};
+
+    #[test]
+    fn completion_finds_longest_common_prefix() {
+        let candidates = vec![
+            "streamnote/".to_string(),
+            "streamnoted/".to_string(),
+            "streamnotes/".to_string(),
+        ];
+        assert_eq!(completion_common_prefix(&candidates), "streamnote");
+    }
+
+    #[test]
+    fn completion_escapes_shell_whitespace_and_metacharacters() {
+        assert_eq!(escape_shell_completion("my folder/file"), "my\\ folder/file");
+        assert_eq!(escape_shell_completion("a&b"), "a\\&b");
+    }
+}
