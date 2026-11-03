@@ -39,7 +39,7 @@ The default input mode is **TERMINAL**.
 - JSON Lines persistence; non-secret commands, notes, terminal output records, and system events are appended to the journal.
 - `/search <terms>` searches all cached notes, commands, and terminal output case-insensitively and jumps to the latest match with surrounding context.
 - `n` / `N` navigate search hits.
-- Command/input history, help overlay, export, stats, path display, and save/retry.
+- Command/input history, Bash-powered Tab completion for commands and filesystem paths, help overlay, export, stats, path display, and save/retry.
 - Older journal entries without a `kind` field remain compatible and load as `note` entries.
 
 ## Requirements
@@ -100,7 +100,7 @@ By default, the journal is stored at:
 | Mouse wheel | Scroll vertically |
 | `Shift` + mouse wheel | Faster vertical scroll |
 | `Alt+Left` / `Alt+Right` | Pan feed horizontally |
-| `Ctrl+P` / `Ctrl+N` | Previous / next input-history item |
+| `Tab` | Complete shell commands and filesystem paths (four-space indent in NOTES mode) |\n| `Ctrl+P` / `Ctrl+N` | Previous / next input-history item |
 | `Ctrl+A` / `Ctrl+E` | Move input cursor to start / end |
 | `Ctrl+S` | Save / retry pending writes |
 | `Ctrl+C` | Send Ctrl+C (SIGINT) to the embedded shell in TERMINAL mode; clear the draft in NOTES mode |
