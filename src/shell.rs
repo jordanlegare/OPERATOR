@@ -45,6 +45,11 @@ impl ShellSession {
             })
             .map_err(|error| io::Error::other(error.to_string()))?;
 
+        // A fresh PTY must begin in normal interactive mode. Otherwise a
+        // platform/default PTY state with ECHO disabled is mistaken for a
+        // password prompt, leaving StreamNote in hidden-input mode at startup.
+        set_initial_echo(&*pair.master)?;
+
         let shell = env::var_os("SHELL").unwrap_or_else(|| "/bin/bash".into());
         let mut command = CommandBuilder::new(&shell);
 
@@ -216,6 +221,37 @@ impl ShellSession {
         }
     }
 
+}
+
+
+/// Put a newly-created PTY into normal interactive echo mode before the
+/// child shell starts. The shell can still disable ECHO later for password
+/// prompts; input_is_echoed() will detect that transition.
+#[cfg(unix)]
+fn set_initial_echo(master: &dyn MasterPty) -> io::Result<()> {
+    let fd = master
+        .as_raw_fd()
+        .ok_or_else(|| io::Error::other("PTY master does not expose a file descriptor"))?;
+    let mut attributes = std::mem::MaybeUninit::<libc::termios>::uninit();
+
+    // SAFETY: tcgetattr initializes the termios value when it returns 0.
+    if unsafe { libc::tcgetattr(fd, attributes.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the successful tcgetattr call initialized attributes.
+    let mut attributes = unsafe { attributes.assume_init() };
+    attributes.c_lflag |= libc::ECHO | libc::ECHONL;
+
+    // SAFETY: attributes was initialized by tcgetattr and remains valid.
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &attributes) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_initial_echo(_master: &dyn MasterPty) -> io::Result<()> {
+    Ok(())
 }
 
 impl Drop for ShellSession {
