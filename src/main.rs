@@ -247,7 +247,7 @@ fn drain_shell(
     shell: &mut Option<ShellSession>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Some(session) = shell.as_mut() else {
-        app.update_secret_input(None);
+        app.update_secret_input(None, &[]);
         return Ok(());
     };
 
