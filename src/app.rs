@@ -45,6 +45,9 @@ pub struct App {
     pub input_mode: InputMode,
     /// True while the PTY has disabled echo (typically a password prompt).
     pub secret_input: bool,
+    /// Do not interpret ECHO=false as a secret prompt until this PTY has
+    /// first been observed with normal echo enabled.
+    terminal_echo_seen: bool,
     pub status: String,
     pub show_help: bool,
     pub should_quit: bool,
@@ -76,6 +79,7 @@ impl App {
             history_position: None,
             input_mode: InputMode::Terminal,
             secret_input: false,
+            terminal_echo_seen: false,
             status,
             show_help: false,
             should_quit: false,
@@ -205,12 +209,25 @@ impl App {
     pub fn update_secret_input(&mut self, terminal_echo: Option<bool>) {
         if self.input_mode != InputMode::Terminal {
             self.secret_input = false;
-        } else if terminal_echo == Some(false) {
-            self.secret_input = true;
-        } else if self.input.is_empty() {
-            // Once masking starts, keep it in place until the draft is submitted
-            // or cleared, even if a prompt changes its ECHO flag mid-entry.
-            self.secret_input = false;
+            return;
+        }
+
+        match terminal_echo {
+            // A normal ECHO=true reading establishes a baseline. A later
+            // true -> false transition is what indicates a password prompt.
+            Some(true) => {
+                self.terminal_echo_seen = true;
+                if self.input.is_empty() {
+                    self.secret_input = false;
+                }
+            }
+            Some(false) if self.terminal_echo_seen => {
+                self.secret_input = true;
+            }
+            // Some PTYs report ECHO=false immediately after openpty(), before
+            // the child shell has initialized its line discipline. Ignore that
+            // startup state instead of locking the application into secret mode.
+            Some(false) | None => {}
         }
     }
 
@@ -608,4 +625,71 @@ fn is_streamnote_command(line: &str) -> bool {
             | "/quit"
             | "/q"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{App, InputMode};
+    use crate::storage::Journal;
+    use std::{env, fs, path::PathBuf};
+
+    fn test_app() -> (App, PathBuf) {
+        let path = env::temp_dir().join(format!(
+            "streamnote-secret-input-test-{}.jsonl",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let journal = Journal::open(path.clone()).expect("open test journal");
+        (App::new(journal, String::new()), path)
+    }
+
+    #[test]
+    fn initial_echo_disabled_does_not_enable_secret_mode() {
+        let (mut app, path) = test_app();
+
+        app.update_secret_input(Some(false));
+
+        assert!(!app.secret_input);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn echo_transition_to_disabled_enables_secret_mode() {
+        let (mut app, path) = test_app();
+
+        app.update_secret_input(Some(true));
+        assert!(!app.secret_input);
+
+        app.update_secret_input(Some(false));
+        assert!(app.secret_input);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn secret_mode_clears_after_input_is_submitted_and_echo_returns() {
+        let (mut app, path) = test_app();
+
+        app.update_secret_input(Some(true));
+        app.update_secret_input(Some(false));
+        assert!(app.secret_input);
+
+        app.insert_char('x');
+        app.clear_input();
+        app.update_secret_input(Some(true));
+        assert!(!app.secret_input);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn notes_mode_never_displays_secret_input() {
+        let (mut app, path) = test_app();
+
+        app.input_mode = InputMode::Notes;
+        app.update_secret_input(Some(false));
+
+        assert!(!app.secret_input);
+        let _ = fs::remove_file(path);
+    }
 }
