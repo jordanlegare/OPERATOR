@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize, PtySystem};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 const IDLE_FLUSH: Duration = Duration::from_millis(180);
 const READ_BUFFER_SIZE: usize = 4096;
