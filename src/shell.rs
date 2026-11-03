@@ -61,6 +61,9 @@ impl ShellSession {
         // when it does not resolve to this executable.
         let shell = resolve_shell_program();
         let mut command = CommandBuilder::new(&shell);
+        // Keep subprocesses and shell startup files pointed at the real shell,
+        // not at STREENOTE when it is the account's configured login shell.
+        command.env("SHELL", &shell);
 
         // Start the configured interactive shell normally so Debian's shell
         // startup files, aliases, prompt, PATH, and environment are honored.
