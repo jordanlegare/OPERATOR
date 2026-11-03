@@ -127,6 +127,87 @@ impl ShellSession {
         &self.shell_program
     }
 
+    /// Ask Bash for command and filesystem completions in the live shell's cwd.
+    /// The cwd is read from /proc so it stays correct after interactive `cd`.
+    pub fn complete_candidates(&self, line: &str, cursor: usize) -> io::Result<Vec<String>> {
+        let cursor = cursor.min(line.len());
+        if !line.is_char_boundary(cursor) {
+            return Ok(Vec::new());
+        }
+
+        let before_cursor = &line[..cursor];
+        let token_start = before_cursor
+            .char_indices()
+            .rev()
+            .find(|(_, ch)| ch.is_whitespace())
+            .map(|(index, ch)| index + ch.len_utf8())
+            .unwrap_or(0);
+        let prefix = &line[token_start..cursor];
+        if prefix.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let command_position = before_cursor[..token_start].trim().is_empty();
+        let cwd = self.child.process_id()
+            .and_then(|pid| fs::read_link(format!("/proc/{pid}/cwd")).ok())
+            .or_else(|| env::current_dir().ok());
+
+        let script = r#"
+            prefix=$1
+            if [[ "$prefix" == "~"* ]]; then
+                expanded="$HOME${prefix:1}"
+            else
+                expanded="$prefix"
+            fi
+            if [[ "$2" == "1" ]]; then
+                compgen -A command -- "$prefix"
+            fi
+            compgen -f -- "$expanded"
+        "#;
+
+        let mut command = std::process::Command::new("/bin/bash");
+        command.arg("-c")
+            .arg(script)
+            .arg("streamnote-completion")
+            .arg(prefix)
+            .arg(if command_position { "1" } else { "0" });
+
+        if let Some(cwd) = cwd {
+            command.current_dir(cwd);
+        }
+
+        let output = command.output()?;
+        if !output.status.success() && output.stdout.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut candidates: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|candidate| !candidate.is_empty())
+            .map(|candidate| {
+                let mut value = candidate.to_string();
+                let path = Path::new(&value);
+                let resolved = if path.is_absolute() {
+                    path.to_path_buf()
+                } else if let Some(cwd) = self.child.process_id()
+                    .and_then(|pid| fs::read_link(format!("/proc/{pid}/cwd")).ok())
+                {
+                    cwd.join(path)
+                } else {
+                    env::current_dir().unwrap_or_default().join(path)
+                };
+                if resolved.is_dir() && !value.ends_with('/') {
+                    value.push('/');
+                }
+                value
+            })
+            .collect();
+
+        candidates.sort();
+        candidates.dedup();
+        Ok(candidates)
+    }
+
     /// Send one line to the interactive shell's PTY.
     pub fn send_line(&mut self, command: &str) -> io::Result<()> {
         if self.exited {
