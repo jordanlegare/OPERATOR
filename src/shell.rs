@@ -1,6 +1,8 @@
 use std::{
     env,
+    fs,
     io::{self, Read, Write},
+    path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
     time::{Duration, Instant},
@@ -22,6 +24,7 @@ pub struct ShellSession {
     last_output: Option<Instant>,
     exited: bool,
     reader_closed: bool,
+    shell_program: PathBuf,
 }
 
 impl std::fmt::Debug for ShellSession {
@@ -50,7 +53,13 @@ impl ShellSession {
         // password prompt, leaving StreamNote in hidden-input mode at startup.
         set_initial_echo(&*pair.master)?;
 
-        let shell = env::var_os("SHELL").unwrap_or_else(|| "/bin/bash".into());
+        // When STREENOTE is the account's SSH login shell, SSH may set
+        // $SHELL to this executable. Never launch ourselves as the nested
+        // interactive shell: doing so recursively enters raw mode and makes
+        // the parent mistake the child PTY's disabled ECHO for a password prompt.
+        // STREAMNOTE_SHELL is the explicit override; otherwise use $SHELL only
+        // when it does not resolve to this executable.
+        let shell = resolve_shell_program();
         let mut command = CommandBuilder::new(&shell);
 
         // Start the configured interactive shell normally so Debian's shell
@@ -106,7 +115,13 @@ impl ShellSession {
             last_output: None,
             exited: false,
             reader_closed: false,
+            shell_program: shell,
         })
+    }
+
+    /// The executable actually used for the nested interactive shell.
+    pub fn shell_program(&self) -> &Path {
+        &self.shell_program
     }
 
     /// Send one line to the interactive shell's PTY.
@@ -223,6 +238,32 @@ impl ShellSession {
 
 }
 
+
+/// Select a real interactive shell, avoiding recursion when STREENOTE itself
+/// is configured as the user's login shell.
+fn resolve_shell_program() -> PathBuf {
+    let current_exe = env::current_exe()
+        .ok()
+        .and_then(|path| fs::canonicalize(path).ok());
+
+    let configured = env::var_os("STREAMNOTE_SHELL").or_else(|| env::var_os("SHELL"));
+    if let Some(candidate) = configured {
+        let candidate = PathBuf::from(candidate);
+        let resolves_to_self = current_exe.as_ref().is_some_and(|current| {
+            fs::canonicalize(&candidate)
+                .map(|resolved| resolved == *current)
+                .unwrap_or(false)
+        });
+
+        if !resolves_to_self && !candidate.as_os_str().is_empty() {
+            return candidate;
+        }
+    }
+
+    // Debian and Ubuntu provide /bin/bash. This fallback is intentionally
+    // independent of $SHELL, which may identify STREENOTE as the login shell.
+    PathBuf::from("/bin/bash")
+}
 
 /// Put a newly-created PTY into normal interactive echo mode before the
 /// child shell starts. The shell can still disable ECHO later for password
