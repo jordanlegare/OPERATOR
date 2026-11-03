@@ -94,14 +94,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut app = App::new(journal, startup_message);
     match shell.as_ref() {
-        Some(_) => app.record_system(format!(
-            "Connected to Debian shell ({}) · commands and combined stdout/stderr are journaled.",
-            std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+        Some(session) => app.record_system(format!(
+            "Connected to interactive shell ({}) · commands and combined stdout/stderr are journaled.",
+            session.shell_program().display()
         )),
         None => {
             app.set_mode(InputMode::Notes);
             app.record_system(
-                "Shell unavailable. Notes mode is active; install /bin/bash or set $SHELL.".to_string(),
+                "Shell unavailable. Notes mode is active; install /bin/bash or set STREAMNOTE_SHELL.".to_string(),
             );
         }
     }
