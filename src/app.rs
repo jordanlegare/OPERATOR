@@ -608,6 +608,74 @@ impl App {
             self.replace_input("/search ".to_string());
         }
     }
+
+    /// Complete the token at the input cursor using the embedded Bash shell.
+    pub fn tab_complete(&mut self, shell: Option<&ShellSession>) {
+        if self.secret_input {
+            return;
+        }
+
+        if self.input_mode == InputMode::Notes {
+            self.input.insert_str(self.cursor, "    ");
+            self.cursor += 4;
+            self.history_position = None;
+            return;
+        }
+
+        let Some(shell) = shell else {
+            self.status = "Shell completion is unavailable because no shell session is running.".to_string();
+            return;
+        };
+
+        let candidates = match shell.complete_candidates(&self.input, self.cursor) {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                self.status = format!("Tab completion failed: {error}");
+                return;
+            }
+        };
+
+        if candidates.is_empty() {
+            self.status = "No completion matches.".to_string();
+            return;
+        }
+
+        let before_cursor = &self.input[..self.cursor];
+        let token_start = before_cursor
+            .char_indices()
+            .rev()
+            .find(|(_, ch)| ch.is_whitespace())
+            .map(|(index, ch)| index + ch.len_utf8())
+            .unwrap_or(0);
+        let prefix = self.input[token_start..self.cursor].to_string();
+        let common = completion_common_prefix(&candidates);
+
+        if common.len() > prefix.len() && common.starts_with(&prefix) {
+            let replacement = escape_shell_completion(&common);
+            self.input.replace_range(token_start..self.cursor, &replacement);
+            self.cursor = token_start + replacement.len();
+        }
+
+        if candidates.len() == 1 {
+            let candidate = &candidates[0];
+            if !candidate.ends_with('/') && self.input[self.cursor..].chars().next().is_none_or(char::is_whitespace) {
+                self.input.insert(self.cursor, ' ');
+                self.cursor += 1;
+            }
+            self.status = format!("Completed: {candidate}");
+        } else {
+            let preview = candidates.iter().take(8).cloned().collect::<Vec<_>>().join("  ");
+            let remaining = candidates.len().saturating_sub(8);
+            self.status = if remaining > 0 {
+                format!("{} matches: {preview}  … and {remaining} more", candidates.len())
+            } else {
+                format!("{} matches: {preview}", candidates.len())
+            };
+        }
+
+        self.input_hscroll = 0;
+        self.history_position = None;
+    }
 }
 
 fn default_export_path(journal_path: &PathBuf) -> PathBuf {
@@ -761,4 +829,36 @@ mod tests {
         assert!(!looks_like_secret_prompt("Welcome to Debian"));
         assert!(!looks_like_secret_prompt("Compiling streamnote"));
     }
+}
+
+
+fn completion_common_prefix(candidates: &[String]) -> String {
+    let Some(first) = candidates.first() else {
+        return String::new();
+    };
+    let mut prefix = first.clone();
+    for candidate in candidates.iter().skip(1) {
+        let common_len = prefix
+            .char_indices()
+            .zip(candidate.char_indices())
+            .take_while(|((_, left), (_, right))| left == right)
+            .map(|((index, ch), _)| index + ch.len_utf8())
+            .last()
+            .unwrap_or(0);
+        prefix.truncate(common_len);
+    }
+    prefix
+}
+
+fn escape_shell_completion(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_whitespace()
+            || matches!(character, '\\' | '\'' | '"' | '$' | '`' | '!' | '*' | '?' | '[' | ']' | '(' | ')' | '{' | '}' | '<' | '>' | ';' | '&' | '|')
+        {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
