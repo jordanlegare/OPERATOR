@@ -402,7 +402,22 @@ mod timestamp_tests {
 
 #[cfg(test)]
 mod terminal_output_filter_tests {
-    use super::should_suppress_terminal_output;
+    use super::{should_suppress_terminal_output, Entry, EntryKind, Journal};
+    use std::{
+        env, fs,
+        path::PathBuf,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    static NEXT_TEST_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_path(label: &str) -> PathBuf {
+        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        env::temp_dir().join(format!(
+            "streamnote-{label}-{}-{id}.jsonl",
+            std::process::id()
+        ))
+    }
 
     #[test]
     fn suppresses_empty_and_whitespace_only_terminal_rows() {
@@ -424,5 +439,51 @@ mod terminal_output_filter_tests {
         assert!(!should_suppress_terminal_output("BACKUPS Desktop Documents"));
         assert!(!should_suppress_terminal_output("jordan@server is connected"));
         assert!(!should_suppress_terminal_output("total 12"));
+    }
+
+    #[test]
+    fn batch_append_does_not_persist_blank_rows_or_shell_prompts() {
+        let path = test_path("batch-filter");
+        let _ = fs::remove_file(&path);
+        let mut journal = Journal::open(path.clone()).expect("open test journal");
+        journal.append_batch(vec![
+            Entry::with_kind(EntryKind::TerminalOutput, String::new()),
+            Entry::with_kind(EntryKind::TerminalOutput, "   ".to_string()),
+            Entry::with_kind(EntryKind::TerminalOutput, "jordan@server:~$ ".to_string()),
+            Entry::with_kind(EntryKind::TerminalOutput, "useful output".to_string()),
+        ]).expect("append filtered output");
+
+        assert_eq!(journal.entries.len(), 1);
+        assert_eq!(journal.entries[0].text, "useful output");
+        drop(journal);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn loading_legacy_journal_hides_old_blank_rows_and_prompts() {
+        let path = test_path("legacy-filter");
+        let _ = fs::remove_file(&path);
+        let rows = vec![
+            Entry::with_kind(EntryKind::TerminalOutput, String::new()),
+            Entry::with_kind(EntryKind::TerminalOutput, "jordan@server:~/Desktop$ ".to_string()),
+            Entry::with_kind(EntryKind::TerminalOutput, "cyberpunk.pdf  suitcase".to_string()),
+        ];
+        let contents = rows.iter()
+            .map(|entry| serde_json::to_string(entry).expect("serialize entry"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&path, &contents).expect("write legacy journal");
+
+        let journal = Journal::open(path.clone()).expect("open legacy journal");
+        assert_eq!(journal.entries.len(), 1);
+        assert_eq!(journal.entries[0].text, "cyberpunk.pdf  suitcase");
+        drop(journal);
+
+        // Filtering is a display/load behavior; the original journal is left intact.
+        assert_eq!(
+            fs::read_to_string(&path).expect("read original journal"),
+            contents
+        );
+        let _ = fs::remove_file(path);
     }
 }
