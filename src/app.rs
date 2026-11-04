@@ -6,6 +6,7 @@ use std::{
 use crate::{
     shell::ShellSession,
     storage::{sanitize_single_line, Entry, EntryKind, Journal},
+    theme::THEMES,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +47,8 @@ pub struct App {
     pub history: Vec<String>,
     history_position: Option<usize>,
     pub input_mode: InputMode,
+    /// Currently selected built-in color palette (1 through 9).
+    pub theme_index: usize,
     /// True while the PTY has disabled echo (typically a password prompt).
     pub secret_input: bool,
     /// A recent explicit password/passphrase prompt, used together with
@@ -81,6 +84,7 @@ impl App {
             history,
             history_position: None,
             input_mode: InputMode::Terminal,
+            theme_index: 1,
             secret_input: false,
             secret_prompt_deadline: None,
             status,
@@ -601,6 +605,14 @@ impl App {
         self.input = value;
         self.cursor = self.input.len();
         self.input_hscroll = 0;
+    }
+
+    /// Select a built-in high-contrast palette using its 1-based shortcut number.
+    pub fn set_theme(&mut self, number: usize) {
+        if let Some(theme) = number.checked_sub(1).and_then(|index| THEMES.get(index)) {
+            self.theme_index = number;
+            self.status = format!("Color theme {number}/9 selected: {}.", theme.name);
+        }
     }
 
     pub fn focus_search_hint(&mut self) {
