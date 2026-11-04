@@ -195,7 +195,11 @@ impl App {
         let last_visible = top
             .saturating_add(viewport_height.saturating_sub(1))
             .min(entry_count - 1);
-        self.selected_row = Some(row.max(top).min(last_visible));
+        let visible_row = row.max(top).min(last_visible);
+        self.selected_row = Some(visible_row);
+        if visible_row != row {
+            self.status = format!("Row {}/{} selected.", visible_row + 1, entry_count);
+        }
     }
 
     pub fn scroll_up(&mut self, amount: usize) {
