@@ -215,9 +215,8 @@ fn run_terminal_workspace(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     out.flush()?;
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         loop {
-            let (raw, lines) = session.drain_passthrough();
+            let raw = session.drain_raw_output();
             if !raw.is_empty() { out.write_all(&raw)?; out.flush()?; }
-            if !lines.is_empty() { app.capture_terminal_output(lines); }
             if let Some(code) = session.check_exit()? { app.record_system(format!("Workspace shell exited with status {code}.")); break; }
             if !event::poll(Duration::from_millis(12))? { continue; }
             match event::read()? {
