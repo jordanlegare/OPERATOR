@@ -61,6 +61,27 @@ The default input mode is **TERMINAL**.
 - `$SHELL` set to a valid interactive shell, or `/bin/bash` available.
 - For SSH login-shell integration, `/bin/bash` must be available and the configured external SFTP server path must match sshd's `Subsystem sftp` setting.
 
+## Persistent settings
+
+STREENOTE stores visual and SSH-transfer preferences together in:
+
+```text
+~/.config/streenote/config.json
+```
+
+Example:
+
+```json
+{
+  "scp_sftp_passthrough": true,
+  "theme_index": 6,
+  "wrap_transcript": true,
+  "show_banner": false
+}
+```
+
+The theme index ranges from 1 to 9 (F2 through F10). Theme changes, Ctrl+W word-wrap changes, F12 banner changes, and `/scp on|off` changes are saved immediately. Existing configuration files containing only `scp_sftp_passthrough` remain compatible; the other settings receive their default values when absent.
+
 ## Build and run
 
 ```bash
