@@ -145,7 +145,7 @@ impl ShellSession {
             .or_else(|| env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("?"));
         let home = env::var_os("HOME").map(PathBuf::from);
-        format_shell_prompt(&user, &hostname, &cwd, home.as_deref().map(PathBuf::as_path))
+        format_shell_prompt(&user, &hostname, &cwd, home.as_deref())
     }
 
     /// Ask Bash for command and filesystem completions in the live shell's cwd.
