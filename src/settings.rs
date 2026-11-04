@@ -20,6 +20,9 @@ pub struct Settings {
     /// Whether the ASCII banner is shown at startup.
     #[serde(default = "default_show_banner")]
     pub show_banner: bool,
+    /// Whether the Canadian maple-leaf watermark is shown behind the transcript.
+    #[serde(default = "default_show_canada_watermark")]
+    pub show_canada_watermark: bool,
 }
 
 impl Default for Settings {
@@ -29,6 +32,7 @@ impl Default for Settings {
             theme_index: default_theme_index(),
             wrap_transcript: false,
             show_banner: true,
+            show_canada_watermark: true,
         }
     }
 }
@@ -89,6 +93,10 @@ fn default_show_banner() -> bool {
     true
 }
 
+fn default_show_canada_watermark() -> bool {
+    true
+}
+
 fn config_path() -> PathBuf {
     let config_root = env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -123,6 +131,7 @@ mod tests {
         assert_eq!(settings.theme_index, 1);
         assert!(!settings.wrap_transcript);
         assert!(settings.show_banner);
+        assert!(settings.show_canada_watermark);
     }
 
     #[test]
@@ -132,12 +141,14 @@ mod tests {
                 "scp_sftp_passthrough": true,
                 "theme_index": 6,
                 "wrap_transcript": true,
-                "show_banner": false
+                "show_banner": false,
+                "show_canada_watermark": false
             }"#
         ).expect("deserialize preferences");
         assert!(settings.scp_sftp_passthrough);
         assert_eq!(settings.theme_index, 6);
         assert!(settings.wrap_transcript);
         assert!(!settings.show_banner);
+        assert!(!settings.show_canada_watermark);
     }
 }
