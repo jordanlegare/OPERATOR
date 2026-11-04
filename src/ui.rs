@@ -1,6 +1,7 @@
 use ratatui::{
+    buffer::CellDiffOption,
     layout::{Constraint, Direction, Layout, Position, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
@@ -158,6 +159,89 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
         );
     } else {
         frame.render_widget(paragraph.scroll((0, app.feed_hscroll)), inner);
+    }
+
+    // Paint the watermark only into unused cells, so transcript text, selections,
+    // and wide-character continuation cells always remain untouched.
+    draw_maple_watermark(frame, inner, theme);
+}
+
+fn draw_maple_watermark(frame: &mut Frame, area: Rect, theme: Theme) {
+    const MAPLE_LEAF: [&str; 21] = [
+        "                                  /\\                                  ",
+        "                                 /  \\                                 ",
+        "                     /\\          /    \\          /\\                     ",
+        "                    /  \\        /      \\        /  \\                    ",
+        "              /\\   /    \\_______/        \\_______/    \\   /\\              ",
+        "             /  \\_/                                  \\_/  \\             ",
+        "            /                                            \\            ",
+        "       ____/                                              \\____       ",
+        "       \\                                                      /       ",
+        "        \\           /\\                    /\\                 /        ",
+        "         \\         /  \\                  /  \\               /         ",
+        "          \\_______/    \\________________/    \\______________/          ",
+        "                       \\                /                              ",
+        "                        \\              /                               ",
+        "                         \\            /                                ",
+        "                          \\          /                                 ",
+        "                           \\        /                                  ",
+        "                            \\      /                                   ",
+        "                             \\    /                                    ",
+        "                              \\  /                                     ",
+        "                               \\/                                      ",
+    ];
+
+    if area.width < 24 || area.height < 8 {
+        return;
+    }
+
+    // Keep the watermark centered and within 80% of the transcript viewport.
+    let target_width = (area.width.saturating_mul(4) / 5).max(1);
+    let target_height = (area.height.saturating_mul(4) / 5).max(1);
+    let left = area.x + (area.width - target_width) / 2;
+    let top = area.y + (area.height - target_height) / 2;
+    let source_width = MAPLE_LEAF.iter().map(|line| line.len()).max().unwrap_or(1);
+    let watermark_color = watermark_tint(theme.panel, theme.border);
+    let buffer = frame.buffer_mut();
+
+    for y in 0..target_height {
+        let source_y = (y as usize * MAPLE_LEAF.len() / target_height as usize)
+            .min(MAPLE_LEAF.len() - 1);
+        let source_line = MAPLE_LEAF[source_y].as_bytes();
+
+        for x in 0..target_width {
+            let source_x = (x as usize * source_width / target_width as usize)
+                .min(source_width - 1);
+            let Some(&byte) = source_line.get(source_x) else {
+                continue;
+            };
+            if byte == b' ' {
+                continue;
+            }
+
+            let position = (left + x, top + y);
+            if let Some(cell) = buffer.cell_mut(position) {
+                if cell.symbol() == " "
+                    && cell.diff_option != CellDiffOption::Skip
+                    && cell.bg != theme.selected_row
+                    && cell.bg != theme.search_bg
+                {
+                    cell.set_char(byte as char).set_fg(watermark_color);
+                }
+            }
+        }
+    }
+}
+
+/// Blend the border color toward the panel color to keep the watermark subtle.
+fn watermark_tint(panel: Color, border: Color) -> Color {
+    match (panel, border) {
+        (Color::Rgb(pr, pg, pb), Color::Rgb(br, bg, bb)) => Color::Rgb(
+            ((u16::from(pr) * 70 + u16::from(br) * 30) / 100) as u8,
+            ((u16::from(pg) * 70 + u16::from(bg) * 30) / 100) as u8,
+            ((u16::from(pb) * 70 + u16::from(bb) * 30) / 100) as u8,
+        ),
+        (_, border) => border,
     }
 }
 
