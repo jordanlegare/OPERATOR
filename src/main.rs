@@ -151,7 +151,14 @@ fn run(
                     || (key.kind == KeyEventKind::Repeat
                         && matches!(key.code, KeyCode::Up | KeyCode::Down)) =>
             {
-                if handle_key(key.code, key.modifiers, app, shell)? {
+                if key.kind == KeyEventKind::Press && key.code == KeyCode::F(1) {
+                    if let Some(session) = shell.as_mut() {
+                        run_terminal_workspace(terminal, app, session)?;
+                        terminal.clear()?;
+                    } else {
+                        app.status = "Interactive shell is unavailable.".to_string();
+                    }
+                } else if handle_key(key.code, key.modifiers, app, shell)? {
                     break;
                 }
             }
@@ -186,6 +193,62 @@ fn run(
     Ok(())
 }
 
+/// Temporarily hand the real terminal to the shell PTY for full-screen programs.
+/// F1 returns to the StreeNote transcript workspace.
+fn run_terminal_workspace(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App, session: &mut ShellSession) -> Result<(), Box<dyn std::error::Error>> {
+    let mut out = stdout();
+    let size = terminal.size()?;
+    session.resize(size.width, size.height)?;
+    session.set_echo(true)?;
+    execute!(out, LeaveAlternateScreen, DisableMouseCapture, crossterm::cursor::Show)?;
+    out.flush()?;
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        loop {
+            let (raw, lines) = session.drain_passthrough();
+            if !raw.is_empty() { out.write_all(&raw)?; out.flush()?; }
+            if !lines.is_empty() { app.capture_terminal_output(lines); }
+            if let Some(code) = session.check_exit()? { app.record_system(format!("Interactive shell exited with status {code}.")); break; }
+            if !event::poll(Duration::from_millis(12))? { continue; }
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat => {
+                    if key.kind == KeyEventKind::Press && key.code == KeyCode::F(1) { break; }
+                    let bytes = encode_terminal_key(key.code, key.modifiers);
+                    if !bytes.is_empty() { session.send_bytes(&bytes)?; }
+                }
+                Event::Paste(text) => session.send_bytes(text.as_bytes())?,
+                Event::Resize(cols, rows) => session.resize(cols, rows)?,
+                _ => {}
+            }
+        }
+        Ok(())
+    })();
+    let echo_result = session.set_echo(false);
+    execute!(out, EnterAlternateScreen, EnableMouseCapture, crossterm::cursor::Hide)?;
+    terminal.clear()?;
+    if let Err(error) = echo_result { return Err(Box::new(error)); }
+    result
+}
+
+fn encode_terminal_key(code: KeyCode, modifiers: KeyModifiers) -> Vec<u8> {
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        if let KeyCode::Char(ch) = code {
+            let upper = ch.to_ascii_uppercase();
+            if upper.is_ascii_uppercase() { return vec![upper as u8 - b'@']; }
+            if ch == ' ' { return vec![0]; }
+        }
+    }
+    let seq: &[u8] = match code {
+        KeyCode::Enter => b"\r", KeyCode::Tab => b"\t", KeyCode::Backspace => b"\x7f", KeyCode::Esc => b"\x1b",
+        KeyCode::Up => b"\x1b[A", KeyCode::Down => b"\x1b[B", KeyCode::Right => b"\x1b[C", KeyCode::Left => b"\x1b[D",
+        KeyCode::Home => b"\x1b[H", KeyCode::End => b"\x1b[F", KeyCode::PageUp => b"\x1b[5~", KeyCode::PageDown => b"\x1b[6~",
+        KeyCode::Delete => b"\x1b[3~", KeyCode::Insert => b"\x1b[2~", KeyCode::F(2) => b"\x1bOQ", KeyCode::F(3) => b"\x1bOR",
+        KeyCode::F(4) => b"\x1bOS", KeyCode::F(5) => b"\x1b[15~", KeyCode::F(6) => b"\x1b[17~", KeyCode::F(7) => b"\x1b[18~",
+        KeyCode::F(8) => b"\x1b[19~", KeyCode::F(9) => b"\x1b[20~", KeyCode::F(10) => b"\x1b[21~", KeyCode::F(11) => b"\x1b[23~", KeyCode::F(12) => b"\x1b[24~",
+        KeyCode::Char(ch) => { let mut bytes = Vec::new(); if modifiers.contains(KeyModifiers::ALT) { bytes.push(0x1b); } let mut buf = [0;4]; bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes()); return bytes; },
+        _ => b"",
+    };
+    seq.to_vec()
+}
 /// Returns true when the application should exit.
 fn handle_key(
     code: KeyCode,
@@ -250,14 +313,6 @@ fn handle_key(
         return Ok(false);
     }
 
-    if app.show_help {
-        match code {
-            KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('q') => app.show_help = false,
-            _ => {}
-        }
-        return Ok(false);
-    }
-
     match code {
         KeyCode::Esc => {
             if !app.input.is_empty() {
@@ -269,7 +324,6 @@ fn handle_key(
                 app.show_help = false;
             }
         }
-        KeyCode::F(1) => app.show_help = true,
         KeyCode::F(12) => {
             app.show_banner = !app.show_banner;
             app.status = if app.show_banner {
