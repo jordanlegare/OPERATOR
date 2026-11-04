@@ -70,7 +70,7 @@ By default, the journal is stored at:
 
 ## Color themes
 
-Switch palettes at any time with **Alt+1** through **Alt+9**. On keyboard layouts where AltGr is reported as Ctrl+Alt, the matching number-row symbols are also recognized. The selected palette number and name appear in the status line.
+Switch palettes at any time with **Alt+1** through **Alt+9**. On keyboard layouts where AltGr is reported as Ctrl+Alt, the matching number-row symbols are also recognized. Legacy terminal encodings for keys 3 and 8 are handled when Crossterm reports them as Alt+Escape and Alt+Backspace. The selected palette number and name appear in the status line.
 
 | Shortcut | High-contrast palette |
 |---|---|
