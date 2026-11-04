@@ -186,9 +186,7 @@ fn handle_key(
         return Ok(false);
     }
 
-    // Prefer unambiguous modified-key events when the terminal supports the
-    // Kitty keyboard protocol; the parser below retains legacy/AltGr fallbacks.
-    // Alt+1 through Alt+9 selects the built-in color themes.
+    // Unmodified F2-F10 select the nine built-in color themes.
     if let Some(number) = theme_number_from_key(code, modifiers) {
         app.set_theme(number);
         return Ok(false);
@@ -311,67 +309,16 @@ fn default_journal_path() -> PathBuf {
 }
 
 
-/// Map Alt+1..Alt+9 to their 1-based theme indexes.
-///
-/// On some terminal/layout combinations Ctrl+Alt number-row presses arrive
-/// as control-key aliases instead of the AltGr character. Handle both the
-/// produced Canadian-French symbols and common control-byte translations.
+/// Map the unmodified F2-F10 keys to the 1-based theme indexes.
 fn theme_number_from_key(code: KeyCode, modifiers: KeyModifiers) -> Option<usize> {
-    let alt = modifiers.contains(KeyModifiers::ALT);
-    let control = modifiers.contains(KeyModifiers::CONTROL);
-
-    // Normal Alt-number events and layout-produced characters.
-    if alt {
-        match code {
-            KeyCode::Char('1' | '!' | '±') => return Some(1),
-            KeyCode::Char('2' | '@' | '"') => return Some(2),
-            KeyCode::Char('3' | '#' | '/' | '£') => return Some(3),
-            // Reliable fallback: bare ESC from the current Ctrl+Alt+3 cannot be distinguished from Escape.
-            KeyCode::F(3) => return Some(3),
-            KeyCode::Char('4' | '$' | '¢') => return Some(4),
-            KeyCode::Char('5' | '%' | '¤') => return Some(5),
-            KeyCode::Char('6' | '^' | '?' | '¬') => return Some(6),
-            KeyCode::Char('7' | '&' | '¦' | '¡') => return Some(7),
-            KeyCode::Char('8' | '*' | '²') => return Some(8),
-            KeyCode::Char('9' | '(' | '³') => return Some(9),
-            _ => {}
-        }
+    if modifiers != KeyModifiers::NONE {
+        return None;
     }
 
-    // In legacy terminal encoding, ESC prefixes an Alt key. Thus Ctrl+Alt+3
-    // may be decoded by Crossterm as Alt+Escape, and Ctrl+Alt+8 as
-    // Alt+Backspace (the Ctrl bit is lost by the legacy byte encoding).
-    // Match the decoded Alt events, not an assumed CONTROL|ALT modifier pair.
-    // Alt+Space is the common legacy form for Ctrl+Alt+2.
-    if alt {
-        match code {
-            KeyCode::Char(' ') => return Some(2),
-            KeyCode::Esc => return Some(3),
-            KeyCode::Backspace => return Some(8),
-            _ => {}
-        }
+    match code {
+        KeyCode::F(key @ 2..=10) => Some((key - 1) as usize),
+        _ => None,
     }
-
-    // Some backends keep Ctrl+H as a character event rather than Backspace.
-    if alt && control {
-        if let KeyCode::Char('h' | 'H') = code {
-            return Some(8);
-        }
-    }
-
-    // Some Windows/terminal backends keep the AltGr-produced character but
-    // drop the ALT bit, leaving only CONTROL. Limit this fallback to the
-    // three affected layout-specific characters.
-    if control && !alt {
-        match code {
-            KeyCode::Char('@') => return Some(2),
-            KeyCode::Char('£') => return Some(3),
-            KeyCode::Char('²') => return Some(8),
-            _ => {}
-        }
-    }
-
-    None
 }
 
 #[cfg(test)]
@@ -380,104 +327,55 @@ mod theme_shortcut_tests {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     #[test]
-    fn recognizes_alt_number_keys() {
+    fn maps_f2_through_f10_to_the_nine_themes() {
+        for function_key in 2..=10 {
+            assert_eq!(
+                theme_number_from_key(KeyCode::F(function_key), KeyModifiers::NONE),
+                Some((function_key - 1) as usize)
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_modified_function_keys() {
+        for function_key in 2..=10 {
+            assert_eq!(
+                theme_number_from_key(KeyCode::F(function_key), KeyModifiers::ALT),
+                None
+            );
+            assert_eq!(
+                theme_number_from_key(KeyCode::F(function_key), KeyModifiers::CONTROL),
+                None
+            );
+            assert_eq!(
+                theme_number_from_key(KeyCode::F(function_key), KeyModifiers::SHIFT),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn leaves_help_diagnostic_and_other_function_keys_unmapped() {
+        for function_key in [1, 11, 12] {
+            assert_eq!(
+                theme_number_from_key(KeyCode::F(function_key), KeyModifiers::NONE),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_number_row_shortcuts() {
         for number in 1..=9 {
             let digit = char::from_digit(number, 10).unwrap();
             assert_eq!(
                 theme_number_from_key(KeyCode::Char(digit), KeyModifiers::ALT),
-                Some(number as usize)
+                None
             );
-        }
-    }
-
-    #[test]
-    fn recognizes_ctrl_alt_digit_events_used_by_altgr() {
-        let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
-        for number in 1..=9 {
-            let digit = char::from_digit(number, 10).unwrap();
             assert_eq!(
-                theme_number_from_key(KeyCode::Char(digit), altgr),
-                Some(number as usize)
+                theme_number_from_key(KeyCode::Char(digit), KeyModifiers::NONE),
+                None
             );
         }
-    }
-
-    #[test]
-    fn recognizes_alt_f3_fallback_for_theme_three() {
-        assert_eq!(theme_number_from_key(KeyCode::F(3), KeyModifiers::ALT), Some(3));
-    }
-
-    #[test]
-    fn recognizes_us_shifted_number_symbols() {
-        let cases = [
-            ('!', 1), ('@', 2), ('#', 3), ('$', 4), ('%', 5),
-            ('^', 6), ('&', 7), ('*', 8), ('(', 9),
-        ];
-        for (character, expected) in cases {
-            assert_eq!(
-                theme_number_from_key(KeyCode::Char(character), KeyModifiers::ALT),
-                Some(expected)
-            );
-        }
-    }
-
-    #[test]
-    fn recognizes_legacy_alt_escape_and_backspace_aliases() {
-        // Crossterm decodes ESC+ESC as Alt+Escape and ESC+DEL as
-        // Alt+Backspace; the original Ctrl modifier is not retained.
-        assert_eq!(theme_number_from_key(KeyCode::Char(' '), KeyModifiers::ALT), Some(2));
-        assert_eq!(theme_number_from_key(KeyCode::Esc, KeyModifiers::ALT), Some(3));
-        assert_eq!(theme_number_from_key(KeyCode::Backspace, KeyModifiers::ALT), Some(8));
-    }
-
-    #[test]
-    fn recognizes_control_alt_aliases_when_modifiers_are_preserved() {
-        let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
-        assert_eq!(theme_number_from_key(KeyCode::Char(' '), altgr), Some(2));
-        assert_eq!(theme_number_from_key(KeyCode::Esc, altgr), Some(3));
-        assert_eq!(theme_number_from_key(KeyCode::Char('h'), altgr), Some(8));
-        assert_eq!(theme_number_from_key(KeyCode::Backspace, altgr), Some(8));
-    }
-
-    #[test]
-    fn recognizes_altgr_symbols_when_backend_drops_alt_modifier() {
-        assert_eq!(
-            theme_number_from_key(KeyCode::Char('@'), KeyModifiers::CONTROL),
-            Some(2)
-        );
-        assert_eq!(
-            theme_number_from_key(KeyCode::Char('£'), KeyModifiers::CONTROL),
-            Some(3)
-        );
-        assert_eq!(
-            theme_number_from_key(KeyCode::Char('²'), KeyModifiers::CONTROL),
-            Some(8)
-        );
-    }
-
-    #[test]
-    fn recognizes_quebec_french_altgr_number_row_symbols() {
-        // AltGr is commonly surfaced as CONTROL | ALT by terminal backends.
-        let cases = [
-            ('±', 1), ('@', 2), ('£', 3), ('¢', 4), ('¤', 5),
-            ('¬', 6), ('¦', 7), ('²', 8), ('³', 9),
-        ];
-        let altgr = KeyModifiers::ALT | KeyModifiers::CONTROL;
-        for (character, expected) in cases {
-            assert_eq!(
-                theme_number_from_key(KeyCode::Char(character), altgr),
-                Some(expected)
-            );
-        }
-    }
-
-    #[test]
-    fn ignores_keys_without_alt_modifier() {
-        assert_eq!(theme_number_from_key(KeyCode::Char('1'), KeyModifiers::NONE), None);
-        assert_eq!(theme_number_from_key(KeyCode::Char('1'), KeyModifiers::SHIFT), None);
-        assert_eq!(theme_number_from_key(KeyCode::Char('1'), KeyModifiers::CONTROL), None);
-        assert_eq!(theme_number_from_key(KeyCode::Char('0'), KeyModifiers::ALT), None);
-        assert_eq!(theme_number_from_key(KeyCode::Char('q'), KeyModifiers::ALT), None);
-        assert_eq!(theme_number_from_key(KeyCode::Enter, KeyModifiers::ALT), None);
     }
 }
