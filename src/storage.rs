@@ -232,6 +232,9 @@ impl Journal {
 /// Return true for PTY rows that are presentation noise rather than useful output:
 /// blank lines and the standard user@host:path$ / user@host:path# shell prompt.
 /// The prompt is already shown in StreamNote's live input footer.
+/// Return true for PTY rows that are presentation noise rather than useful output:
+/// blank lines and the standard user@host:path$ / user@host:path# shell prompt.
+/// The prompt is already shown in StreamNote's live input footer.
 pub fn should_suppress_terminal_output(line: &str) -> bool {
     let line = line.trim();
     if line.is_empty() {
@@ -245,77 +248,7 @@ pub fn should_suppress_terminal_output(line: &str) -> bool {
         return false;
     };
     let path = path_prompt
-        .strip_suffix('
-    match kind {
-        EntryKind::Note => "NOTE",
-        EntryKind::TerminalCommand => "CMD",
-        EntryKind::TerminalOutput => "OUT",
-        EntryKind::System => "SYS",
-    }
-}
-
-/// Format a journal timestamp in the current local timezone, retaining its UTC offset.
-pub fn format_timestamp(timestamp: &str) -> String {
-    DateTime::parse_from_rfc3339(timestamp)
-        .map(|time| {
-            time.with_timezone(&Local)
-                .format("%Y-%m-%d %H:%M:%S %:z")
-                .to_string()
-        })
-        .unwrap_or_else(|_| timestamp.to_string())
-}
-
-/// Plain-text equivalent of a rendered transcript row, used by mouse selection and copy.
-pub fn entry_transcript_text(entry: &Entry, index: usize) -> String {
-    format!(
-        "{:>6} {} {:<4} │ {}",
-        index + 1,
-        format_timestamp(&entry.timestamp),
-        entry_kind_label(entry.kind),
-        entry.text
-    )
-}
-
-fn append_jsonl(path: &Path, entry: &Entry) -> io::Result<()> {
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    let mut bytes = serde_json::to_vec(entry).map_err(io::Error::other)?;
-    bytes.push(b'\n');
-    file.write_all(&bytes)?;
-    file.flush()?;
-    file.sync_data()
-}
-
-pub fn sanitize_single_line(input: &str) -> String {
-    input
-        .chars()
-        .filter_map(|ch| match ch {
-            '\n' | '\r' | '\t' => Some(' '),
-            c if c.is_control() => None,
-            c => Some(c),
-        })
-        .collect()
-}
-
-
-#[cfg(test)]
-mod timestamp_tests {
-    use super::format_timestamp;
-
-    #[test]
-    fn timestamp_display_includes_date_time_and_offset() {
-        let formatted = format_timestamp("2026-11-03T22:44:00-05:00");
-        assert!(formatted.contains("2026"));
-        assert!(formatted.contains(':'));
-        assert!(formatted.len() >= 25);
-    }
-
-    #[test]
-    fn malformed_legacy_timestamp_is_preserved_in_full() {
-        let timestamp = "legacy-timestamp-value";
-        assert_eq!(format_timestamp(timestamp), timestamp);
-    }
-}
-)
+        .strip_suffix('$')
         .or_else(|| path_prompt.strip_suffix('#'));
     let Some(path) = path.map(str::trim) else {
         return false;
@@ -327,7 +260,6 @@ mod timestamp_tests {
         && !host.chars().any(char::is_whitespace)
         && (path == "~" || path.starts_with("~/") || path.starts_with('/'))
 }
-
 pub fn entry_kind_label(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::Note => "NOTE",
