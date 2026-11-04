@@ -16,7 +16,7 @@ StreamNote starts the configured interactive shell (`$SHELL`, falling back to `/
 - The shell is launched at startup using the user's normal interactive shell configuration.
 - PTY dimensions follow the terminal window size.
 
-The shell remains a command-oriented transcript interface. It supports normal command lines, shell built-ins, line-oriented prompts, password/passphrase prompts (recognized secret input is masked and never journaled), and Ctrl+C interruption. It does **not** hand the full screen to nested terminal UI programs such as `vim`, `top`, `less`, or `htop`; those programs require a separate raw-screen passthrough/terminal-emulator mode. ANSI screen-control sequences are intentionally not replayed into the log.
+Press F1 to hand the real terminal directly to the embedded shell PTY. Full-screen programs such as `vim`, `nano`, `less`, `top`, and `htop` then use the terminal emulator normally; press F1 again to return to the transcript. PTY output is also parsed into readable journal rows while the raw ANSI stream is displayed live.
 
 ## Modes
 
@@ -44,7 +44,7 @@ The default input mode is **TERMINAL**.
 - JSON Lines persistence; non-secret commands, notes, useful terminal output records, and system events are appended to the journal. Empty terminal-output rows and standard shell-prompt rows are filtered both when loading older journals and when appending new output; existing journal files are not rewritten.
 - `/search <terms>` searches all cached notes, commands, and terminal output case-insensitively and jumps to the latest match with surrounding context.
 - `n` / `N` navigate search hits.
-- Command/input history, Bash-powered Tab completion for commands and filesystem paths, nine high-contrast color palettes, help overlay, export, stats, path display, and save/retry.
+- Command/input history, Bash-powered Tab completion for commands and filesystem paths, nine high-contrast color palettes, export, stats, path display, and save/retry.
 - Older journal entries without a `kind` field remain compatible and load as `note` entries.
 
 ## Requirements
@@ -89,7 +89,7 @@ Switch palettes directly with the unmodified **F2** through **F10** keys. Each k
 | `F9` | 8 | Arctic Blue |
 | `F10` | 9 | Monochrome Max |
 
-The palettes are built into StreamNote and require no external theme package or configuration download. F1 opens help; F12 shows or hides the ASCII-art banner.
+The palettes are built into StreamNote and require no external theme package or configuration download. F1 enters the full-screen interactive terminal workspace; press F1 again to return. F12 shows or hides the ASCII-art banner.
 
 ## Commands
 
@@ -108,7 +108,7 @@ The palettes are built into StreamNote and require no external theme package or 
 | `/stats` | Show entry count, cached text bytes, pending writes, and hit count |
 | `/path` | Show the journal file path |
 | `/mode [shell|notes]` | Switch mode; no argument toggles |
-| `/help` or F1 | Open help |
+| `F1` | Enter/exit the full-screen interactive terminal workspace |
 | `F12` | Show or hide the ASCII-art banner |
 | `/quit` or `/q` | Save pending records and quit |
 | `//text` | Store text beginning with `/` literally as a note |
