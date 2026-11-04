@@ -423,7 +423,7 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         Line::from(""),
         Line::from(vec![Span::styled("KEYS", Style::default().fg(theme.success).add_modifier(Modifier::BOLD))]),
         Line::from("↑/↓ select rows and load CMD entries into input · PgUp/PgDn page · Home/End select first/last row"),
-        Line::from("Click a transcript row to select it and load its text into the input; drag to select text across rows."),
+        Line::from("Click a CMD row to load its command into input; drag to select text across any rows."),
         Line::from("Ctrl+C copies a transcript selection through OSC 52; without a selection it keeps its normal behavior."),
         Line::from("Each transcript row displays the full local date, time, seconds and UTC offset."),
         Line::from("Tab completes shell commands and paths · four spaces in Notes mode"),
