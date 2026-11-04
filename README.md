@@ -34,7 +34,8 @@ The default input mode is **TERMINAL**.
 - ASCII-art banner and live one-line input footer with draft preview.
 - Unwrapped feed: each record is one row; long records are horizontally clipped, never word-wrapped.
 - Every row displays its full local date and time, including seconds and the UTC offset.
-- Click a transcript row to select it, or left-click and drag to select text across rows.
+- Click a transcript row to select it and load its exact entry text into the editable input line; the cursor moves to the end so you can edit or resubmit it.
+- Left-click and drag to select text across rows without changing the current input draft.
 - Ctrl+C copies a selected transcript range through OSC 52; without a selection it retains its normal shell-interrupt / draft-clear behavior.
 - Arrow keys, Page Up/Down, Home/End, and mouse-wheel scrolling.
 - `Alt+Left` / `Alt+Right` horizontally pan the feed.
@@ -120,7 +121,7 @@ The palettes are built into StreamNote and require no external theme package or 
 | `Home` | Oldest record |
 | `End` / `Ctrl+L` | Follow the latest record |
 | Mouse wheel | Scroll vertically |
-| Left-click a transcript row | Select the complete row |
+| Left-click a transcript row | Select the complete row and load its text into the input line |
 | Left-click + drag | Select text across one or more transcript rows |
 | `Ctrl+C` with a selection | Copy selected transcript text via OSC 52 |
 | `Ctrl+C` without a selection | Send SIGINT to shell (TERMINAL) or clear the draft (NOTES) |
