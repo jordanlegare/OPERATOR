@@ -267,7 +267,6 @@ impl App {
     /// Begin a left-button selection inside the transcript viewport.
     /// A click without a drag selects the entire journal row.
     pub fn begin_transcript_selection(&mut self, x: u16, y: u16) {
-        self.selected_row = None;
         let Some(point) = self.mouse_transcript_point(x, y, false) else {
             self.selection = None;
             self.selection_dragging = false;
@@ -287,6 +286,12 @@ impl App {
             return;
         }
         if let Some(point) = self.mouse_transcript_point(x, y, true) {
+            let is_drag = self
+                .selection
+                .is_some_and(|selection| selection.anchor != point);
+            if is_drag {
+                self.selected_row = None;
+            }
             if let Some(selection) = self.selection.as_mut() {
                 selection.active = point;
                 selection.whole_row = false;
@@ -294,33 +299,48 @@ impl App {
         }
     }
 
-    /// Finish a drag, or promote a stationary click to a whole-row selection.
+    /// A stationary click acts only on CMD rows. Dragging still selects
+    /// arbitrary transcript text across notes, commands, and output.
     pub fn end_transcript_selection(&mut self, x: u16, y: u16) {
         if !self.selection_dragging {
             return;
         }
         self.drag_transcript_selection(x, y);
         self.selection_dragging = false;
-        let selected_row = if let Some(selection) = self.selection.as_mut() {
-            selection.whole_row = selection.anchor == selection.active;
-            selection.whole_row.then_some(selection.anchor.row)
-        } else {
-            None
-        };
+        let clicked_row = self.selection.and_then(|selection| {
+            (selection.anchor == selection.active).then_some(selection.anchor.row)
+        });
 
-        // A stationary click selects a complete row and recalls its text into
-        // the editable input. Never replace a hidden password/passphrase draft.
-        if let Some(row) = selected_row.filter(|_| !self.secret_input) {
-            if let Some(entry) = self.journal.entries.get(row) {
-                self.input = entry.text.clone();
-                self.cursor = self.input.len();
-                self.input_hscroll = 0;
-                self.history_position = None;
-                self.status = format!(
-                    "Loaded transcript row {} into input. Edit it or press Enter to submit.",
-                    row + 1
-                );
+        if let Some(row) = clicked_row {
+            let command = self
+                .journal
+                .entries
+                .get(row)
+                .filter(|entry| entry.kind == EntryKind::TerminalCommand)
+                .map(|entry| entry.text.clone());
+            if let Some(command) = command {
+                if let Some(selection) = self.selection.as_mut() {
+                    selection.whole_row = true;
+                }
+                self.selected_row = None;
+                // Never replace a hidden password/passphrase draft.
+                if !self.secret_input {
+                    self.input = command;
+                    self.cursor = self.input.len();
+                    self.input_hscroll = 0;
+                    self.history_position = None;
+                    self.status = format!(
+                        "Loaded command from transcript row {}. Edit it or press Enter to submit.",
+                        row + 1
+                    );
+                }
+            } else {
+                // Clicking a note/output/system row is intentionally a no-op.
+                self.selection = None;
             }
+        } else {
+            // A real drag is a text selection, not a keyboard row highlight.
+            self.selected_row = None;
         }
     }
 
