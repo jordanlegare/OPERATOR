@@ -435,6 +435,7 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         Line::from(vec![Span::styled("/save", Style::default().fg(theme.warning)), Span::raw("          Retry pending writes and sync the journal.")]),
         Line::from(vec![Span::styled("/export [FILE]", Style::default().fg(theme.warning)), Span::raw(" Export every journal record as readable text.")]),
         Line::from(vec![Span::styled("/stats · /path", Style::default().fg(theme.warning)), Span::raw("  Show journal statistics or path.")]),
+        Line::from(vec![Span::styled("/scp on|off|status", Style::default().fg(theme.warning)), Span::raw("  Toggle persistent SSH SCP/SFTP file-transfer passthrough.")]),
         Line::from(vec![Span::styled("/quit", Style::default().fg(theme.warning)), Span::raw("          Save pending records and exit.")]),
         Line::from(""),
         Line::from(vec![Span::styled("KEYS", Style::default().fg(theme.success).add_modifier(Modifier::BOLD))]),
