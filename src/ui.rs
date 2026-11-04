@@ -5,11 +5,11 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{App, InputMode},
-    storage::{Entry, EntryKind},
+    storage::{entry_transcript_text, format_timestamp, Entry, EntryKind},
     theme::{Theme, THEMES},
 };
 
@@ -112,6 +112,7 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
         ))
         .style(Style::default().bg(theme.panel));
     let inner = block.inner(area);
+    app.feed_area = inner;
     app.feed_viewport_height = inner.height.max(1) as usize;
     frame.render_widget(block, area);
 
@@ -144,6 +145,9 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
 fn entry_line(entry: &Entry, index: usize, app: &App, theme: Theme) -> Line<'static> {
     let timestamp = format_timestamp(&entry.timestamp);
     let number = format!("{:>6} ", index + 1);
+    let row_text = entry_transcript_text(entry, index);
+    let selected_columns =
+        app.selection_columns_for_row(index, UnicodeWidthStr::width(row_text.as_str()));
     let active = app.is_active_match(index);
     let hit = app.is_match(index);
     let row_style = if active {
@@ -209,17 +213,67 @@ fn entry_line(entry: &Entry, index: usize, app: &App, theme: Theme) -> Line<'sta
         ));
     }
 
-    Line::from(spans)
+    apply_selection(Line::from(spans), selected_columns, theme)
 }
 
-fn format_timestamp(timestamp: &str) -> String {
-    chrono::DateTime::parse_from_rfc3339(timestamp)
-        .map(|time| {
-            time.with_timezone(&chrono::Local)
-                .format("%H:%M:%S")
-                .to_string()
-        })
-        .unwrap_or_else(|_| timestamp.chars().take(8).collect())
+fn apply_selection(
+    line: Line<'static>,
+    selection: Option<(usize, usize)>,
+    theme: Theme,
+) -> Line<'static> {
+    let Some((selection_start, selection_end)) = selection else {
+        return line;
+    };
+
+    let mut result = Vec::new();
+    let mut display_column = 0usize;
+    let mut previous_cell_selected = false;
+
+    for span in line.spans {
+        let base_style = span.style;
+        let mut chunk = String::new();
+        let mut chunk_selected: Option<bool> = None;
+
+        for character in span.content.chars() {
+            let width = UnicodeWidthChar::width(character).unwrap_or(0);
+            let selected = if width == 0 {
+                previous_cell_selected
+            } else {
+                display_column < selection_end
+                    && display_column.saturating_add(width) > selection_start
+            };
+
+            if chunk_selected.is_some_and(|current| current != selected) {
+                let style = if chunk_selected == Some(true) {
+                    base_style.bg(theme.selected_row)
+                } else {
+                    base_style
+                };
+                result.push(Span::styled(std::mem::take(&mut chunk), style));
+                chunk_selected = None;
+            }
+            if chunk_selected.is_none() {
+                chunk_selected = Some(selected);
+            }
+            chunk.push(character);
+
+            if width > 0 {
+                previous_cell_selected = selected;
+                display_column = display_column.saturating_add(width);
+            }
+        }
+
+        if !chunk.is_empty() {
+            let style = if chunk_selected == Some(true) {
+                base_style.bg(theme.selected_row)
+            } else {
+                base_style
+            };
+            result.push(Span::styled(chunk, style));
+        }
+    }
+
+    Line::from(result)
 }
 
 fn draw_draft(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
@@ -340,6 +394,10 @@ fn draw_hints(frame: &mut Frame, area: Rect, theme: Theme) {
         Span::styled("help  ", Style::default().fg(theme.muted)),
         Span::styled("F12 ", Style::default().fg(theme.primary)),
         Span::styled("key test  ", Style::default().fg(theme.muted)),
+        Span::styled("drag ", Style::default().fg(theme.primary)),
+        Span::styled("select  ", Style::default().fg(theme.muted)),
+        Span::styled("Ctrl+C ", Style::default().fg(theme.primary)),
+        Span::styled("copy  ", Style::default().fg(theme.muted)),
         Span::styled("Ctrl+Q ", Style::default().fg(theme.primary)),
         Span::styled("quit", Style::default().fg(theme.muted)),
     ]);
@@ -384,6 +442,9 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         Line::from(""),
         Line::from(vec![Span::styled("KEYS", Style::default().fg(theme.success).add_modifier(Modifier::BOLD))]),
         Line::from("↑/↓ scroll · PgUp/PgDn page · Home oldest · End live tail · mouse wheel scroll"),
+        Line::from("Click a transcript row to select it; drag with the left button to select text across rows."),
+        Line::from("Ctrl+C copies a transcript selection through OSC 52; without a selection it keeps its normal behavior."),
+        Line::from("Each transcript row displays the full local date, time, seconds and UTC offset."),
         Line::from("Tab completes shell commands and paths · four spaces in Notes mode"),
         Line::from(format!("F2–F10 switches high-contrast palettes (F2 = 1, F10 = 9) · active: {}", theme.name)),
         Line::from("Alt+←/→ horizontal pan · Ctrl+P/N command history · Ctrl+S save · Ctrl+T mode"),
