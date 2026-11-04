@@ -268,9 +268,9 @@ impl ShellSession {
             .map_err(|error| io::Error::other(error.to_string()))
     }
 
-    /// Query the PTY's ECHO flag. A false value commonly indicates a password
-    /// or other secret prompt; the app then masks the footer and skips journaling
-    /// that submitted input.
+    /// Query the PTY's ECHO flag for compatibility with programs that change it.
+    /// StreamNote normally disables echo globally, so a false value alone is not
+    /// treated as proof of a password prompt; the app also checks prompt text.
     #[cfg(unix)]
     pub fn input_is_echoed(&self) -> Option<bool> {
         use std::mem::MaybeUninit;
