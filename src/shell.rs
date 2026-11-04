@@ -602,6 +602,12 @@ impl TranscriptParser {
     }
 
     fn flush_partial(&mut self) -> Option<String> {
+        if self.alternate_screen {
+            self.line.clear();
+            self.cursor = 0;
+            self.utf8_pending.clear();
+            return None;
+        }
         if !self.utf8_pending.is_empty() {
             self.utf8_pending.clear();
             self.put('\u{fffd}');
@@ -645,6 +651,15 @@ mod tests {
             format_shell_prompt("jordan", "server", Path::new("/tmp"), Some(Path::new("/home/jordan"))),
             "jordan@server:/tmp$ "
         );
+    }
+
+    #[test]
+    fn alternate_screen_redraws_are_not_added_to_transcript() {
+        let mut parser = TranscriptParser::default();
+        assert!(parser.feed(b"before\\n\\x1b[?1049hscreen contents\\nmore screen").len() == 1);
+        assert!(parser.flush_partial().is_none());
+        let lines = parser.feed(b"\\x1b[?1049lafter\\n");
+        assert_eq!(lines, vec!["after".to_string()]);
     }
 
     #[test]
