@@ -454,6 +454,7 @@ struct TranscriptParser {
     cursor: usize,
     csi: String,
     utf8_pending: Vec<u8>,
+    alternate_screen: bool,
 }
 
 impl TranscriptParser {
@@ -510,7 +511,9 @@ impl TranscriptParser {
                 '\u{1b}' => self.state = Some(Escape),
                 '\r' => self.cursor = 0,
                 '\n' => {
-                    completed.push(self.line.iter().collect());
+                    if !self.alternate_screen {
+                        completed.push(self.line.iter().collect());
+                    }
                     self.line.clear();
                     self.cursor = 0;
                 }
@@ -555,6 +558,15 @@ impl TranscriptParser {
 
     fn apply_csi(&mut self, final_character: char) {
         let first_parameter = self.csi.split(';').next().unwrap_or("");
+        if matches!(final_character, 'h' | 'l')
+            && (self.csi.contains("?1049") || self.csi.contains("?1047") || self.csi.contains("?47"))
+        {
+            self.alternate_screen = final_character == 'h';
+            if self.alternate_screen {
+                self.line.clear();
+                self.cursor = 0;
+            }
+        }
         let amount = first_parameter.parse::<usize>().unwrap_or(1).max(1);
         match final_character {
             // Erase in line: K, 0K, 1K, or 2K.
