@@ -374,7 +374,7 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         Line::from(vec![Span::styled("/search WORDS", Style::default().fg(theme.warning)), Span::raw("  Search the entire journal and jump to the latest hit with context.")]),
         Line::from(vec![Span::styled("n / N", Style::default().fg(theme.warning)), Span::raw("          Next / previous search result when input is empty.")]),
         Line::from(vec![Span::styled("/mode [shell|notes]", Style::default().fg(theme.warning)), Span::raw("  Switch input mode; no argument toggles.")]),
-        Line::from(vec![Span::styled("/note theme.text", Style::default().fg(theme.warning)), Span::raw("      Save a note without leaving terminal mode; /note alone switches to Notes mode.")]),
+        Line::from(vec![Span::styled("/note TEXT", Style::default().fg(theme.warning)), Span::raw("      Save a note without leaving terminal mode; /note alone switches to Notes mode.")]),
         Line::from(vec![Span::styled("/save", Style::default().fg(theme.warning)), Span::raw("          Retry pending writes and sync the journal.")]),
         Line::from(vec![Span::styled("/export [FILE]", Style::default().fg(theme.warning)), Span::raw(" Export every journal record as readable text.")]),
         Line::from(vec![Span::styled("/stats · /path", Style::default().fg(theme.warning)), Span::raw("  Show journal statistics or path.")]),
