@@ -279,10 +279,9 @@ fn apply_selection(
 fn draw_draft(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let prompt = app.input_prompt().to_string();
     let preview = if app.input.is_empty() {
-        Line::from(Span::styled(
-            format!("  {prompt}waiting for input…"),
-            Style::default().fg(theme.muted),
-        ))
+        // The actual editable prompt is shown in the input box below.
+        // Keep the preview panel blank rather than repeating "waiting for input".
+        Line::from("")
     } else {
         Line::from(vec![
             Span::styled("  ", Style::default().fg(theme.muted)),
