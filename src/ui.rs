@@ -42,9 +42,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_input(frame, chunks[offset + 2], app, theme);
     draw_hints(frame, chunks[offset + 3], theme);
 
-    if app.show_help {
-        draw_help(frame, frame.area(), theme);
-    }
 }
 
 fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
@@ -342,7 +339,7 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
         .x
         .saturating_add(cursor_column.saturating_sub(app.input_hscroll) as u16);
     let cursor_y = inner.y;
-    if !app.show_help && cursor_x < inner.x.saturating_add(inner.width) {
+    if cursor_x < inner.x.saturating_add(inner.width) {
         frame.set_cursor_position(Position::new(cursor_x, cursor_y));
     }
 }
@@ -372,7 +369,7 @@ fn draw_hints(frame: &mut Frame, area: Rect, theme: Theme) {
         Span::styled("/search ", Style::default().fg(theme.primary)),
         Span::styled("journal  ", Style::default().fg(theme.muted)),
         Span::styled("F1 ", Style::default().fg(theme.primary)),
-        Span::styled("help  ", Style::default().fg(theme.muted)),
+        Span::styled("terminal workspace  ", Style::default().fg(theme.muted)),
         Span::styled("F12 ", Style::default().fg(theme.primary)),
         Span::styled("banner  ", Style::default().fg(theme.muted)),
         Span::styled("drag ", Style::default().fg(theme.primary)),
