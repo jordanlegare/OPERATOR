@@ -786,7 +786,7 @@ impl App {
                 }
             }
             "/quit" | "/q" => self.should_quit = true,
-            _ => self.status = format!("Unknown command: {command}. Press F1 or type /help."),
+            _ => self.status = format!("Unknown command: {command}. Type /help for command help."),
         }
     }
 
