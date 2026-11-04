@@ -154,8 +154,9 @@ fn entry_line(entry: &Entry, index: usize, app: &App, theme: Theme) -> Line<'sta
     let selected_columns =
         app.selection_columns_for_row(index, UnicodeWidthStr::width(row_text.as_str()));
     let active = app.is_active_match(index);
+    let keyboard_selected = app.selected_row == Some(index);
     let hit = app.is_match(index);
-    let row_style = if active {
+    let row_style = if active || keyboard_selected {
         Style::default().bg(theme.selected_row)
     } else {
         Style::default()
@@ -193,7 +194,8 @@ fn entry_line(entry: &Entry, index: usize, app: &App, theme: Theme) -> Line<'sta
                     Style::default()
                         .fg(theme.search_fg)
                         .bg(theme.search_bg)
-                        .add_modifier(Modifier::BOLD),
+                        .add_modifier(Modifier::BOLD)
+                        .patch(row_style),
                 ));
                 spans.push(Span::styled(
                     entry.text[end..].to_string(),
@@ -360,7 +362,7 @@ fn draw_hints(frame: &mut Frame, area: Rect, theme: Theme) {
         Span::styled(" F2–F10 ", Style::default().fg(theme.primary)),
         Span::styled("theme  ", Style::default().fg(theme.muted)),
         Span::styled("↑/↓ ", Style::default().fg(theme.primary)),
-        Span::styled("scroll  ", Style::default().fg(theme.muted)),
+        Span::styled("select row  ", Style::default().fg(theme.muted)),
         Span::styled("wheel ", Style::default().fg(theme.primary)),
         Span::styled("mouse  ", Style::default().fg(theme.muted)),
         Span::styled("Tab ", Style::default().fg(theme.primary)),
@@ -420,7 +422,7 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         Line::from(vec![Span::styled("/quit", Style::default().fg(theme.warning)), Span::raw("          Save pending records and exit.")]),
         Line::from(""),
         Line::from(vec![Span::styled("KEYS", Style::default().fg(theme.success).add_modifier(Modifier::BOLD))]),
-        Line::from("↑/↓ scroll · PgUp/PgDn page · Home oldest · End live tail · mouse wheel scroll"),
+        Line::from("↑/↓ select and highlight rows · PgUp/PgDn page · Home oldest · End live tail · mouse wheel scroll"),
         Line::from("Click a transcript row to select it and load its text into the input; drag to select text across rows."),
         Line::from("Ctrl+C copies a transcript selection through OSC 52; without a selection it keeps its normal behavior."),
         Line::from("Each transcript row displays the full local date, time, seconds and UTC offset."),
