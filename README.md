@@ -33,7 +33,7 @@ The default input mode is **TERMINAL**.
 ## Other features
 
 - ASCII-art banner that can be shown or hidden with F12, plus a live one-line input footer.
-- Unwrapped feed: each record is one row; long records are horizontally clipped, never word-wrapped.
+- Transcript display can toggle between unwrapped, horizontally clipped rows and word-wrapped rows with Ctrl+W; the setting is session-local.
 - Every row displays its full local date and time, including seconds and the UTC offset.
 - Click a `CMD` transcript row to select it and load its command into the editable input line; clicking notes or output rows does not change the input. Drag selection still works across any transcript rows.
 - Left-click and drag to select text across rows without changing the current input draft.
@@ -98,6 +98,7 @@ The palettes are built into StreamNote and require no external theme package or 
 | `shell command` + Enter | Run command in the embedded Debian shell (TERMINAL mode) |
 | `ordinary text` + Enter | Append a note (NOTES mode) |
 | `Ctrl+T` | Toggle TERMINAL / NOTES input mode |
+| `Ctrl+W` | Toggle transcript word wrap on/off |
 | `/note text` | Save a note without switching mode |
 | `!command` | Run a shell command from NOTES mode |
 | `/search phrase` | Search the entire journal and jump to the latest match |
@@ -130,6 +131,7 @@ The palettes are built into StreamNote and require no external theme package or 
 | `Ctrl+C` without a selection | Send SIGINT to shell (TERMINAL) or clear the draft (NOTES) |
 | `Shift` + mouse wheel | Faster vertical scroll |
 | `Alt+Left` / `Alt+Right` | Pan feed horizontally |
+| `Ctrl+W` | Toggle transcript word wrap on/off |
 | `Tab` | Complete shell commands and filesystem paths (four-space indent in NOTES mode) |
 | `F2` … `F10` | Switch between nine high-contrast color themes (F2 = theme 1; F10 = theme 9) |
 | `Ctrl+P` / `Ctrl+N` | Previous / next input-history item |
