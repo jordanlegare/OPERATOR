@@ -362,6 +362,8 @@ fn handle_key(
         KeyCode::Right => app.cursor_right(),
         KeyCode::Home => app.scroll_to_top(),
         KeyCode::End => app.select_latest_row(),
+        KeyCode::Up if modifiers.contains(KeyModifiers::SHIFT) => app.extend_row_selection(-1),
+        KeyCode::Down if modifiers.contains(KeyModifiers::SHIFT) => app.extend_row_selection(1),
         KeyCode::Up => app.move_row_selection(-1),
         KeyCode::Down => app.move_row_selection(1),
         KeyCode::PageUp => app.scroll_up(app.feed_viewport_height.max(1)),
