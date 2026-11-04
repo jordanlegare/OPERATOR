@@ -84,7 +84,7 @@ Switch palettes at any time with **Alt+1** through **Alt+9**. On keyboard layout
 | `Alt+8` | Arctic Blue |
 | `Alt+9` | Monochrome Max |
 
-The palettes are built into StreamNote and require no external theme package or configuration download.
+The palettes are built into StreamNote and require no external theme package or configuration download. StreamNote also requests the Kitty keyboard protocol's disambiguated key reporting when the terminal supports it, so modified number-row keys are not confused with control bytes. On older terminals, legacy AltGr character and control-byte fallbacks are used; some terminals cannot distinguish every Ctrl+Alt combination without enhanced keyboard-protocol support.
 
 ## Commands
 
