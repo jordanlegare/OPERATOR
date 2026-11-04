@@ -373,6 +373,14 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let hints = Line::from(vec![
         Span::styled(" Ctrl+T ", Style::default().fg(theme.primary)),
         Span::styled("mode  ", Style::default().fg(theme.muted)),
+        Span::styled("/scp ", Style::default().fg(theme.primary).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            if app.scp_sftp_passthrough { "ON" } else { "OFF" },
+            Style::default()
+                .fg(if app.scp_sftp_passthrough { theme.success } else { theme.warning })
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" on|off  ", Style::default().fg(theme.muted)),
         Span::styled(" F2–F10 ", Style::default().fg(theme.primary)),
         Span::styled("theme  ", Style::default().fg(theme.muted)),
         Span::styled("↑/↓ ", Style::default().fg(theme.primary)),
