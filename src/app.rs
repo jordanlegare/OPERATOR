@@ -148,6 +148,23 @@ impl App {
 
     /// Move the highlighted transcript row. On the first keypress, start at
     /// the edge of the currently visible page in the requested direction.
+    fn recall_highlighted_command(&mut self) {
+        if self.secret_input {
+            return;
+        }
+        let command = self
+            .selected_row
+            .and_then(|row| self.journal.entries.get(row))
+            .filter(|entry| entry.kind == EntryKind::TerminalCommand)
+            .map(|entry| entry.text.clone());
+        if let Some(command) = command {
+            self.input = command;
+            self.cursor = self.input.len();
+            self.input_hscroll = 0;
+            self.history_position = None;
+        }
+    }
+
     pub fn move_row_selection(&mut self, direction: i8) {
         let entry_count = self.journal.entries.len();
         if entry_count == 0 {
@@ -180,6 +197,7 @@ impl App {
         }
         self.scroll_top = next_top.min(self.max_top());
         self.status = format!("Row {}/{} selected.", next + 1, entry_count);
+        self.recall_highlighted_command();
     }
 
     fn keep_selected_row_visible(&mut self, top: usize) {
@@ -199,6 +217,7 @@ impl App {
         self.selected_row = Some(visible_row);
         if visible_row != row {
             self.status = format!("Row {}/{} selected.", visible_row + 1, entry_count);
+            self.recall_highlighted_command();
         }
     }
 
@@ -220,12 +239,21 @@ impl App {
         self.scroll_top = 0;
         self.follow_tail = false;
         self.selected_row = (!self.journal.entries.is_empty()).then_some(0);
+        self.recall_highlighted_command();
     }
 
     pub fn jump_to_latest(&mut self) {
         self.follow_tail = true;
         self.scroll_top = self.max_top();
+        self.selected_row = None;
+    }
+
+    /// Explicit latest-row navigation selects the newest row and recalls it
+    /// when it is a command. Automatic tail-following preserves the input draft.
+    pub fn select_latest_row(&mut self) {
+        self.jump_to_latest();
         self.selected_row = self.journal.entries.len().checked_sub(1);
+        self.recall_highlighted_command();
     }
 
     pub fn scroll_feed_left(&mut self, amount: u16) {
@@ -1350,7 +1378,7 @@ mod tests {
             .append(Entry::with_kind(EntryKind::Note, "existing row".to_string()))
             .expect("append existing row");
         app.feed_viewport_height = 1;
-        app.jump_to_latest();
+        app.select_latest_row();
         assert_eq!(app.selected_row, Some(0));
 
         app.capture_terminal_output(vec!["new terminal output".to_string()]);
@@ -1365,6 +1393,89 @@ mod tests {
         let (mut app, path) = test_app();
         app.capture_terminal_output(vec!["first terminal output".to_string()]);
         assert_eq!(app.selected_row, None);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn highlighting_a_command_row_loads_it_into_the_input_line() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        app.journal
+            .append(Entry::with_kind(EntryKind::Note, "keep this note out".to_string()))
+            .expect("append note");
+        app.journal
+            .append(Entry::with_kind(EntryKind::TerminalCommand, "ls -lah /home".to_string()))
+            .expect("append command");
+        app.journal
+            .append(Entry::with_kind(EntryKind::TerminalOutput, "directory listing".to_string()))
+            .expect("append output");
+        app.feed_viewport_height = 3;
+        app.input = "draft to replace".to_string();
+        app.cursor = app.input.len();
+
+        app.move_row_selection(1);
+        assert_eq!(app.selected_row, Some(0));
+        assert_eq!(app.input, "draft to replace");
+
+        app.move_row_selection(1);
+        assert_eq!(app.selected_row, Some(1));
+        assert_eq!(app.input, "ls -lah /home");
+        assert_eq!(app.cursor, app.input.len());
+        assert_eq!(app.input_hscroll, 0);
+
+        app.move_row_selection(1);
+        assert_eq!(app.selected_row, Some(2));
+        assert_eq!(app.input, "ls -lah /home");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn command_recall_does_not_overwrite_hidden_secret_input() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        app.journal
+            .append(Entry::with_kind(EntryKind::TerminalCommand, "sudo apt update".to_string()))
+            .expect("append command");
+        app.feed_viewport_height = 2;
+        app.secret_input = true;
+        app.input = "hidden passphrase".to_string();
+        app.cursor = app.input.len();
+
+        app.move_row_selection(1);
+
+        assert_eq!(app.selected_row, Some(0));
+        assert_eq!(app.input, "hidden passphrase");
+        assert!(app.secret_input);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn home_and_explicit_end_navigation_recall_highlighted_commands() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        app.journal
+            .append(Entry::with_kind(EntryKind::TerminalCommand, "first command".to_string()))
+            .expect("append first command");
+        app.journal
+            .append(Entry::with_kind(EntryKind::Note, "middle note".to_string()))
+            .expect("append note");
+        app.journal
+            .append(Entry::with_kind(EntryKind::TerminalCommand, "last command".to_string()))
+            .expect("append last command");
+        app.feed_viewport_height = 3;
+
+        app.scroll_to_top();
+        assert_eq!(app.input, "first command");
+
+        app.select_latest_row();
+        assert_eq!(app.selected_row, Some(2));
+        assert_eq!(app.input, "last command");
+
         let _ = fs::remove_file(path);
     }
 
