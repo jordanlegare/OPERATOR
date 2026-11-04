@@ -324,7 +324,7 @@ fn draw_hints(frame: &mut Frame, area: Rect, theme: Theme) {
     let hints = Line::from(vec![
         Span::styled(" Ctrl+T ", Style::default().fg(theme.primary)),
         Span::styled("mode  ", Style::default().fg(theme.muted)),
-        Span::styled(" Alt/AltGr+1..9 ", Style::default().fg(theme.primary)),
+        Span::styled(" Alt/AltGr+1..9 · Alt+F3 ", Style::default().fg(theme.primary)),
         Span::styled("theme  ", Style::default().fg(theme.muted)),
         Span::styled("↑/↓ ", Style::default().fg(theme.primary)),
         Span::styled("scroll  ", Style::default().fg(theme.muted)),
@@ -385,7 +385,7 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         Line::from(vec![Span::styled("KEYS", Style::default().fg(theme.success).add_modifier(Modifier::BOLD))]),
         Line::from("↑/↓ scroll · PgUp/PgDn page · Home oldest · End live tail · mouse wheel scroll"),
         Line::from("Tab completes shell commands and paths · four spaces in Notes mode"),
-        Line::from(format!("Alt/AltGr+1..9 switches high-contrast palettes · active: {}", theme.name)),
+        Line::from(format!("Alt/AltGr+1..9 · Alt+F3 switches high-contrast palettes · active: {}", theme.name)),
         Line::from("Alt+←/→ horizontal pan · Ctrl+P/N command history · Ctrl+S save · Ctrl+T mode"),
         Line::from("F12 then press a key to display its Crossterm key code and modifiers for diagnostics"),
         Line::from("Ctrl+C sends SIGINT to the shell · Ctrl+D sends EOF · Ctrl+Q quits StreamNote"),
