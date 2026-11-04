@@ -245,6 +245,20 @@ impl ShellSession {
         self.writer.flush()
     }
 
+    /// Send raw terminal bytes while the full-screen workspace owns keyboard focus.
+    pub fn send_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if self.exited {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "the shell process has exited"));
+        }
+        self.writer.write_all(bytes)?;
+        self.writer.flush()
+    }
+
+    /// Toggle PTY echo when switching between transcript and direct terminal use.
+    pub fn set_echo(&self, enabled: bool) -> io::Result<()> {
+        set_input_echo(&*self.master, enabled)
+    }
+
     /// Send a terminal control byte, e.g. ETX (Ctrl+C) or EOT (Ctrl+D).
     pub fn send_control(&mut self, byte: u8) -> io::Result<()> {
         if self.exited {
@@ -292,39 +306,33 @@ impl ShellSession {
         None
     }
 
-    /// Drain all available PTY output, returning complete visible transcript lines.
-    /// ANSI control sequences are removed; carriage-return progress updates are
-    /// represented by their final visible line rather than raw escape bytes.
-    pub fn drain_output(&mut self) -> Vec<String> {
+    /// Drain available PTY output, preserving raw bytes for direct terminal display
+    /// while also extracting readable lines for the persistent transcript.
+    pub fn drain_passthrough(&mut self) -> (Vec<u8>, Vec<String>) {
+        let mut raw = Vec::new();
         let mut lines = Vec::new();
         while !self.reader_closed {
             match self.receiver.try_recv() {
                 Ok(Ok(bytes)) => {
                     self.last_output = Some(Instant::now());
                     lines.extend(self.parser.feed(&bytes));
+                    raw.extend_from_slice(&bytes);
                 }
-                Ok(Err(_)) => {
-                    self.reader_closed = true;
-                    break;
-                }
+                Ok(Err(_)) => { self.reader_closed = true; break; }
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    self.reader_closed = true;
-                    break;
-                }
+                Err(TryRecvError::Disconnected) => { self.reader_closed = true; break; }
             }
         }
-
-        if self
-            .last_output
-            .is_some_and(|last| last.elapsed() >= IDLE_FLUSH)
-        {
-            if let Some(line) = self.parser.flush_partial() {
-                lines.push(line);
-            }
+        if self.last_output.is_some_and(|last| last.elapsed() >= IDLE_FLUSH) {
+            if let Some(line) = self.parser.flush_partial() { lines.push(line); }
             self.last_output = None;
         }
-        lines
+        (raw, lines)
+    }
+
+    /// Drain PTY output for the transcript-only interface.
+    pub fn drain_output(&mut self) -> Vec<String> {
+        self.drain_passthrough().1
     }
 
     pub fn finish_output(&mut self) -> Option<String> {
