@@ -39,7 +39,7 @@ The default input mode is **TERMINAL**.
 - ASCII-art banner that can be shown or hidden with F12, plus a live one-line input footer; banner visibility is restored at startup.
 - Transcript display can toggle between unwrapped, horizontally clipped rows and word-wrapped rows with Ctrl+W; the selected mode is restored at startup.
 - The selected F2–F10 color theme is restored at startup; theme, word-wrap, banner visibility, and SCP/SFTP passthrough preferences are saved together in the same config file.
-- A subdued ASCII maple-leaf watermark is centered behind the transcript, scaled to an 80% viewport region, and drawn only into unused cells so transcript text and selection remain readable.
+- A subdued Canadian maple-leaf watermark is centered behind the transcript, scaled to an 80% viewport region, and drawn only into unused cells so transcript text and selection remain readable; toggle it with `/canada`, or use `/canada on|off|status`.
 - Every row displays its full local date and time, including seconds and the UTC offset.
 - Click a `CMD` transcript row to select it and load its command into the editable input line; clicking notes or output rows does not change the input. Drag selection still works across any transcript rows.
 - Left-click and drag to select text across rows without changing the current input draft.
@@ -76,11 +76,12 @@ Example:
   "scp_sftp_passthrough": true,
   "theme_index": 6,
   "wrap_transcript": true,
-  "show_banner": false
+  "show_banner": false,
+  "show_canada_watermark": true
 }
 ```
 
-The theme index ranges from 1 to 9 (F2 through F10). Theme changes, Ctrl+W word-wrap changes, F12 banner changes, and `/scp on|off` changes are saved immediately. Existing configuration files containing only `scp_sftp_passthrough` remain compatible; the other settings receive their default values when absent.
+The theme index ranges from 1 to 9 (F2 through F10). Theme changes, Ctrl+W word-wrap changes, F12 banner changes, `/scp on|off`, and `/canada on|off` changes are saved immediately. `show_canada_watermark` defaults to `true`, preserving the current watermark for existing installations. Older configuration files remain compatible; missing preferences receive their defaults.
 
 ## Build and run
 
