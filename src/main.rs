@@ -179,10 +179,19 @@ fn dispatch_ssh_invocation() {
                         std::process::exit(2);
                     }
                 };
-                let mut server = Command::new(&words[0]);
-                server.args(&words[1..]);
+                let program_index = if words.first().is_some_and(|word| word == "exec") {
+                    1
+                } else {
+                    0
+                };
+                let Some(program) = words.get(program_index) else {
+                    eprintln!("STREENOTE: invalid SFTP subsystem command.");
+                    std::process::exit(2);
+                };
+                let mut server = Command::new(program);
+                server.args(&words[program_index + 1..]);
                 let error = server.exec();
-                eprintln!("STREENOTE: could not execute SFTP subsystem {}: {error}", words[0]);
+                eprintln!("STREENOTE: could not execute SFTP subsystem: {error}");
                 std::process::exit(127);
             }
             FileTransferRequest::LegacyScp => {
@@ -216,7 +225,11 @@ fn dispatch_ssh_invocation() {}
 
 fn detect_file_transfer_request(command: &str) -> Option<FileTransferRequest> {
     let words = split_command_words(command)?;
-    let start = usize::from(words.first().is_some_and(|word| word == "exec"));
+    let start = if words.first().is_some_and(|word| word == "exec") {
+        1
+    } else {
+        0
+    };
     let executable = words.get(start)?;
     let name = std::path::Path::new(executable)
         .file_name()
@@ -644,6 +657,10 @@ mod ssh_dispatch_tests {
         );
         assert_eq!(
             detect_file_transfer_request("/usr/lib/openssh/sftp-server -f AUTHPRIV -l INFO"),
+            Some(FileTransferRequest::Sftp)
+        );
+        assert_eq!(
+            detect_file_transfer_request("exec /usr/lib/openssh/sftp-server"),
             Some(FileTransferRequest::Sftp)
         );
     }
