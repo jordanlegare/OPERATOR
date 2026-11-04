@@ -38,6 +38,7 @@ The default input mode is **TERMINAL**.
 
 - ASCII-art banner that can be shown or hidden with F12, plus a live one-line input footer.
 - Transcript display can toggle between unwrapped, horizontally clipped rows and word-wrapped rows with Ctrl+W; the setting is session-local.
+- A subdued ASCII maple-leaf watermark is centered behind the transcript, scaled to an 80% viewport region, and drawn only into unused cells so transcript text and selection remain readable.
 - Every row displays its full local date and time, including seconds and the UTC offset.
 - Click a `CMD` transcript row to select it and load its command into the editable input line; clicking notes or output rows does not change the input. Drag selection still works across any transcript rows.
 - Left-click and drag to select text across rows without changing the current input draft.
