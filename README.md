@@ -16,6 +16,10 @@ StreamNote starts the configured interactive shell (`$SHELL`, falling back to `/
 - The shell is launched at startup using the user's normal interactive shell configuration.
 - PTY dimensions follow the terminal window size.
 
+When STREENOTE is installed as an SSH login shell, SSH non-interactive requests are dispatched before the TUI starts. SFTP subsystem requests execute the configured external SFTP server directly with the original SSH stdin/stdout/stderr; legacy SCP server requests are delegated to Bash. Ordinary remote SSH commands are also run through Bash. No transfer data enters the STREENOTE PTYs, terminal renderer, transcript, or journal.
+
+Use `/scp on`, `/scp off`, or `/scp status` inside STREENOTE to control SCP/SFTP passthrough for new SSH connections. It is enabled by default and persisted in `~/.config/streenote/config.json` (or `$XDG_CONFIG_HOME/streenote/config.json`). Disabling it rejects recognized SFTP subsystem and legacy SCP server requests; it does not disable ordinary remote SSH commands.
+
 Press F1 to open a separate interactive terminal workspace backed by its own independent PTY and shell process. Full-screen programs such as `vim`, `nano`, `less`, `top`, and `htop` use the terminal emulator normally. Press F1 again to return to the transcript; closing the workspace does not interrupt STREENOTE's primary shell. Workspace terminal output is displayed directly and is not added to the journal; only workspace open/close and shell-exit system events are recorded. The primary STREENOTE shell and its transcript continue independently.
 
 ## Modes
@@ -53,6 +57,7 @@ The default input mode is **TERMINAL**.
 - Rust stable toolchain (install with [rustup](https://rustup.rs/)).
 - A terminal with mouse support for wheel scrolling and OSC 52 clipboard access for selection copying (support varies by terminal emulator and SSH client).
 - `$SHELL` set to a valid interactive shell, or `/bin/bash` available.
+- For SSH login-shell integration, `/bin/bash` must be available and the configured external SFTP server path must match sshd's `Subsystem sftp` setting.
 
 ## Build and run
 
@@ -108,6 +113,7 @@ The palettes are built into StreamNote and require no external theme package or 
 | `/export [path]` | Export the complete journal as readable text |
 | `/stats` | Show entry count, cached text bytes, pending writes, and hit count |
 | `/path` | Show the journal file path |
+| `/scp on|off|status` | Enable, disable, or inspect SSH SCP/SFTP passthrough (persistent; enabled by default) |
 | `/mode [shell|notes]` | Switch mode; no argument toggles |
 | `F1` | Enter/exit the full-screen interactive terminal workspace |
 | `F12` | Show or hide the ASCII-art banner |
