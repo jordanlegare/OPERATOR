@@ -105,7 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new(journal, startup_message);
     match shell.as_ref() {
         Some(session) => app.record_system(format!(
-            "Connected to interactive shell ({}) · commands and combined stdout/stderr are journaled.",
+            "Connected to interactive shell ({}) · commands are recorded once; PTY input echo is disabled.",
             session.shell_program().display()
         )),
         None => {
@@ -136,6 +136,9 @@ fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         drain_shell(app, shell)?;
+        if let Some(session) = shell.as_ref() {
+            app.set_terminal_prompt(session.prompt_label());
+        }
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         if !event::poll(Duration::from_millis(40))? {
