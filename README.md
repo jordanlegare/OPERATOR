@@ -32,7 +32,7 @@ The default input mode is **TERMINAL**.
 
 ## Other features
 
-- ASCII-art banner and live one-line input footer with draft preview.
+- ASCII-art banner that can be shown or hidden with F12, plus a live one-line input footer.
 - Unwrapped feed: each record is one row; long records are horizontally clipped, never word-wrapped.
 - Every row displays its full local date and time, including seconds and the UTC offset.
 - Click a transcript row to select it and load its exact entry text into the editable input line; the cursor moves to the end so you can edit or resubmit it.
@@ -70,7 +70,7 @@ cargo run --release -- --file ~/Notes/work-log.jsonl
 By default, the journal is stored at:
 
 ```text
-~/.local/share/streamnote/journal.jsonl
+~/.local/share/streenote/journal.jsonl
 ```
 
 ## Color themes
@@ -89,7 +89,7 @@ Switch palettes directly with the unmodified **F2** through **F10** keys. Each k
 | `F9` | 8 | Arctic Blue |
 | `F10` | 9 | Monochrome Max |
 
-The palettes are built into StreamNote and require no external theme package or configuration download. F1 remains the help key and F12 remains the one-shot keyboard diagnostic key.
+The palettes are built into StreamNote and require no external theme package or configuration download. F1 opens help; F12 shows or hides the ASCII-art banner.
 
 ## Commands
 
@@ -109,7 +109,7 @@ The palettes are built into StreamNote and require no external theme package or 
 | `/path` | Show the journal file path |
 | `/mode [shell|notes]` | Switch mode; no argument toggles |
 | `/help` or F1 | Open help |
-| `F12` then a key | Display the received key code and modifiers for keyboard diagnostics |
+| `F12` | Show or hide the ASCII-art banner |
 | `/quit` or `/q` | Save pending records and quit |
 | `//text` | Store text beginning with `/` literally as a note |
 
@@ -134,8 +134,9 @@ The palettes are built into StreamNote and require no external theme package or 
 | `Ctrl+A` / `Ctrl+E` | Move input cursor to start / end |
 | `Ctrl+S` | Save / retry pending writes |
 | `Ctrl+D` | Send end-of-input to the shell when the terminal input is empty |
+| `Esc` | Clear the current input line; with an empty line, clear an active search |
 | `Ctrl+Q` | Quit StreamNote |
-| `F12` | Arm a one-shot keyboard event diagnostic; press the key to inspect next |
+| `F12` | Show or hide the ASCII-art banner |
 
 ## Journal format
 
