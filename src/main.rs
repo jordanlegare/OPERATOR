@@ -288,15 +288,25 @@ fn default_journal_path() -> PathBuf {
 
 
 /// Map Alt+1..Alt+9 to their 1-based theme indexes.
+///
+/// AltGr on several non-US layouts is emitted as Ctrl+Alt. The character
+/// can also be the layout's shifted/third-level symbol rather than an ASCII
+/// digit, so accept the common US and Québec French number-row characters.
 fn theme_number_from_key(code: KeyCode, modifiers: KeyModifiers) -> Option<usize> {
-    if !modifiers.contains(KeyModifiers::ALT)
-        || modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SHIFT)
-    {
+    if !modifiers.contains(KeyModifiers::ALT) {
         return None;
     }
 
     match code {
-        KeyCode::Char(digit @ '1'..='9') => digit.to_digit(10).map(|number| number as usize),
+        KeyCode::Char('1' | '!' | '±') => Some(1),
+        KeyCode::Char('2' | '@' | '"' | '²') => Some(2),
+        KeyCode::Char('3' | '#' | '/' | '£' | '³') => Some(3),
+        KeyCode::Char('4' | '$' | '¢') => Some(4),
+        KeyCode::Char('5' | '%' | '¤') => Some(5),
+        KeyCode::Char('6' | '^' | '?' | '¬') => Some(6),
+        KeyCode::Char('7' | '&' | '¦') => Some(7),
+        KeyCode::Char('8' | '*' | '²') => Some(8),
+        KeyCode::Char('9' | '(' | '³') => Some(9),
         _ => None,
     }
 }
@@ -318,26 +328,42 @@ mod theme_shortcut_tests {
     }
 
     #[test]
-    fn ignores_unmodified_or_wrongly_modified_keys() {
-        assert_eq!(theme_number_from_key(KeyCode::Char('0'), KeyModifiers::ALT), None);
-        assert_eq!(theme_number_from_key(KeyCode::Char('q'), KeyModifiers::ALT), None);
-        assert_eq!(theme_number_from_key(KeyCode::Enter, KeyModifiers::ALT), None);
+    fn recognizes_us_shifted_number_symbols() {
+        let cases = [
+            ('!', 1), ('@', 2), ('#', 3), ('$', 4), ('%', 5),
+            ('^', 6), ('&', 7), ('*', 8), ('(', 9),
+        ];
+        for (character, expected) in cases {
+            assert_eq!(
+                theme_number_from_key(KeyCode::Char(character), KeyModifiers::ALT),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn recognizes_quebec_french_altgr_number_row_symbols() {
+        // AltGr is commonly surfaced as CONTROL | ALT by terminal backends.
+        let cases = [
+            ('±', 1), ('@', 2), ('£', 3), ('¢', 4), ('¤', 5),
+            ('¬', 6), ('¦', 7), ('²', 8), ('³', 9),
+        ];
+        let altgr = KeyModifiers::ALT | KeyModifiers::CONTROL;
+        for (character, expected) in cases {
+            assert_eq!(
+                theme_number_from_key(KeyCode::Char(character), altgr),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_keys_without_alt_modifier() {
         assert_eq!(theme_number_from_key(KeyCode::Char('1'), KeyModifiers::NONE), None);
         assert_eq!(theme_number_from_key(KeyCode::Char('1'), KeyModifiers::SHIFT), None);
         assert_eq!(theme_number_from_key(KeyCode::Char('1'), KeyModifiers::CONTROL), None);
-        assert_eq!(
-            theme_number_from_key(
-                KeyCode::Char('1'),
-                KeyModifiers::ALT | KeyModifiers::CONTROL,
-            ),
-            None
-        );
-        assert_eq!(
-            theme_number_from_key(
-                KeyCode::Char('1'),
-                KeyModifiers::ALT | KeyModifiers::SHIFT,
-            ),
-            None
-        );
+        assert_eq!(theme_number_from_key(KeyCode::Char('0'), KeyModifiers::ALT), None);
+        assert_eq!(theme_number_from_key(KeyCode::Char('q'), KeyModifiers::ALT), None);
+        assert_eq!(theme_number_from_key(KeyCode::Enter, KeyModifiers::ALT), None);
     }
 }
