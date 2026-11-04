@@ -1,6 +1,7 @@
 mod app;
 mod shell;
 mod storage;
+mod theme;
 mod ui;
 
 use std::{
@@ -169,6 +170,9 @@ fn handle_key(
 ) -> Result<bool, Box<dyn std::error::Error>> {
     if modifiers.contains(KeyModifiers::CONTROL) {
         match code {
+            KeyCode::Char(digit @ ('1'..='9')) => {
+                app.set_theme(digit.to_digit(10).unwrap_or(1) as usize);
+            }
             KeyCode::Char('q') => return Ok(true),
             KeyCode::Char('c') => {
                 if app.input_mode == InputMode::Terminal {
