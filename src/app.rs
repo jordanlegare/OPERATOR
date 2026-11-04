@@ -51,6 +51,8 @@ pub struct App {
     pub cursor: usize,
     pub input_hscroll: usize,
     pub feed_hscroll: u16,
+    /// Whether transcript records wrap to the available viewport width.
+    pub wrap_transcript: bool,
     pub scroll_top: usize,
     /// Journal row currently highlighted by keyboard navigation.
     pub selected_row: Option<usize>,
@@ -110,6 +112,7 @@ impl App {
             cursor: 0,
             input_hscroll: 0,
             feed_hscroll: 0,
+            wrap_transcript: false,
             scroll_top: 0,
             selected_row: None,
             feed_viewport_height: 1,
