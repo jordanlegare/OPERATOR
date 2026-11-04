@@ -70,21 +70,21 @@ By default, the journal is stored at:
 
 ## Color themes
 
-Switch palettes at any time with **Alt+1** through **Alt+9**. On keyboard layouts where AltGr is reported as Ctrl+Alt, the matching number-row symbols are also recognized. Legacy terminal encodings for keys 3 and 8 are handled when Crossterm reports them as Alt+Escape and Alt+Backspace. The selected palette number and name appear in the status line.
+Switch palettes directly with the unmodified **F2** through **F10** keys. Each key selects one palette in order; no Ctrl, Alt, or AltGr modifier is required. The selected palette number and name appear in the status line.
 
-| Shortcut | High-contrast palette |
-|---|---|
-| `Alt+1` | Abyss Cyan |
-| `Alt+2` | Carbon Amber |
-| `Alt+3` or `Alt+F3` | Dracula Contrast (Alt+F3 fallback for terminals that send Ctrl+Alt+3 as plain Escape) |
-| `Alt+4` | Solarized Light |
-| `Alt+5` | Paper High Contrast |
-| `Alt+6` | Forest Signal |
-| `Alt+7` | Violet Pulse |
-| `Alt+8` | Arctic Blue |
-| `Alt+9` | Monochrome Max |
+| Shortcut | Theme number | High-contrast palette |
+|---|---:|---|
+| `F2` | 1 | Abyss Cyan |
+| `F3` | 2 | Carbon Amber |
+| `F4` | 3 | Dracula Contrast |
+| `F5` | 4 | Solarized Light |
+| `F6` | 5 | Paper High Contrast |
+| `F7` | 6 | Forest Signal |
+| `F8` | 7 | Violet Pulse |
+| `F9` | 8 | Arctic Blue |
+| `F10` | 9 | Monochrome Max |
 
-The palettes are built into StreamNote and require no external theme package or configuration download. StreamNote also requests the Kitty keyboard protocol's disambiguated key reporting when the terminal supports it, so modified number-row keys are not confused with control bytes. On older terminals, legacy AltGr character and control-byte fallbacks are used; some terminals cannot distinguish every Ctrl+Alt combination without enhanced keyboard-protocol support.
+The palettes are built into StreamNote and require no external theme package or configuration download. F1 remains the help key and F12 remains the one-shot keyboard diagnostic key.
 
 ## Commands
 
@@ -120,7 +120,7 @@ The palettes are built into StreamNote and require no external theme package or 
 | `Shift` + mouse wheel | Faster vertical scroll |
 | `Alt+Left` / `Alt+Right` | Pan feed horizontally |
 | `Tab` | Complete shell commands and filesystem paths (four-space indent in NOTES mode) |
-| `Alt+1` … `Alt+9` | Switch between nine high-contrast color themes |
+| `F2` … `F10` | Switch between nine high-contrast color themes (F2 = theme 1; F10 = theme 9) |
 | `Ctrl+P` / `Ctrl+N` | Previous / next input-history item |
 | `Ctrl+A` / `Ctrl+E` | Move input cursor to start / end |
 | `Ctrl+S` | Save / retry pending writes |
