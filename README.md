@@ -131,7 +131,6 @@ The palettes are built into StreamNote and require no external theme package or 
 | `Ctrl+P` / `Ctrl+N` | Previous / next input-history item |
 | `Ctrl+A` / `Ctrl+E` | Move input cursor to start / end |
 | `Ctrl+S` | Save / retry pending writes |
-| `Ctrl+C` | Send Ctrl+C (SIGINT) to the embedded shell in TERMINAL mode; clear the draft in NOTES mode |
 | `Ctrl+D` | Send end-of-input to the shell when the terminal input is empty |
 | `Ctrl+Q` | Quit StreamNote |
 | `F12` | Arm a one-shot keyboard event diagnostic; press the key to inspect next |
@@ -144,9 +143,9 @@ Each line in `journal.jsonl` is an independent JSON object. Example:
 {"timestamp":"2026-10-31T17:30:00-04:00","kind":"terminal_command","text":"uname -a"}
 {"timestamp":"2026-10-31T17:30:01-04:00","kind":"terminal_output","text":"Linux debian 6.1.0-amd64 ..."}
 {"timestamp":"2026-10-31T17:31:00-04:00","kind":"note","text":"Investigate kernel update"}
+```
 
 The transcript renders each stored RFC 3339 timestamp as local `YYYY-MM-DD HH:MM:SS ±HH:MM`, so the date, time and UTC offset are visible for every row.
-```
 
 Kinds are `note`, `terminal_command`, `terminal_output`, and `system`. Old records without `kind` are treated as notes. The journal is append-only from the application's perspective; malformed lines are skipped at load and counted in the startup status. It is never truncated by StreamNote. Input entered while terminal echo is off is intentionally not included.
 
