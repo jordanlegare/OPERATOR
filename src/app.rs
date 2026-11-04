@@ -197,8 +197,26 @@ impl App {
         }
         self.drag_transcript_selection(x, y);
         self.selection_dragging = false;
-        if let Some(selection) = self.selection.as_mut() {
+        let selected_row = if let Some(selection) = self.selection.as_mut() {
             selection.whole_row = selection.anchor == selection.active;
+            selection.whole_row.then_some(selection.anchor.row)
+        } else {
+            None
+        };
+
+        // A stationary click selects a complete row and recalls its text into
+        // the editable input. Never replace a hidden password/passphrase draft.
+        if let Some(row) = selected_row.filter(|_| !self.secret_input) {
+            if let Some(entry) = self.journal.entries.get(row) {
+                self.input = entry.text.clone();
+                self.cursor = self.input.len();
+                self.input_hscroll = 0;
+                self.history_position = None;
+                self.status = format!(
+                    "Loaded transcript row {} into input. Edit it or press Enter to submit.",
+                    row + 1
+                );
+            }
         }
     }
 
@@ -961,6 +979,8 @@ mod tests {
         let selected = app.selected_transcript_text().expect("selected row");
         assert!(selected.contains("NOTE"));
         assert!(selected.ends_with("select this note"));
+        assert_eq!(app.input, "select this note");
+        assert_eq!(app.cursor, app.input.len());
         let _ = fs::remove_file(path);
     }
 
@@ -974,6 +994,8 @@ mod tests {
         app.journal
             .append(Entry::with_kind(EntryKind::Note, "select this note".to_string()))
             .expect("append test row");
+        app.input = "keep this draft".to_string();
+        app.cursor = app.input.len();
         app.feed_viewport_height = 3;
         app.feed_area = Rect::new(10, 5, 100, 3);
 
@@ -988,6 +1010,7 @@ mod tests {
             app.selected_transcript_text().as_deref(),
             Some("select")
         );
+        assert_eq!(app.input, "keep this draft");
         let _ = fs::remove_file(path);
     }
 
