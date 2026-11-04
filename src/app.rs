@@ -52,6 +52,8 @@ pub struct App {
     pub input_hscroll: usize,
     pub feed_hscroll: u16,
     pub scroll_top: usize,
+    /// Journal row currently highlighted by keyboard navigation.
+    pub selected_row: Option<usize>,
     pub feed_viewport_height: usize,
     /// Inner transcript viewport in terminal screen coordinates.
     pub feed_area: Rect,
@@ -109,6 +111,7 @@ impl App {
             input_hscroll: 0,
             feed_hscroll: 0,
             scroll_top: 0,
+            selected_row: None,
             feed_viewport_height: 1,
             feed_area: Rect::default(),
             selection: None,
@@ -143,26 +146,82 @@ impl App {
         self.journal.entries.len().saturating_sub(self.feed_viewport_height.max(1))
     }
 
+    /// Move the highlighted transcript row. On the first keypress, start at
+    /// the edge of the currently visible page in the requested direction.
+    pub fn move_row_selection(&mut self, direction: i8) {
+        let entry_count = self.journal.entries.len();
+        if entry_count == 0 {
+            self.selected_row = None;
+            return;
+        }
+
+        let viewport_height = self.feed_viewport_height.max(1);
+        let top = self.current_top().min(entry_count - 1);
+        let bottom = top
+            .saturating_add(viewport_height.saturating_sub(1))
+            .min(entry_count - 1);
+        let current = self.selected_row.unwrap_or(if direction < 0 { bottom } else { top });
+        let next = if direction < 0 {
+            current.saturating_sub(1)
+        } else {
+            current.saturating_add(1).min(entry_count - 1)
+        };
+
+        self.selected_row = Some(next);
+        self.selection = None;
+        self.selection_dragging = false;
+        self.follow_tail = false;
+
+        let mut next_top = top;
+        if next < next_top {
+            next_top = next;
+        } else if next >= next_top.saturating_add(viewport_height) {
+            next_top = next.saturating_add(1).saturating_sub(viewport_height);
+        }
+        self.scroll_top = next_top.min(self.max_top());
+        self.status = format!("Row {}/{} selected.", next + 1, entry_count);
+    }
+
+    fn keep_selected_row_visible(&mut self, top: usize) {
+        let Some(row) = self.selected_row else {
+            return;
+        };
+        let entry_count = self.journal.entries.len();
+        if entry_count == 0 {
+            self.selected_row = None;
+            return;
+        }
+        let viewport_height = self.feed_viewport_height.max(1);
+        let last_visible = top
+            .saturating_add(viewport_height.saturating_sub(1))
+            .min(entry_count - 1);
+        self.selected_row = Some(row.max(top).min(last_visible));
+    }
+
     pub fn scroll_up(&mut self, amount: usize) {
         let current = self.current_top();
         self.scroll_top = current.saturating_sub(amount);
         self.follow_tail = false;
+        self.keep_selected_row_visible(self.scroll_top);
     }
 
     pub fn scroll_down(&mut self, amount: usize) {
         let next = self.current_top().saturating_add(amount).min(self.max_top());
         self.scroll_top = next;
-        self.follow_tail = next >= self.max_top();
+        self.follow_tail = self.selected_row.is_none() && next >= self.max_top();
+        self.keep_selected_row_visible(next);
     }
 
     pub fn scroll_to_top(&mut self) {
         self.scroll_top = 0;
         self.follow_tail = false;
+        self.selected_row = (!self.journal.entries.is_empty()).then_some(0);
     }
 
     pub fn jump_to_latest(&mut self) {
         self.follow_tail = true;
         self.scroll_top = self.max_top();
+        self.selected_row = self.journal.entries.len().checked_sub(1);
     }
 
     pub fn scroll_feed_left(&mut self, amount: u16) {
@@ -176,6 +235,7 @@ impl App {
     /// Begin a left-button selection inside the transcript viewport.
     /// A click without a drag selects the entire journal row.
     pub fn begin_transcript_selection(&mut self, x: u16, y: u16) {
+        self.selected_row = None;
         let Some(point) = self.mouse_transcript_point(x, y, false) else {
             self.selection = None;
             self.selection_dragging = false;
@@ -1189,6 +1249,83 @@ mod tests {
         assert!(!looks_like_secret_prompt("Welcome to Debian"));
         assert!(!looks_like_secret_prompt("Compiling streamnote"));
     }
+    #[test]
+    fn arrow_navigation_highlights_rows_and_scrolls_the_selected_row_into_view() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        for index in 0..6 {
+            app.journal
+                .append(Entry::with_kind(EntryKind::Note, format!("row {index}")))
+                .expect("append test row");
+        }
+        app.feed_viewport_height = 3;
+
+        // The first Up starts at the bottom of the live viewport.
+        app.move_row_selection(-1);
+        assert_eq!(app.selected_row, Some(5));
+        assert_eq!(app.current_top(), 3);
+
+        app.move_row_selection(-1);
+        assert_eq!(app.selected_row, Some(4));
+        app.move_row_selection(-1);
+        assert_eq!(app.selected_row, Some(3));
+        app.move_row_selection(-1);
+        assert_eq!(app.selected_row, Some(2));
+        assert_eq!(app.current_top(), 2);
+
+        app.move_row_selection(1);
+        assert_eq!(app.selected_row, Some(3));
+        assert_eq!(app.current_top(), 2);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn down_navigation_starts_at_the_top_of_the_visible_page() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        for index in 0..6 {
+            app.journal
+                .append(Entry::with_kind(EntryKind::Note, format!("row {index}")))
+                .expect("append test row");
+        }
+        app.feed_viewport_height = 3;
+
+        app.move_row_selection(1);
+        assert_eq!(app.selected_row, Some(3));
+        app.move_row_selection(1);
+        assert_eq!(app.selected_row, Some(4));
+        app.move_row_selection(1);
+        assert_eq!(app.selected_row, Some(5));
+        app.move_row_selection(1);
+        assert_eq!(app.selected_row, Some(5));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn page_scrolling_keeps_the_highlighted_row_visible() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        for index in 0..8 {
+            app.journal
+                .append(Entry::with_kind(EntryKind::Note, format!("row {index}")))
+                .expect("append test row");
+        }
+        app.feed_viewport_height = 3;
+        app.move_row_selection(-1);
+        assert_eq!(app.selected_row, Some(7));
+
+        app.scroll_up(4);
+        assert_eq!(app.current_top(), 1);
+        assert_eq!(app.selected_row, Some(3));
+
+        let _ = fs::remove_file(path);
+    }
+
 }
 
 
