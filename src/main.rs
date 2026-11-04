@@ -323,16 +323,24 @@ fn theme_number_from_key(code: KeyCode, modifiers: KeyModifiers) -> Option<usize
         }
     }
 
-    // Some terminals reduce Ctrl+Alt+2/3/8 to control-key events:
-    // Ctrl+@ -> NUL/space, Ctrl+3 -> ESC, and Ctrl+8 -> backspace/Ctrl+H.
-    // Accept these only when Alt is also present so ordinary Ctrl keys remain
-    // available to StreamNote.
-    if alt && control {
+    // In legacy terminal encoding, ESC prefixes an Alt key. Thus Ctrl+Alt+3
+    // may be decoded by Crossterm as Alt+Escape, and Ctrl+Alt+8 as
+    // Alt+Backspace (the Ctrl bit is lost by the legacy byte encoding).
+    // Match the decoded Alt events, not an assumed CONTROL|ALT modifier pair.
+    // Alt+Space is the common legacy form for Ctrl+Alt+2.
+    if alt {
         match code {
             KeyCode::Char(' ') => return Some(2),
             KeyCode::Esc => return Some(3),
-            KeyCode::Char('h' | 'H') | KeyCode::Backspace => return Some(8),
+            KeyCode::Backspace => return Some(8),
             _ => {}
+        }
+    }
+
+    // Some backends keep Ctrl+H as a character event rather than Backspace.
+    if alt && control {
+        if let KeyCode::Char('h' | 'H') = code {
+            return Some(8);
         }
     }
 
@@ -394,7 +402,16 @@ mod theme_shortcut_tests {
     }
 
     #[test]
-    fn recognizes_control_byte_aliases_for_altgr_two_three_and_eight() {
+    fn recognizes_legacy_alt_escape_and_backspace_aliases() {
+        // Crossterm decodes ESC+ESC as Alt+Escape and ESC+DEL as
+        // Alt+Backspace; the original Ctrl modifier is not retained.
+        assert_eq!(theme_number_from_key(KeyCode::Char(' '), KeyModifiers::ALT), Some(2));
+        assert_eq!(theme_number_from_key(KeyCode::Esc, KeyModifiers::ALT), Some(3));
+        assert_eq!(theme_number_from_key(KeyCode::Backspace, KeyModifiers::ALT), Some(8));
+    }
+
+    #[test]
+    fn recognizes_control_alt_aliases_when_modifiers_are_preserved() {
         let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
         assert_eq!(theme_number_from_key(KeyCode::Char(' '), altgr), Some(2));
         assert_eq!(theme_number_from_key(KeyCode::Esc, altgr), Some(3));
