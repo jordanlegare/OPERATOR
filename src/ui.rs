@@ -338,6 +338,8 @@ fn draw_hints(frame: &mut Frame, area: Rect, theme: Theme) {
         Span::styled("journal  ", Style::default().fg(theme.muted)),
         Span::styled("F1 ", Style::default().fg(theme.primary)),
         Span::styled("help  ", Style::default().fg(theme.muted)),
+        Span::styled("F12 ", Style::default().fg(theme.primary)),
+        Span::styled("key test  ", Style::default().fg(theme.muted)),
         Span::styled("Ctrl+Q ", Style::default().fg(theme.primary)),
         Span::styled("quit", Style::default().fg(theme.muted)),
     ]);
@@ -385,6 +387,7 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         Line::from("Tab completes shell commands and paths · four spaces in Notes mode"),
         Line::from(format!("Alt/AltGr+1..9 switches high-contrast palettes · active: {}", theme.name)),
         Line::from("Alt+←/→ horizontal pan · Ctrl+P/N command history · Ctrl+S save · Ctrl+T mode"),
+        Line::from("F12 then press a key to display its Crossterm key code and modifiers for diagnostics"),
         Line::from("Ctrl+C sends SIGINT to the shell · Ctrl+D sends EOF · Ctrl+Q quits StreamNote"),
         Line::from(""),
         Line::from(Span::styled(
