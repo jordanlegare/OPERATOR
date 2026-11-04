@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{Local, SecondsFormat};
+use chrono::{DateTime, Local, SecondsFormat};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,6 +219,28 @@ pub fn entry_kind_label(kind: EntryKind) -> &'static str {
     }
 }
 
+/// Format a journal timestamp in the current local timezone, retaining its UTC offset.
+pub fn format_timestamp(timestamp: &str) -> String {
+    DateTime::parse_from_rfc3339(timestamp)
+        .map(|time| {
+            time.with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S %:z")
+                .to_string()
+        })
+        .unwrap_or_else(|_| timestamp.to_string())
+}
+
+/// Plain-text equivalent of a rendered transcript row, used by mouse selection and copy.
+pub fn entry_transcript_text(entry: &Entry, index: usize) -> String {
+    format!(
+        "{:>6} {} {:<4} │ {}",
+        index + 1,
+        format_timestamp(&entry.timestamp),
+        entry_kind_label(entry.kind),
+        entry.text
+    )
+}
+
 fn append_jsonl(path: &Path, entry: &Entry) -> io::Result<()> {
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     let mut bytes = serde_json::to_vec(entry).map_err(io::Error::other)?;
@@ -237,4 +259,24 @@ pub fn sanitize_single_line(input: &str) -> String {
             c => Some(c),
         })
         .collect()
+}
+
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::format_timestamp;
+
+    #[test]
+    fn timestamp_display_includes_date_time_and_offset() {
+        let formatted = format_timestamp("2026-11-03T22:44:00-05:00");
+        assert!(formatted.contains("2026"));
+        assert!(formatted.contains(':'));
+        assert!(formatted.len() >= 25);
+    }
+
+    #[test]
+    fn malformed_legacy_timestamp_is_preserved_in_full() {
+        let timestamp = "legacy-timestamp-value";
+        assert_eq!(format_timestamp(timestamp), timestamp);
+    }
 }
