@@ -38,7 +38,7 @@ The default input mode is **TERMINAL**.
 - Click a transcript row to select it and load its exact entry text into the editable input line; the cursor moves to the end so you can edit or resubmit it.
 - Left-click and drag to select text across rows without changing the current input draft.
 - Ctrl+C copies a selected transcript range through OSC 52; without a selection it retains its normal shell-interrupt / draft-clear behavior.
-- Up/Down moves a highlighted row through the transcript and keeps it visible; holding either key repeats row navigation. Page Up/Down and the mouse wheel scroll by viewport/page.
+- Up/Down moves a highlighted row through the transcript and keeps it visible; highlighting a `CMD` row automatically loads that command into the editable input line. Holding either key repeats row navigation.
 - `Alt+Left` / `Alt+Right` horizontally pan the feed.
 - Unbounded in-memory `Vec<Entry>` with no application-level cache eviction.
 - JSON Lines persistence; non-secret commands, notes, useful terminal output records, and system events are appended to the journal. Empty terminal-output rows and standard shell-prompt rows are filtered both when loading older journals and when appending new output; existing journal files are not rewritten.
@@ -117,10 +117,11 @@ The palettes are built into StreamNote and require no external theme package or 
 
 | Key | Action |
 |---|---|
-| `↑` / `↓` | Move the highlighted row one record at a time (hold to repeat); the feed follows the selection |
+| `↑` / `↓` | Move the highlighted row one record at a time (hold to repeat); highlighted `CMD` entries load into the input line |
 | `PageUp` / `PageDown` | Scroll one viewport while keeping the highlighted row visible |
 | `Home` | Oldest record |
-| `End` / `Ctrl+L` | Follow the latest record |
+| `End` | Select the latest row and load it into input when it is a `CMD` entry |
+| `Ctrl+L` | Follow the latest record without replacing the input draft |
 | Mouse wheel | Scroll vertically |
 | Left-click a transcript row | Select the complete row and load its text into the input line |
 | Left-click + drag | Select text across one or more transcript rows |
