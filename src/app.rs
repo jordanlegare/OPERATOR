@@ -71,7 +71,8 @@ pub struct App {
     pub terminal_prompt: String,
     /// Currently selected built-in color palette (1 through 9).
     pub theme_index: usize,
-    /// True while the PTY has disabled echo (typically a password prompt).
+    /// True while a recognized password/passphrase prompt is active.
+    /// PTY input echo is disabled globally to avoid duplicate command output.
     pub secret_input: bool,
     /// A recent explicit password/passphrase prompt, used together with
     /// ECHO=false to distinguish secrets from unrelated shell echo settings.
