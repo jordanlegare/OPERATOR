@@ -306,6 +306,28 @@ impl ShellSession {
         None
     }
 
+    /// Drain available PTY bytes without parsing them into transcript lines.
+    /// Used by the independent full-screen workspace, whose output must remain
+    /// isolated from STREENOTE's persistent journal.
+    pub fn drain_raw_output(&mut self) -> Vec<u8> {
+        let mut raw = Vec::new();
+        while !self.reader_closed {
+            match self.receiver.try_recv() {
+                Ok(Ok(bytes)) => raw.extend_from_slice(&bytes),
+                Ok(Err(_)) => {
+                    self.reader_closed = true;
+                    break;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.reader_closed = true;
+                    break;
+                }
+            }
+        }
+        raw
+    }
+
     /// Drain available PTY output, preserving raw bytes for direct terminal display
     /// while also extracting readable lines for the persistent transcript.
     pub fn drain_passthrough(&mut self) -> (Vec<u8>, Vec<String>) {
