@@ -980,6 +980,17 @@ mod tests {
     }
 
     #[test]
+    fn input_prompt_tracks_shell_prompt_and_notes_mode() {
+        let (mut app, path) = test_app();
+        app.set_terminal_prompt("jordan@server:~/Projects/STREENOTE$ ".to_string());
+        assert_eq!(app.input_prompt(), "jordan@server:~/Projects/STREENOTE$ ");
+
+        app.input_mode = InputMode::Notes;
+        assert_eq!(app.input_prompt(), "note› ");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn clicking_a_transcript_row_selects_the_complete_row() {
         use crate::storage::{Entry, EntryKind};
         use ratatui::layout::Rect;
