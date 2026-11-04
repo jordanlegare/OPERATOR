@@ -33,7 +33,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .constraints(constraints)
         .split(frame.area());
 
-    let offset = usize::from(app.show_banner);
+    let offset = if app.show_banner { 1 } else { 0 };
     if app.show_banner {
         draw_banner(frame, chunks[0], theme);
     }
