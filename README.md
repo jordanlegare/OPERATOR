@@ -70,19 +70,19 @@ By default, the journal is stored at:
 
 ## Color themes
 
-Switch palettes at any time with **Ctrl+Shift+1** through **Ctrl+Shift+9**. The selected palette number and name appear in the status line.
+Switch palettes at any time with **Alt+1** through **Alt+9**. The selected palette number and name appear in the status line.
 
 | Shortcut | High-contrast palette |
 |---|---|
-| `Ctrl+Shift+1` | Abyss Cyan |
-| `Ctrl+Shift+2` | Carbon Amber |
-| `Ctrl+Shift+3` | Dracula Contrast |
-| `Ctrl+Shift+4` | Solarized Light |
-| `Ctrl+Shift+5` | Paper High Contrast |
-| `Ctrl+Shift+6` | Forest Signal |
-| `Ctrl+Shift+7` | Violet Pulse |
-| `Ctrl+Shift+8` | Arctic Blue |
-| `Ctrl+Shift+9` | Monochrome Max |
+| `Alt+1` | Abyss Cyan |
+| `Alt+2` | Carbon Amber |
+| `Alt+3` | Dracula Contrast |
+| `Alt+4` | Solarized Light |
+| `Alt+5` | Paper High Contrast |
+| `Alt+6` | Forest Signal |
+| `Alt+7` | Violet Pulse |
+| `Alt+8` | Arctic Blue |
+| `Alt+9` | Monochrome Max |
 
 The palettes are built into StreamNote and require no external theme package or configuration download.
 
@@ -119,7 +119,7 @@ The palettes are built into StreamNote and require no external theme package or 
 | `Shift` + mouse wheel | Faster vertical scroll |
 | `Alt+Left` / `Alt+Right` | Pan feed horizontally |
 | `Tab` | Complete shell commands and filesystem paths (four-space indent in NOTES mode) |
-| `Ctrl+Shift+1` … `Ctrl+Shift+9` | Switch between nine high-contrast color themes |
+| `Alt+1` … `Alt+9` | Switch between nine high-contrast color themes |
 | `Ctrl+P` / `Ctrl+N` | Previous / next input-history item |
 | `Ctrl+A` / `Ctrl+E` | Move input cursor to start / end |
 | `Ctrl+S` | Save / retry pending writes |
