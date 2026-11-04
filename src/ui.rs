@@ -277,7 +277,7 @@ fn apply_selection(
 }
 
 fn draw_draft(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
-    let prompt = app.input_prompt();
+    let prompt = app.input_prompt().to_string();
     let preview = if app.input.is_empty() {
         Line::from(Span::styled(
             format!("  {prompt}waiting for input…"),
@@ -327,8 +327,8 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
         ))
         .style(Style::default().bg(theme.panel));
     let inner = block.inner(area);
-    let prompt = app.input_prompt();
-    let prompt_width = UnicodeWidthStr::width(prompt);
+    let prompt = app.input_prompt().to_string();
+    let prompt_width = UnicodeWidthStr::width(prompt.as_str());
     let available = inner.width.saturating_sub(prompt_width as u16).max(1) as usize;
     let before_cursor = &app.input[..app.cursor.min(app.input.len())];
     let cursor_text = if app.secret_input {
