@@ -177,6 +177,15 @@ fn handle_key(
     app: &mut App,
     shell: &mut Option<ShellSession>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    // F12 arms a one-shot diagnostic so we can inspect what the terminal
+    // actually sends for a problematic modified key (without consuming normal
+    // Escape or changing its existing behavior).
+    if app.capture_next_key {
+        app.capture_next_key = false;
+        app.status = format!("KEY EVENT: code={code:?}, modifiers={modifiers:?}");
+        return Ok(false);
+    }
+
     // Prefer unambiguous modified-key events when the terminal supports the
     // Kitty keyboard protocol; the parser below retains legacy/AltGr fallbacks.
     // Alt+1 through Alt+9 selects the built-in color themes.
@@ -239,6 +248,10 @@ fn handle_key(
             }
         }
         KeyCode::F(1) => app.show_help = true,
+        KeyCode::F(12) => {
+            app.capture_next_key = true;
+            app.status = "KEY DIAGNOSTIC: press the shortcut to inspect its key code and modifiers.".to_string();
+        },
         KeyCode::Enter => app.submit(shell.as_mut()),
         KeyCode::Tab => app.tab_complete(shell.as_ref()),
         KeyCode::Backspace => app.backspace(),
