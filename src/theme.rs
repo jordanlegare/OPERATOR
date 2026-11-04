@@ -20,7 +20,7 @@ pub struct Theme {
     pub search_bg: Color,
 }
 
-/// Built-in palettes, selected with Ctrl+Shift+1 through Ctrl+Shift+9.
+/// Built-in palettes, selected with Alt+1 through Alt+9.
 pub const THEMES: [Theme; 9] = [
     Theme {
         name: "Abyss Cyan",
