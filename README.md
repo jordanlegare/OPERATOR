@@ -16,7 +16,7 @@ StreamNote starts the configured interactive shell (`$SHELL`, falling back to `/
 - The shell is launched at startup using the user's normal interactive shell configuration.
 - PTY dimensions follow the terminal window size.
 
-The shell remains a command-oriented transcript interface. It supports normal command lines, shell built-ins, line-oriented prompts, `sudo` password prompts (password input is not echoed by sudo), and Ctrl+C interruption. It does **not** hand the full screen to nested terminal UI programs such as `vim`, `top`, `less`, or `htop`; those programs require a separate raw-screen passthrough/terminal-emulator mode. ANSI screen-control sequences are intentionally not replayed into the log.
+The shell remains a command-oriented transcript interface. It supports normal command lines, shell built-ins, line-oriented prompts, password/passphrase prompts (recognized secret input is masked and never journaled), and Ctrl+C interruption. It does **not** hand the full screen to nested terminal UI programs such as `vim`, `top`, `less`, or `htop`; those programs require a separate raw-screen passthrough/terminal-emulator mode. ANSI screen-control sequences are intentionally not replayed into the log.
 
 ## Modes
 
