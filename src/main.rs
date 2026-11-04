@@ -503,16 +503,7 @@ fn handle_key(
             KeyCode::Char('e') => app.cursor_to_end(),
             KeyCode::Char('f') => app.focus_search_hint(),
             KeyCode::Char('t') => app.toggle_mode(),
-            KeyCode::Char('w') => {
-                app.wrap_transcript = !app.wrap_transcript;
-                if app.wrap_transcript {
-                    app.feed_hscroll = 0;
-                }
-                app.status = format!(
-                    "Transcript word wrap {}.",
-                    if app.wrap_transcript { "enabled" } else { "disabled" }
-                );
-            }
+            KeyCode::Char('w') => app.toggle_wrap_transcript(),
             _ => {}
         }
         return Ok(false);
@@ -529,14 +520,7 @@ fn handle_key(
                 app.show_help = false;
             }
         }
-        KeyCode::F(12) => {
-            app.show_banner = !app.show_banner;
-            app.status = if app.show_banner {
-                "Banner shown.".to_string()
-            } else {
-                "Banner hidden.".to_string()
-            };
-        }
+        KeyCode::F(12) => app.toggle_banner(),
         KeyCode::Enter => app.submit(shell.as_mut()),
         KeyCode::Tab => app.tab_complete(shell.as_ref()),
         KeyCode::Backspace => app.backspace(),
