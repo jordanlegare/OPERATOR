@@ -622,6 +622,8 @@ impl App {
         if entries.is_empty() {
             return;
         }
+        let selected_live_tail =
+            self.follow_tail && self.selected_row == self.journal.entries.len().checked_sub(1);
         match self.journal.append_batch(entries) {
             Ok(()) => self.status = format!("Captured terminal output · {} records in journal.", self.journal.entries.len()),
             Err(error) => self.status = format!(
@@ -629,16 +631,24 @@ impl App {
                 self.journal.pending_count()
             ),
         }
+        if selected_live_tail {
+            self.selected_row = self.journal.entries.len().checked_sub(1);
+        }
         // Keep the current scrollback/search position when background shell
         // output arrives. The feed follows automatically only when already live.
     }
 
     pub fn record_system(&mut self, message: String) {
+        let selected_live_tail =
+            self.follow_tail && self.selected_row == self.journal.entries.len().checked_sub(1);
         let entry = Entry::with_kind(EntryKind::System, sanitize_single_line(&message));
         if let Err(error) = self.journal.append(entry) {
             self.status = format!("System event retained in memory; journal write failed: {error}");
         } else {
             self.status = message;
+        }
+        if selected_live_tail {
+            self.selected_row = self.journal.entries.len().checked_sub(1);
         }
     }
 
