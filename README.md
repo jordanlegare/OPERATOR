@@ -70,7 +70,7 @@ By default, the journal is stored at:
 
 ## Color themes
 
-Switch palettes at any time with **Alt+1** through **Alt+9**. The selected palette number and name appear in the status line.
+Switch palettes at any time with **Alt+1** through **Alt+9**. On keyboard layouts where AltGr is reported as Ctrl+Alt, the matching number-row symbols are also recognized. The selected palette number and name appear in the status line.
 
 | Shortcut | High-contrast palette |
 |---|---|
