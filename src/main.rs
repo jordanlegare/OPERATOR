@@ -29,7 +29,7 @@ use storage::Journal;
 #[derive(Debug, Parser)]
 #[command(name = "streamnote", version, about = "A live Debian shell transcript and unwrapped note stream")]
 struct Args {
-    /// Journal file. Defaults to ~/.local/share/streamnote/journal.jsonl
+    /// Journal file. Defaults to ~/.local/share/streenote/journal.jsonl
     #[arg(short, long)]
     file: Option<PathBuf>,
 }
@@ -189,15 +189,6 @@ fn handle_key(
     app: &mut App,
     shell: &mut Option<ShellSession>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    // F12 arms a one-shot diagnostic so we can inspect what the terminal
-    // actually sends for a problematic modified key (without consuming normal
-    // Escape or changing its existing behavior).
-    if app.capture_next_key {
-        app.capture_next_key = false;
-        app.status = format!("KEY EVENT: code={code:?}, modifiers={modifiers:?}");
-        return Ok(false);
-    }
-
     // Unmodified F2-F10 select the nine built-in color themes.
     if let Some(number) = theme_number_from_key(code, modifiers) {
         app.set_theme(number);
@@ -267,6 +258,7 @@ fn handle_key(
         KeyCode::Esc => {
             if !app.input.is_empty() {
                 app.clear_input();
+                app.status = "Input line cleared.".to_string();
             } else if app.search_query.is_some() {
                 app.clear_search();
             } else {
@@ -275,9 +267,13 @@ fn handle_key(
         }
         KeyCode::F(1) => app.show_help = true,
         KeyCode::F(12) => {
-            app.capture_next_key = true;
-            app.status = "KEY DIAGNOSTIC: press the shortcut to inspect its key code and modifiers.".to_string();
-        },
+            app.show_banner = !app.show_banner;
+            app.status = if app.show_banner {
+                "Banner shown.".to_string()
+            } else {
+                "Banner hidden.".to_string()
+            };
+        }
         KeyCode::Enter => app.submit(shell.as_mut()),
         KeyCode::Tab => app.tab_complete(shell.as_ref()),
         KeyCode::Backspace => app.backspace(),
@@ -366,7 +362,7 @@ fn default_journal_path() -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     base.join(".local")
         .join("share")
-        .join("streamnote")
+        .join("streenote")
         .join("journal.jsonl")
 }
 
