@@ -22,7 +22,14 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Alignment, Block, Borders, Clear, Paragraph, Wrap},
+    Terminal,
+};
 
 use app::{App, InputMode};
 use shell::ShellSession;
@@ -95,6 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
+    show_access_disclaimer(&mut terminal)?;
     let size = terminal.size()?;
     let shell_rows = size.height.saturating_sub(12).max(8);
     let mut shell = match ShellSession::spawn(size.width, shell_rows) {
@@ -130,6 +138,110 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     result?;
     save_result?;
     Ok(())
+}
+
+
+/// Display and require acknowledgement of the operator access warning before
+/// starting the shell or accepting application input.
+fn show_access_disclaimer(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    loop {
+        terminal.draw(|frame| {
+            let area = frame.area();
+            let vertical = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(5),
+                    Constraint::Percentage(90),
+                    Constraint::Percentage(5),
+                ])
+                .split(area);
+            let popup = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(4),
+                    Constraint::Percentage(92),
+                    Constraint::Percentage(4),
+                ])
+                .split(vertical[1])[1];
+
+            let olive = Color::Rgb(38, 48, 31);
+            let warning = Color::Rgb(255, 190, 70);
+            let critical = Color::Rgb(255, 90, 70);
+            let text = vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "RESTRICTED SYSTEM — CONTROLLED ACCESS",
+                    Style::default().fg(critical).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "AUTHORIZED PERSONNEL ONLY",
+                    Style::default().fg(warning).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from("Access is limited to operators expressly authorized to use this system."),
+                Line::from(Span::styled(
+                    "UNAUTHORIZED ACCESS, USE, COPYING, OR DISCLOSURE IS PROHIBITED.",
+                    Style::default().fg(critical).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from("All activity may be monitored, recorded, and audited."),
+                Line::from("Unauthorized activity may result in loss of access and civil or"),
+                Line::from("criminal prosecution under applicable law."),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "DISCONNECT NOW IF YOU ARE NOT AN AUTHORIZED OPERATOR.",
+                    Style::default().fg(critical).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "[ ENTER ]  I ACKNOWLEDGE — CONTINUE",
+                    Style::default().fg(warning).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    "[ ESC ]    EXIT",
+                    Style::default().fg(Color::Gray),
+                )),
+                Line::from(""),
+            ];
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(warning).add_modifier(Modifier::BOLD))
+                .title(Span::styled(
+                    " STREENOTE // OPERATOR ACCESS NOTICE ",
+                    Style::default().fg(warning).add_modifier(Modifier::BOLD),
+                ))
+                .style(Style::default().fg(Color::Rgb(225, 229, 210)).bg(olive));
+            frame.render_widget(Clear, popup);
+            frame.render_widget(
+                Paragraph::new(text)
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(Color::Rgb(225, 229, 210)).bg(olive))
+                    .wrap(Wrap { trim: false })
+                    .block(block),
+                popup,
+            );
+        })?;
+
+        if !event::poll(Duration::from_millis(100))? {
+            continue;
+        }
+        if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            match key.code {
+                KeyCode::Enter => return Ok(()),
+                KeyCode::Esc => {
+                    return Err("Operator declined the access notice; STREENOTE was not started.".into());
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 
