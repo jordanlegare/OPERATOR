@@ -5,7 +5,7 @@ mod theme;
 mod ui;
 
 use std::{
-    io::{self, stdout},
+    io::{self, stdout, Write},
     path::PathBuf,
     time::Duration,
 };
@@ -14,7 +14,7 @@ use clap::Parser;
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
-        EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+        EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
         KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
@@ -149,6 +149,15 @@ fn run(
                 }
             }
             Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    app.begin_transcript_selection(mouse.column, mouse.row);
+                }
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    app.drag_transcript_selection(mouse.column, mouse.row);
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    app.end_transcript_selection(mouse.column, mouse.row);
+                }
                 MouseEventKind::ScrollUp => {
                     app.scroll_up(if mouse.modifiers.contains(KeyModifiers::SHIFT) { 8 } else { 3 })
                 }
@@ -196,7 +205,23 @@ fn handle_key(
         match code {
             KeyCode::Char('q') => return Ok(true),
             KeyCode::Char('c') => {
-                if app.input_mode == InputMode::Terminal {
+                if let Some(selected) = app.selected_transcript_text() {
+                    if selected.len() > 60_000 {
+                        app.status = "Selection exceeds the 60 KB terminal clipboard limit.".to_string();
+                    } else {
+                        match copy_to_terminal_clipboard(&selected) {
+                            Ok(()) => {
+                                app.status = format!(
+                                    "Copied {} characters from transcript via OSC 52 clipboard.",
+                                    selected.chars().count()
+                                );
+                            }
+                            Err(error) => {
+                                app.status = format!("Could not copy transcript selection: {error}");
+                            }
+                        }
+                    }
+                } else if app.input_mode == InputMode::Terminal {
                     if let Some(session) = shell.as_mut() {
                         match session.send_control(0x03) {
                             Ok(()) => app.status = "Sent Ctrl+C to the Debian shell.".to_string(),
@@ -297,6 +322,40 @@ fn drain_shell(
     Ok(())
 }
 
+fn copy_to_terminal_clipboard(text: &str) -> io::Result<()> {
+    let encoded = base64_encode(text.as_bytes());
+    let mut output = stdout();
+    // OSC 52 is supported by many modern terminal emulators, including over SSH.
+    write!(output, "\x1b]52;c;{encoded}\x07")?;
+    output.flush()
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = *chunk.get(1).unwrap_or(&0);
+        let third = *chunk.get(2).unwrap_or(&0);
+
+        encoded.push(TABLE[(first >> 2) as usize] as char);
+        encoded.push(TABLE[(((first & 0b0000_0011) << 4) | (second >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            encoded.push(TABLE[(((second & 0b0000_1111) << 2) | (third >> 6)) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+        if chunk.len() > 2 {
+            encoded.push(TABLE[(third & 0b0011_1111) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+    }
+    encoded
+}
+
 fn default_journal_path() -> PathBuf {
     let base = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -318,6 +377,20 @@ fn theme_number_from_key(code: KeyCode, modifiers: KeyModifiers) -> Option<usize
     match code {
         KeyCode::F(key @ 2..=10) => Some((key - 1) as usize),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod clipboard_tests {
+    use super::base64_encode;
+
+    #[test]
+    fn base64_encodes_empty_ascii_and_utf8_text() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode("café".as_bytes()), "Y2Fmw6k=");
     }
 }
 
