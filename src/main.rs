@@ -287,7 +287,7 @@ fn handle_key(
         KeyCode::Left => app.cursor_left(),
         KeyCode::Right => app.cursor_right(),
         KeyCode::Home => app.scroll_to_top(),
-        KeyCode::End => app.jump_to_latest(),
+        KeyCode::End => app.select_latest_row(),
         KeyCode::Up => app.move_row_selection(-1),
         KeyCode::Down => app.move_row_selection(1),
         KeyCode::PageUp => app.scroll_up(app.feed_viewport_height.max(1)),
