@@ -167,28 +167,24 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
 }
 
 fn draw_maple_watermark(frame: &mut Frame, area: Rect, theme: Theme) {
-    const MAPLE_LEAF: [&str; 21] = [
-        "                                  /\\                                  ",
-        "                                 /  \\                                 ",
-        "                     /\\          /    \\          /\\                     ",
-        "                    /  \\        /      \\        /  \\                    ",
-        "              /\\   /    \\_______/        \\_______/    \\   /\\              ",
-        "             /  \\_/                                  \\_/  \\             ",
-        "            /                                            \\            ",
-        "       ____/                                              \\____       ",
-        "       \\                                                      /       ",
-        "        \\           /\\                    /\\                 /        ",
-        "         \\         /  \\                  /  \\               /         ",
-        "          \\_______/    \\________________/    \\______________/          ",
-        "                       \\                /                              ",
-        "                        \\              /                               ",
-        "                         \\            /                                ",
-        "                          \\          /                                 ",
-        "                           \\        /                                  ",
-        "                            \\      /                                   ",
-        "                             \\    /                                    ",
-        "                              \\  /                                     ",
-        "                               \\/                                      ",
+    const WATERMARK_ART: [&str; 17] = [
+        "-------------------------------------------------------------------",
+        "XWXWXWXWXWXWXWXW                                   WXWXWXWXWXWXWXWX",
+        "WXWXWXWXWXWXWXWX                 A                 XWXWXWXWXWXWXWXW",
+        "XWXWXWXWXWXWXWXW                AWA                WXWXWXWXWXWXWXWX",
+        "WXWXWXWXWXWXWXWX           AA  AWXWA  AA           XWXWXWXWXWXWXWXW",
+        "XWXWXWXWXWXWXWXW            VWXWXWXWXWV            WXWXWXWXWXWXWXWX",
+        "WXWXWXWXWXWXWXWX        AA   VWXWXWXWV   AA        XWXWXWXWXWXWXWXW",
+        "XWXWXWXWXWXWXWXW    VWXWXWXA  VWXWXWV  AXWXWXWV    WXWXWXWXWXWXWXWX",
+        "WXWXWXWXWXWXWXWX     XWXWXWXWXWXWXWXWXWXWXWXWX     XWXWXWXWXWXWXWXW",
+        "XWXWXWXWXWXWXWXW   AXWXWXWXWXWXWXWXWXWXWXWXWXWXA   WXWXWXWXWXWXWXWX",
+        "WXWXWXWXWXWXWXWX      VXWXWXWXWXWXWXWXWXWXWXV      XWXWXWXWXWXWXWXW",
+        "XWXWXWXWXWXWXWXW         VXWXWXWXWXWXWXWXV         WXWXWXWXWXWXWXWX",
+        "WXWXWXWXWXWXWXWX           XWXWXWXWXWXWX           XWXWXWXWXWXWXWXW",
+        "XWXWXWXWXWXWXWXW         AXWXWXWXWXWXWXWXA         WXWXWXWXWXWXWXWX",
+        "WXWXWXWXWXWXWXWX                 I                 XWXWXWXWXWXWXWXW",
+        "XWXWXWXWXWXWXWXW                 I                 WXWXWXWXWXWXWXWX",
+        "WXWXWXWXWXWXWXWX                 I                 XWXWXWXWXWXWXWXW",
     ];
 
     if area.width < 24 || area.height < 8 {
@@ -200,14 +196,14 @@ fn draw_maple_watermark(frame: &mut Frame, area: Rect, theme: Theme) {
     let target_height = (area.height.saturating_mul(4) / 5).max(1);
     let left = area.x + (area.width - target_width) / 2;
     let top = area.y + (area.height - target_height) / 2;
-    let source_width = MAPLE_LEAF.iter().map(|line| line.len()).max().unwrap_or(1);
+    let source_width = WATERMARK_ART.iter().map(|line| line.len()).max().unwrap_or(1);
     let watermark_color = watermark_tint(theme.panel, theme.border);
     let buffer = frame.buffer_mut();
 
     for y in 0..target_height {
-        let source_y = (y as usize * MAPLE_LEAF.len() / target_height as usize)
-            .min(MAPLE_LEAF.len() - 1);
-        let source_line = MAPLE_LEAF[source_y].as_bytes();
+        let source_y = (y as usize * WATERMARK_ART.len() / target_height as usize)
+            .min(WATERMARK_ART.len() - 1);
+        let source_line = WATERMARK_ART[source_y].as_bytes();
 
         for x in 0..target_width {
             let source_x = (x as usize * source_width / target_width as usize)
