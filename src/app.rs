@@ -8,6 +8,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     shell::ShellSession,
+    settings::Settings,
     storage::{
         entry_transcript_text, sanitize_single_line, should_suppress_terminal_output, Entry,
         EntryKind, Journal,
@@ -82,6 +83,8 @@ pub struct App {
     pub show_help: bool,
     /// Whether the ASCII-art banner is currently visible.
     pub show_banner: bool,
+    /// Whether SSH SCP/SFTP requests are delegated directly to their handlers.
+    pub scp_sftp_passthrough: bool,
     pub should_quit: bool,
 }
 
@@ -98,6 +101,7 @@ impl App {
     }
 
     pub fn new(journal: Journal, status: String) -> Self {
+        let settings = Settings::load();
         // Rehydrate editable command/note history from the persistent journal.
         // Terminal output and system messages are not input-history candidates.
         let history = journal
@@ -133,6 +137,7 @@ impl App {
             status,
             show_help: false,
             show_banner: true,
+            scp_sftp_passthrough: settings.scp_sftp_passthrough,
             should_quit: false,
         }
     }
@@ -773,6 +778,32 @@ impl App {
         self.jump_to_latest();
     }
 
+    fn set_scp_sftp_passthrough(&mut self, enabled: bool) {
+        if self.scp_sftp_passthrough == enabled {
+            self.status = format!(
+                "SCP/SFTP passthrough is already {}.",
+                if enabled { "enabled" } else { "disabled" }
+            );
+            return;
+        }
+
+        let settings = Settings {
+            scp_sftp_passthrough: enabled,
+        };
+        match settings.save() {
+            Ok(()) => {
+                self.scp_sftp_passthrough = enabled;
+                self.status = format!(
+                    "SCP/SFTP passthrough {}. Applies to new SSH connections.",
+                    if enabled { "enabled" } else { "disabled" }
+                );
+            }
+            Err(error) => {
+                self.status = format!("Could not save SCP/SFTP setting; unchanged: {error}");
+            }
+        }
+    }
+
     fn execute_command(&mut self, command_line: &str) {
         let command_line = command_line.trim();
         let (command, argument) = command_line
@@ -806,6 +837,17 @@ impl App {
                 );
             }
             "/path" => self.status = format!("Journal: {}", self.journal.path.display()),
+            "/scp" => match argument.to_ascii_lowercase().as_str() {
+                "" | "status" => {
+                    self.status = format!(
+                        "SCP/SFTP passthrough is {}. Usage: /scp on | /scp off | /scp status",
+                        if self.scp_sftp_passthrough { "enabled" } else { "disabled" }
+                    );
+                }
+                "on" | "enable" | "enabled" => self.set_scp_sftp_passthrough(true),
+                "off" | "disable" | "disabled" => self.set_scp_sftp_passthrough(false),
+                _ => self.status = "Usage: /scp on | /scp off | /scp status".to_string(),
+            },
             "/mode" => {
                 if argument.eq_ignore_ascii_case("terminal") || argument.eq_ignore_ascii_case("shell") {
                     self.set_mode(InputMode::Terminal);
@@ -1078,6 +1120,7 @@ fn is_streamnote_command(line: &str) -> bool {
             | "/save"
             | "/stats"
             | "/path"
+            | "/scp"
             | "/mode"
             | "/shell"
             | "/terminal"
