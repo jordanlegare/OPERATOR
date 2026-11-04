@@ -152,7 +152,7 @@ fn entry_line(entry: &Entry, index: usize, app: &App, theme: Theme) -> Line<'sta
         Style::default()
     };
     let (tag, tag_color) = match entry.kind {
-        EntryKind::Note => ("NOTE", theme.warning),
+        EntryKind::Note => ("NOTE", theme.accent),
         EntryKind::TerminalCommand => ("CMD ", theme.warning),
         EntryKind::TerminalOutput => ("OUT ", theme.info),
         EntryKind::System => ("SYS ", theme.success),
