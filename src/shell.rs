@@ -144,7 +144,8 @@ impl ShellSession {
             .and_then(|pid| fs::read_link(format!("/proc/{pid}/cwd")).ok())
             .or_else(|| env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("?"));
-        format_shell_prompt(&user, &hostname, &cwd, env::var_os("HOME").as_deref().map(Path::new))
+        let home = env::var_os("HOME").map(PathBuf::from);
+        format_shell_prompt(&user, &hostname, &cwd, home.as_deref().map(PathBuf::as_path))
     }
 
     /// Ask Bash for command and filesystem completions in the live shell's cwd.
