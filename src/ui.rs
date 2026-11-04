@@ -422,7 +422,7 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         Line::from(vec![Span::styled("/quit", Style::default().fg(theme.warning)), Span::raw("          Save pending records and exit.")]),
         Line::from(""),
         Line::from(vec![Span::styled("KEYS", Style::default().fg(theme.success).add_modifier(Modifier::BOLD))]),
-        Line::from("↑/↓ select and highlight rows · PgUp/PgDn page · Home oldest · End live tail · mouse wheel scroll"),
+        Line::from("↑/↓ select and highlight rows (hold to repeat) · PgUp/PgDn page · Home oldest · End live tail · mouse wheel scroll"),
         Line::from("Click a transcript row to select it and load its text into the input; drag to select text across rows."),
         Line::from("Ctrl+C copies a transcript selection through OSC 52; without a selection it keeps its normal behavior."),
         Line::from("Each transcript row displays the full local date, time, seconds and UTC offset."),
