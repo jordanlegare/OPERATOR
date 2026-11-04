@@ -11,12 +11,24 @@ pub struct Settings {
     /// Allow SSH-launched SFTP and legacy SCP server requests to bypass the TUI.
     #[serde(default = "default_scp_sftp_passthrough")]
     pub scp_sftp_passthrough: bool,
+    /// Built-in palette index, from 1 through 9.
+    #[serde(default = "default_theme_index")]
+    pub theme_index: usize,
+    /// Whether transcript rows are wrapped to the viewport width.
+    #[serde(default)]
+    pub wrap_transcript: bool,
+    /// Whether the ASCII banner is shown at startup.
+    #[serde(default = "default_show_banner")]
+    pub show_banner: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             scp_sftp_passthrough: true,
+            theme_index: default_theme_index(),
+            wrap_transcript: false,
+            show_banner: true,
         }
     }
 }
@@ -69,6 +81,14 @@ fn default_scp_sftp_passthrough() -> bool {
     true
 }
 
+fn default_theme_index() -> usize {
+    1
+}
+
+fn default_show_banner() -> bool {
+    true
+}
+
 fn config_path() -> PathBuf {
     let config_root = env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -92,5 +112,32 @@ mod tests {
     fn missing_setting_defaults_to_enabled() {
         let settings: Settings = serde_json::from_str("{}").expect("deserialize defaults");
         assert!(settings.scp_sftp_passthrough);
+    }
+
+    #[test]
+    fn older_config_keeps_existing_scp_value_and_defaults_new_preferences() {
+        let settings: Settings = serde_json::from_str(
+            r#"{"scp_sftp_passthrough":false}"#
+        ).expect("deserialize old config");
+        assert!(!settings.scp_sftp_passthrough);
+        assert_eq!(settings.theme_index, 1);
+        assert!(!settings.wrap_transcript);
+        assert!(settings.show_banner);
+    }
+
+    #[test]
+    fn deserializes_all_persisted_preferences() {
+        let settings: Settings = serde_json::from_str(
+            r#"{
+                "scp_sftp_passthrough": true,
+                "theme_index": 6,
+                "wrap_transcript": true,
+                "show_banner": false
+            }"#
+        ).expect("deserialize preferences");
+        assert!(settings.scp_sftp_passthrough);
+        assert_eq!(settings.theme_index, 6);
+        assert!(settings.wrap_transcript);
+        assert!(!settings.show_banner);
     }
 }
