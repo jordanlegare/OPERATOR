@@ -328,6 +328,18 @@ mod theme_shortcut_tests {
     }
 
     #[test]
+    fn recognizes_ctrl_alt_digit_events_used_by_altgr() {
+        let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        for number in 1..=9 {
+            let digit = char::from_digit(number, 10).unwrap();
+            assert_eq!(
+                theme_number_from_key(KeyCode::Char(digit), altgr),
+                Some(number as usize)
+            );
+        }
+    }
+
+    #[test]
     fn recognizes_us_shifted_number_symbols() {
         let cases = [
             ('!', 1), ('@', 2), ('#', 3), ('$', 4), ('%', 5),
