@@ -28,7 +28,7 @@ impl InputMode {
 
     pub fn prompt(self) -> &'static str {
         match self {
-            Self::Terminal => "debian$ ",
+            Self::Terminal => "user@host:~$ ",
             Self::Notes => "note› ",
         }
     }
@@ -67,6 +67,8 @@ pub struct App {
     pub history: Vec<String>,
     history_position: Option<usize>,
     pub input_mode: InputMode,
+    /// Current user@host:path prompt for the embedded shell input line.
+    pub terminal_prompt: String,
     /// Currently selected built-in color palette (1 through 9).
     pub theme_index: usize,
     /// True while the PTY has disabled echo (typically a password prompt).
@@ -82,6 +84,17 @@ pub struct App {
 }
 
 impl App {
+    pub fn input_prompt(&self) -> &str {
+        match self.input_mode {
+            InputMode::Terminal => &self.terminal_prompt,
+            InputMode::Notes => "note› ",
+        }
+    }
+
+    pub fn set_terminal_prompt(&mut self, prompt: String) {
+        self.terminal_prompt = prompt;
+    }
+
     pub fn new(journal: Journal, status: String) -> Self {
         // Rehydrate editable command/note history from the persistent journal.
         // Terminal output and system messages are not input-history candidates.
@@ -109,6 +122,7 @@ impl App {
             history,
             history_position: None,
             input_mode: InputMode::Terminal,
+            terminal_prompt: "user@host:~$ ".to_string(),
             theme_index: 1,
             secret_input: false,
             secret_prompt_deadline: None,
@@ -464,6 +478,10 @@ impl App {
 
         self.clear_input();
         if secret_terminal_input {
+            // PTY echo is disabled globally. Clear the prompt-scoped mask after
+            // submitting this secret; a repeated password prompt will arm it again.
+            self.secret_input = false;
+            self.secret_prompt_deadline = None;
             // Do not add secret input to the journal or interactive history.
             match shell {
                 Some(session) => match session.send_line(&submitted) {
