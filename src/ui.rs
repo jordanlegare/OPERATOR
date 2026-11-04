@@ -163,7 +163,9 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
 
     // Paint the watermark only into unused cells, so transcript text, selections,
     // and wide-character continuation cells always remain untouched.
-    draw_maple_watermark(frame, inner, theme);
+    if app.show_canada_watermark {
+        draw_maple_watermark(frame, inner, theme);
+    }
 }
 
 fn draw_maple_watermark(frame: &mut Frame, area: Rect, theme: Theme) {
@@ -461,6 +463,14 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" on|off  ", Style::default().fg(theme.muted)),
+        Span::styled("/canada ", Style::default().fg(theme.primary).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            if app.show_canada_watermark { "ON" } else { "OFF" },
+            Style::default()
+                .fg(if app.show_canada_watermark { theme.success } else { theme.warning })
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" toggle  ", Style::default().fg(theme.muted)),
         Span::styled(" F2–F10 ", Style::default().fg(theme.primary)),
         Span::styled("theme  ", Style::default().fg(theme.muted)),
         Span::styled("↑/↓ ", Style::default().fg(theme.primary)),
@@ -524,6 +534,7 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         Line::from(vec![Span::styled("/export [FILE]", Style::default().fg(theme.warning)), Span::raw(" Export every journal record as readable text.")]),
         Line::from(vec![Span::styled("/stats · /path", Style::default().fg(theme.warning)), Span::raw("  Show journal statistics or path.")]),
         Line::from(vec![Span::styled("/scp on|off|status", Style::default().fg(theme.warning)), Span::raw("  Toggle persistent SSH SCP/SFTP file-transfer passthrough.")]),
+        Line::from(vec![Span::styled("/canada [on|off|status]", Style::default().fg(theme.warning)), Span::raw("  Toggle the persistent Canadian maple-leaf transcript watermark.")]),
         Line::from(vec![Span::styled("/quit", Style::default().fg(theme.warning)), Span::raw("          Save pending records and exit.")]),
         Line::from(""),
         Line::from(vec![Span::styled("KEYS", Style::default().fg(theme.success).add_modifier(Modifier::BOLD))]),
