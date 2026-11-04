@@ -40,7 +40,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_status(frame, chunks[offset], app, theme);
     draw_feed(frame, chunks[offset + 1], app, theme);
     draw_input(frame, chunks[offset + 2], app, theme);
-    draw_hints(frame, chunks[offset + 3], theme);
+    draw_hints(frame, chunks[offset + 3], app, theme);
 
 }
 
@@ -369,7 +369,7 @@ fn visible_input(app: &App) -> String {
     }
 }
 
-fn draw_hints(frame: &mut Frame, area: Rect, theme: Theme) {
+fn draw_hints(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let hints = Line::from(vec![
         Span::styled(" Ctrl+T ", Style::default().fg(theme.primary)),
         Span::styled("mode  ", Style::default().fg(theme.muted)),
