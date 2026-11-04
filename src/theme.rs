@@ -20,7 +20,7 @@ pub struct Theme {
     pub search_bg: Color,
 }
 
-/// Built-in palettes, selected with Alt+1 through Alt+9 (AltGr/Ctrl+Alt is accepted on layouts that use it).
+/// Built-in palettes, selected with Alt+1 through Alt+9 (AltGr/Ctrl+Alt is accepted on layouts that use it); Alt+F3 is a fallback for theme 3 when the terminal collapses Ctrl+Alt+3 to Escape.
 pub const THEMES: [Theme; 9] = [
     Theme {
         name: "Abyss Cyan",
