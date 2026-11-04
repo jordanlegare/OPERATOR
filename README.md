@@ -39,7 +39,7 @@ The default input mode is **TERMINAL**.
 - JSON Lines persistence; non-secret commands, notes, terminal output records, and system events are appended to the journal.
 - `/search <terms>` searches all cached notes, commands, and terminal output case-insensitively and jumps to the latest match with surrounding context.
 - `n` / `N` navigate search hits.
-- Command/input history, Bash-powered Tab completion for commands and filesystem paths, help overlay, export, stats, path display, and save/retry.
+- Command/input history, Bash-powered Tab completion for commands and filesystem paths, nine high-contrast color palettes, help overlay, export, stats, path display, and save/retry.
 - Older journal entries without a `kind` field remain compatible and load as `note` entries.
 
 ## Requirements
@@ -67,6 +67,24 @@ By default, the journal is stored at:
 ```text
 ~/.local/share/streamnote/journal.jsonl
 ```
+
+## Color themes
+
+Switch palettes at any time with **Ctrl+1** through **Ctrl+9**. The selected palette number and name appear in the status line.
+
+| Shortcut | High-contrast palette |
+|---|---|
+| `Ctrl+1` | Abyss Cyan |
+| `Ctrl+2` | Carbon Amber |
+| `Ctrl+3` | Dracula Contrast |
+| `Ctrl+4` | Solarized Light |
+| `Ctrl+5` | Paper High Contrast |
+| `Ctrl+6` | Forest Signal |
+| `Ctrl+7` | Violet Pulse |
+| `Ctrl+8` | Arctic Blue |
+| `Ctrl+9` | Monochrome Max |
+
+The palettes are built into StreamNote and require no external theme package or configuration download.
 
 ## Commands
 
@@ -100,7 +118,9 @@ By default, the journal is stored at:
 | Mouse wheel | Scroll vertically |
 | `Shift` + mouse wheel | Faster vertical scroll |
 | `Alt+Left` / `Alt+Right` | Pan feed horizontally |
-| `Tab` | Complete shell commands and filesystem paths (four-space indent in NOTES mode) |\n| `Ctrl+P` / `Ctrl+N` | Previous / next input-history item |
+| `Tab` | Complete shell commands and filesystem paths (four-space indent in NOTES mode) |
+| `Ctrl+1` … `Ctrl+9` | Switch between nine high-contrast color themes |
+| `Ctrl+P` / `Ctrl+N` | Previous / next input-history item |
 | `Ctrl+A` / `Ctrl+E` | Move input cursor to start / end |
 | `Ctrl+S` | Save / retry pending writes |
 | `Ctrl+C` | Send Ctrl+C (SIGINT) to the embedded shell in TERMINAL mode; clear the draft in NOTES mode |
