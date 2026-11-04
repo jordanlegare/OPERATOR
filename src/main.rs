@@ -152,17 +152,17 @@ fn show_access_disclaimer(
             let vertical = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Percentage(15),
-                    Constraint::Percentage(70),
-                    Constraint::Percentage(15),
+                    Constraint::Percentage(5),
+                    Constraint::Percentage(90),
+                    Constraint::Percentage(5),
                 ])
                 .split(area);
             let popup = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
-                    Constraint::Percentage(12),
-                    Constraint::Percentage(76),
-                    Constraint::Percentage(12),
+                    Constraint::Percentage(4),
+                    Constraint::Percentage(92),
+                    Constraint::Percentage(4),
                 ])
                 .split(vertical[1])[1];
 
@@ -181,17 +181,15 @@ fn show_access_disclaimer(
                     Style::default().fg(warning).add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
-                Line::from("This system is restricted to operators who have been"),
-                Line::from("expressly authorized to access and use this installation."),
-                Line::from(""),
+                Line::from("Access is limited to operators expressly authorized to use this system."),
                 Line::from(Span::styled(
                     "UNAUTHORIZED ACCESS, USE, COPYING, OR DISCLOSURE IS PROHIBITED.",
                     Style::default().fg(critical).add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
                 Line::from("All activity may be monitored, recorded, and audited."),
-                Line::from("Unauthorized activity may result in immediate termination"),
-                Line::from("of access and civil or criminal prosecution under applicable law."),
+                Line::from("Unauthorized activity may result in loss of access and civil or"),
+                Line::from("criminal prosecution under applicable law."),
                 Line::from(""),
                 Line::from(Span::styled(
                     "DISCONNECT NOW IF YOU ARE NOT AN AUTHORIZED OPERATOR.",
