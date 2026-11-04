@@ -3,9 +3,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ratatui::layout::Rect;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 use crate::{
     shell::ShellSession,
-    storage::{sanitize_single_line, Entry, EntryKind, Journal},
+    storage::{entry_transcript_text, sanitize_single_line, Entry, EntryKind, Journal},
     theme::THEMES,
 };
 
@@ -31,6 +34,19 @@ impl InputMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct TranscriptPoint {
+    row: usize,
+    column: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TranscriptSelection {
+    anchor: TranscriptPoint,
+    active: TranscriptPoint,
+    whole_row: bool,
+}
+
 #[derive(Debug)]
 pub struct App {
     pub journal: Journal,
@@ -40,6 +56,10 @@ pub struct App {
     pub feed_hscroll: u16,
     pub scroll_top: usize,
     pub feed_viewport_height: usize,
+    /// Inner transcript viewport in terminal screen coordinates.
+    pub feed_area: Rect,
+    selection: Option<TranscriptSelection>,
+    selection_dragging: bool,
     pub follow_tail: bool,
     pub search_query: Option<String>,
     pub matches: Vec<usize>,
@@ -79,6 +99,9 @@ impl App {
             feed_hscroll: 0,
             scroll_top: 0,
             feed_viewport_height: 1,
+            feed_area: Rect::default(),
+            selection: None,
+            selection_dragging: false,
             follow_tail: true,
             search_query: None,
             matches: Vec::new(),
@@ -136,6 +159,137 @@ impl App {
 
     pub fn scroll_feed_right(&mut self, amount: u16) {
         self.feed_hscroll = self.feed_hscroll.saturating_add(amount);
+    }
+
+    /// Begin a left-button selection inside the transcript viewport.
+    /// A click without a drag selects the entire journal row.
+    pub fn begin_transcript_selection(&mut self, x: u16, y: u16) {
+        let Some(point) = self.mouse_transcript_point(x, y, false) else {
+            self.selection = None;
+            self.selection_dragging = false;
+            return;
+        };
+        self.selection = Some(TranscriptSelection {
+            anchor: point,
+            active: point,
+            whole_row: false,
+        });
+        self.selection_dragging = true;
+    }
+
+    /// Extend the active selection while the left mouse button is held.
+    pub fn drag_transcript_selection(&mut self, x: u16, y: u16) {
+        if !self.selection_dragging {
+            return;
+        }
+        if let Some(point) = self.mouse_transcript_point(x, y, true) {
+            if let Some(selection) = self.selection.as_mut() {
+                selection.active = point;
+                selection.whole_row = false;
+            }
+        }
+    }
+
+    /// Finish a drag, or promote a stationary click to a whole-row selection.
+    pub fn end_transcript_selection(&mut self, x: u16, y: u16) {
+        if !self.selection_dragging {
+            return;
+        }
+        self.drag_transcript_selection(x, y);
+        self.selection_dragging = false;
+        if let Some(selection) = self.selection.as_mut() {
+            selection.whole_row = selection.anchor == selection.active;
+        }
+    }
+
+    fn mouse_transcript_point(&self, x: u16, y: u16, clamp: bool) -> Option<TranscriptPoint> {
+        let area = self.feed_area;
+        if area.width == 0 || area.height == 0 {
+            return None;
+        }
+
+        let right = area.x.saturating_add(area.width);
+        let bottom = area.y.saturating_add(area.height);
+        if !clamp && (x < area.x || x >= right || y < area.y || y >= bottom) {
+            return None;
+        }
+
+        let x = x.clamp(area.x, right.saturating_sub(1));
+        let y = y.clamp(area.y, bottom.saturating_sub(1));
+        let row = self.current_top().saturating_add(y.saturating_sub(area.y) as usize);
+        if row >= self.journal.entries.len() {
+            return None;
+        }
+
+        Some(TranscriptPoint {
+            row,
+            column: x.saturating_sub(area.x) as usize + self.feed_hscroll as usize,
+        })
+    }
+
+    /// Return the selected display-cell range for one journal row.
+    pub fn selection_columns_for_row(
+        &self,
+        row: usize,
+        line_width: usize,
+    ) -> Option<(usize, usize)> {
+        let selection = self.selection?;
+        if selection.whole_row {
+            return (row == selection.anchor.row && line_width > 0)
+                .then_some((0, line_width));
+        }
+
+        let (start, end) = if selection.anchor <= selection.active {
+            (selection.anchor, selection.active)
+        } else {
+            (selection.active, selection.anchor)
+        };
+        if row < start.row || row > end.row || line_width == 0 {
+            return None;
+        }
+
+        let from = (if row == start.row { start.column } else { 0 }).min(line_width);
+        let to = (if row == end.row {
+            end.column.saturating_add(1)
+        } else {
+            line_width
+        })
+        .min(line_width);
+
+        (from < to).then_some((from, to))
+    }
+
+    /// Plain-text selection includes row number, full timestamp, kind and entry text.
+    pub fn selected_transcript_text(&self) -> Option<String> {
+        let selection = self.selection?;
+        let (start, end) = if selection.anchor <= selection.active {
+            (selection.anchor, selection.active)
+        } else {
+            (selection.active, selection.anchor)
+        };
+
+        let mut selected_rows = Vec::new();
+        for row in start.row..=end.row {
+            let entry = self.journal.entries.get(row)?;
+            let line = entry_transcript_text(entry, row);
+            let width = UnicodeWidthStr::width(line.as_str());
+            let (from, to) = if selection.whole_row {
+                (0, width)
+            } else {
+                let from = (if row == start.row { start.column } else { 0 }).min(width);
+                let to = (if row == end.row {
+                    end.column.saturating_add(1)
+                } else {
+                    width
+                })
+                .min(width);
+                (from, to)
+            };
+            selected_rows.push(slice_display_columns(&line, from, to));
+        }
+
+        let selected = selected_rows.join("\n");
+        (!selected.is_empty()).then_some(selected)
     }
 
     pub fn insert_char(&mut self, ch: char) {
@@ -722,6 +876,32 @@ fn is_streamnote_command(line: &str) -> bool {
     )
 }
 
+fn slice_display_columns(text: &str, start: usize, end: usize) -> String {
+    if start >= end {
+        return String::new();
+    }
+
+    let mut selected = String::new();
+    let mut column = 0usize;
+    let mut previous_cell_selected = false;
+    for character in text.chars() {
+        let width = UnicodeWidthChar::width(character).unwrap_or(0);
+        let cell_selected = if width == 0 {
+            previous_cell_selected
+        } else {
+            column < end && column.saturating_add(width) > start
+        };
+        if cell_selected {
+            selected.push(character);
+        }
+        if width > 0 {
+            previous_cell_selected = cell_selected;
+            column = column.saturating_add(width);
+        }
+    }
+    selected
+}
+
 fn looks_like_secret_prompt(line: &str) -> bool {
     let normalized = line.to_ascii_lowercase();
     [
@@ -761,6 +941,53 @@ mod tests {
         let _ = fs::remove_file(&path);
         let journal = Journal::open(path.clone()).expect("open test journal");
         (App::new(journal, String::new()), path)
+    }
+
+    #[test]
+    fn clicking_a_transcript_row_selects_the_complete_row() {
+        use crate::storage::{Entry, EntryKind};
+        use ratatui::layout::Rect;
+
+        let (mut app, path) = test_app();
+        app.journal
+            .append(Entry::with_kind(EntryKind::Note, "select this note".to_string()))
+            .expect("append test row");
+        app.feed_viewport_height = 3;
+        app.feed_area = Rect::new(10, 5, 60, 3);
+
+        app.begin_transcript_selection(15, 5);
+        app.end_transcript_selection(15, 5);
+
+        let selected = app.selected_transcript_text().expect("selected row");
+        assert!(selected.contains("NOTE"));
+        assert!(selected.ends_with("select this note"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn dragging_selects_text_across_transcript_rows() {
+        use crate::storage::{Entry, EntryKind};
+        use ratatui::layout::Rect;
+
+        let (mut app, path) = test_app();
+        app.journal
+            .append(Entry::with_kind(EntryKind::Note, "first row".to_string()))
+            .expect("append first row");
+        app.journal
+            .append(Entry::with_kind(EntryKind::TerminalOutput, "second row".to_string()))
+            .expect("append second row");
+        app.feed_viewport_height = 3;
+        app.feed_area = Rect::new(10, 5, 100, 3);
+
+        app.begin_transcript_selection(10, 5);
+        app.drag_transcript_selection(99, 6);
+        app.end_transcript_selection(99, 6);
+
+        let selected = app.selected_transcript_text().expect("selected rows");
+        assert!(selected.contains("first row"));
+        assert!(selected.contains("second row"));
+        assert!(selected.contains("\n"));
+        let _ = fs::remove_file(path);
     }
 
     #[test]
