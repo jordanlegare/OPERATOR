@@ -35,7 +35,7 @@ The default input mode is **TERMINAL**.
 - ASCII-art banner that can be shown or hidden with F12, plus a live one-line input footer.
 - Unwrapped feed: each record is one row; long records are horizontally clipped, never word-wrapped.
 - Every row displays its full local date and time, including seconds and the UTC offset.
-- Click a transcript row to select it and load its exact entry text into the editable input line; the cursor moves to the end so you can edit or resubmit it.
+- Click a `CMD` transcript row to select it and load its command into the editable input line; clicking notes or output rows does not change the input. Drag selection still works across any transcript rows.
 - Left-click and drag to select text across rows without changing the current input draft.
 - Ctrl+C copies a selected transcript range through OSC 52; without a selection it retains its normal shell-interrupt / draft-clear behavior.
 - Up/Down moves a highlighted row through the transcript and keeps it visible; highlighting a `CMD` row automatically loads that command into the editable input line. Holding either key repeats row navigation.
@@ -123,7 +123,8 @@ The palettes are built into StreamNote and require no external theme package or 
 | `End` | Select the latest row and load it into input when it is a `CMD` entry |
 | `Ctrl+L` | Follow the latest record without replacing the input draft |
 | Mouse wheel | Scroll vertically |
-| Left-click a transcript row | Select the complete row and load its text into the input line |
+| Left-click a `CMD` row | Select the complete command row and load its command into the input line |
+| Left-click a `NOTE`, `OUT`, or `SYS` row | No action; the input line is left unchanged |
 | Left-click + drag | Select text across one or more transcript rows |
 | `Ctrl+C` with a selection | Copy selected transcript text via OSC 52 |
 | `Ctrl+C` without a selection | Send SIGINT to shell (TERMINAL) or clear the draft (NOTES) |
