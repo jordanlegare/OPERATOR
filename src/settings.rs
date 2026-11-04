@@ -51,6 +51,11 @@ impl Settings {
             options.mode(0o600);
         }
         let mut file = options.open(&temporary)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
         file.write_all(&contents)?;
         file.sync_all()?;
         drop(file);
