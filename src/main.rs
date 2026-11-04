@@ -152,13 +152,24 @@ fn run(
                         && matches!(key.code, KeyCode::Up | KeyCode::Down)) =>
             {
                 if key.kind == KeyEventKind::Press && key.code == KeyCode::F(1) {
-                    if let Some(session) = shell.as_mut() {
-                        run_terminal_workspace(terminal, app, session)?;
-                        terminal.clear()?;
-                    } else {
-                        app.status = "Interactive shell is unavailable.".to_string();
+                    let size = terminal.size()?;
+                    match ShellSession::spawn(size.width, size.height) {
+                        Ok(mut workspace_session) => {
+                            app.record_system(format!(
+                                "Opened independent terminal workspace ({}) with its own PTY.",
+                                workspace_session.shell_program().display()
+                            ));
+                            run_terminal_workspace(terminal, app, &mut workspace_session)?;
+                            // Dropping this session closes only the workspace shell.
+                            // STREENOTE's primary transcript shell remains untouched.
+                            app.record_system("Closed independent terminal workspace; returned to STREENOTE.".to_string());
+                            terminal.clear()?;
+                        }
+                        Err(error) => {
+                            app.status = format!("Could not start independent terminal workspace: {error}");
+                        }
                     }
-                } else if handle_key(key.code, key.modifiers, app, shell)? {
+                }                } else if handle_key(key.code, key.modifiers, app, shell)? {
                     break;
                 }
             }
