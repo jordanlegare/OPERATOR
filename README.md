@@ -16,7 +16,7 @@ StreamNote starts the configured interactive shell (`$SHELL`, falling back to `/
 - The shell is launched at startup using the user's normal interactive shell configuration.
 - PTY dimensions follow the terminal window size.
 
-Press F1 to hand the real terminal directly to the embedded shell PTY. Full-screen programs such as `vim`, `nano`, `less`, `top`, and `htop` then use the terminal emulator normally; press F1 again to return to the transcript. PTY output is also parsed into readable journal rows while the raw ANSI stream is displayed live.
+Press F1 to open a separate interactive terminal workspace backed by its own independent PTY and shell process. Full-screen programs such as `vim`, `nano`, `less`, `top`, and `htop` use the terminal emulator normally. Press F1 again to return to the transcript; closing the workspace does not interrupt STREENOTE's primary shell. Readable workspace output is also captured in the journal while raw ANSI output is displayed live.
 
 ## Modes
 
@@ -89,7 +89,7 @@ Switch palettes directly with the unmodified **F2** through **F10** keys. Each k
 | `F9` | 8 | Arctic Blue |
 | `F10` | 9 | Monochrome Max |
 
-The palettes are built into StreamNote and require no external theme package or configuration download. F1 enters the full-screen interactive terminal workspace; press F1 again to return. F12 shows or hides the ASCII-art banner.
+The palettes are built into StreamNote and require no external theme package or configuration download. F1 opens a full-screen interactive terminal workspace with a separate PTY and shell process; press F1 again to return. The primary STREENOTE shell continues running independently. F12 shows or hides the ASCII-art banner.
 
 ## Commands
 
@@ -171,4 +171,4 @@ Commands run with the permissions of the user who launched StreamNote. Terminal 
 - The full timestamp is retained in the journal and shown in local time with its UTC offset. Mouse selection operates on rendered transcript columns; OSC 52 copying depends on terminal clipboard support.
 - PTY data can be emitted in partial chunks. An unfinished visible prompt/line is flushed after a brief idle interval and again when the shell exits.
 - UTF-8 characters split across PTY reads are reassembled; invalid byte sequences are represented with U+FFFD.
-- Full-screen applications are not rendered inside the transcript. A future screen-passthrough mode would need to temporarily suspend Ratatui or embed a terminal emulator.
+- Full-screen applications are displayed directly by the host terminal while the independent workspace PTY is active. Their alternate-screen redraws are intentionally excluded from the readable transcript; ordinary output is journaled.
