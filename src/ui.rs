@@ -102,8 +102,9 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
 
 fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     let title = format!(
-        " TRANSCRIPT  ·  {} RECORDS  ·  UNWRAPPED  ·  SEARCHABLE ",
-        app.journal.entries.len()
+        " TRANSCRIPT  ·  {} RECORDS  ·  {}  ·  SEARCHABLE ",
+        app.journal.entries.len(),
+        if app.wrap_transcript { "WORD WRAP" } else { "UNWRAPPED" }
     );
     let block = Block::default()
         .borders(Borders::ALL)
@@ -125,7 +126,6 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
         .iter()
         .enumerate()
         .skip(top)
-        .take(inner.height as usize)
         .map(|(index, entry)| entry_line(entry, index, app, theme))
         .collect();
 
@@ -141,7 +141,24 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
         visible
     };
 
-    frame.render_widget(Paragraph::new(lines).scroll((0, app.feed_hscroll)), inner);
+    let paragraph = Paragraph::new(lines);
+    if app.wrap_transcript {
+        let visual_rows: usize = app.journal.entries.iter().skip(top).map(|entry| {
+            let width = UnicodeWidthStr::width(entry_transcript_text(entry, 0).as_str());
+            width.max(1).div_ceil(inner.width.max(1) as usize)
+        }).sum();
+        let vertical_scroll = if app.follow_tail {
+            visual_rows.saturating_sub(inner.height as usize)
+        } else {
+            0
+        };
+        frame.render_widget(
+            paragraph.wrap(Wrap { trim: false }).scroll((vertical_scroll.min(u16::MAX as usize) as u16, 0)),
+            inner,
+        );
+    } else {
+        frame.render_widget(paragraph.scroll((0, app.feed_hscroll)), inner);
+    }
 }
 
 fn entry_line(entry: &Entry, index: usize, app: &App, theme: Theme) -> Line<'static> {
@@ -364,6 +381,8 @@ fn draw_hints(frame: &mut Frame, area: Rect, theme: Theme) {
         Span::styled("mouse  ", Style::default().fg(theme.muted)),
         Span::styled("Tab ", Style::default().fg(theme.primary)),
         Span::styled("complete  ", Style::default().fg(theme.muted)),
+        Span::styled("Ctrl+W ", Style::default().fg(theme.primary)),
+        Span::styled(if app.wrap_transcript { "wrap on  " } else { "wrap off  " }, Style::default().fg(theme.muted)),
         Span::styled("Ctrl+P/N ", Style::default().fg(theme.primary)),
         Span::styled("history  ", Style::default().fg(theme.muted)),
         Span::styled("/search ", Style::default().fg(theme.primary)),
@@ -425,7 +444,7 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         Line::from("Each transcript row displays the full local date, time, seconds and UTC offset."),
         Line::from("Tab completes shell commands and paths · four spaces in Notes mode"),
         Line::from(format!("F2–F10 switches high-contrast palettes (F2 = 1, F10 = 9) · active: {}", theme.name)),
-        Line::from("Alt+←/→ horizontal pan · Ctrl+P/N command history · Ctrl+S save · Ctrl+T mode"),
+        Line::from("Ctrl+W toggles transcript word wrap · Alt+←/→ horizontal pan · Ctrl+P/N history · Ctrl+S save · Ctrl+T mode"),
         Line::from("Esc clears the input line · F12 shows or hides the ASCII-art banner"),
         Line::from("Ctrl+C sends SIGINT to the shell · Ctrl+D sends EOF · Ctrl+Q quits StreamNote"),
         Line::from(""),
