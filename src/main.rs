@@ -207,7 +207,7 @@ fn run_terminal_workspace(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
             let (raw, lines) = session.drain_passthrough();
             if !raw.is_empty() { out.write_all(&raw)?; out.flush()?; }
             if !lines.is_empty() { app.capture_terminal_output(lines); }
-            if let Some(code) = session.check_exit()? { app.record_system(format!("Interactive shell exited with status {code}.")); break; }
+            if let Some(code) = session.check_exit()? { app.set_mode(InputMode::Notes); app.record_system(format!("Interactive shell exited with status {code}. Switched to Notes mode.")); break; }
             if !event::poll(Duration::from_millis(12))? { continue; }
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat => {
