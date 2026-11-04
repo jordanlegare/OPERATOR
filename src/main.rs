@@ -1,5 +1,6 @@
 mod app;
 mod shell;
+mod settings;
 mod storage;
 mod theme;
 mod ui;
@@ -7,6 +8,7 @@ mod ui;
 use std::{
     io::{self, stdout, Write},
     path::PathBuf,
+    process::Command,
     time::Duration,
 };
 
@@ -77,6 +79,7 @@ impl Drop for TerminalGuard {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dispatch_ssh_invocation();
     let args = Args::parse();
     let journal_path = args.file.unwrap_or_else(default_journal_path);
     let journal = Journal::open(journal_path)?;
@@ -127,6 +130,175 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     result?;
     save_result?;
     Ok(())
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileTransferRequest {
+    Sftp,
+    LegacyScp,
+}
+
+/// Dispatch sshd's non-interactive login-shell invocations before the TUI
+/// initializes. Transfer data retains the original SSH channel file descriptors.
+#[cfg(unix)]
+fn dispatch_ssh_invocation() {
+    use std::{ffi::OsStr, os::unix::process::CommandExt};
+
+    // Do not reinterpret ordinary local invocations of the executable.
+    if std::env::var_os("SSH_CONNECTION").is_none() {
+        return;
+    }
+
+    let mut arguments = std::env::args_os();
+    let _program = arguments.next();
+    if arguments.next().as_deref() != Some(OsStr::new("-c")) {
+        return;
+    }
+
+    let Some(command) = arguments.next() else {
+        eprintln!("STREENOTE: SSH supplied -c without a command.");
+        std::process::exit(2);
+    };
+    let command_text = command.to_string_lossy();
+
+    if let Some(request) = detect_file_transfer_request(&command_text) {
+        if !settings::Settings::load().scp_sftp_passthrough {
+            eprintln!("STREENOTE: SCP/SFTP passthrough is disabled. Enable it with /scp on.");
+            std::process::exit(1);
+        }
+
+        match request {
+            FileTransferRequest::Sftp => {
+                // The subsystem path comes from sshd configuration. Execute
+                // it directly so no shell startup output can corrupt SFTP.
+                let words = match split_command_words(&command_text) {
+                    Some(words) if !words.is_empty() => words,
+                    _ => {
+                        eprintln!("STREENOTE: invalid SFTP subsystem command.");
+                        std::process::exit(2);
+                    }
+                };
+                let mut server = Command::new(&words[0]);
+                server.args(&words[1..]);
+                let error = server.exec();
+                eprintln!("STREENOTE: could not execute SFTP subsystem {}: {error}", words[0]);
+                std::process::exit(127);
+            }
+            FileTransferRequest::LegacyScp => {
+                // Legacy SCP uses shell-quoted remote paths; delegate the
+                // original command string to Bash without allocating a PTY.
+                let error = Command::new("/bin/bash")
+                    .arg("-c")
+                    .arg(&command)
+                    .env("SHELL", "/bin/bash")
+                    .exec();
+                eprintln!("STREENOTE: could not execute legacy SCP command: {error}");
+                std::process::exit(127);
+            }
+        }
+    }
+
+    // Ordinary remote SSH commands retain normal non-interactive shell behavior.
+    let error = Command::new("/bin/bash")
+        .arg("-c")
+        .arg(&command)
+        .arg("streenote-ssh")
+        .args(arguments)
+        .env("SHELL", "/bin/bash")
+        .exec();
+    eprintln!("STREENOTE: could not execute remote command through /bin/bash: {error}");
+    std::process::exit(127);
+}
+
+#[cfg(not(unix))]
+fn dispatch_ssh_invocation() {}
+
+fn detect_file_transfer_request(command: &str) -> Option<FileTransferRequest> {
+    let words = split_command_words(command)?;
+    let start = usize::from(words.first().is_some_and(|word| word == "exec"));
+    let executable = words.get(start)?;
+    let name = std::path::Path::new(executable)
+        .file_name()
+        .and_then(|name| name.to_str())?;
+
+    if name == "sftp-server" {
+        return Some(FileTransferRequest::Sftp);
+    }
+
+    if name == "scp" {
+        let is_server_mode = words.iter().skip(start + 1).any(|argument| {
+            matches!(argument.as_str(), "-t" | "-f")
+                || (argument.starts_with('-')
+                    && !argument.starts_with("--")
+                    && argument[1..].chars().any(|flag| flag == 't' || flag == 'f'))
+        });
+        if is_server_mode {
+            return Some(FileTransferRequest::LegacyScp);
+        }
+    }
+
+    None
+}
+
+/// Split the simple executable/argument form used by sshd's Subsystem setting.
+/// Handles quotes and backslash escapes without shell expansion.
+fn split_command_words(command: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut in_word = false;
+
+    for character in command.chars() {
+        if escaped {
+            current.push(character);
+            in_word = true;
+            escaped = false;
+            continue;
+        }
+
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            } else if character == '\\' && delimiter == '"' {
+                escaped = true;
+            } else {
+                current.push(character);
+            }
+            in_word = true;
+            continue;
+        }
+
+        match character {
+            '\'' | '"' => {
+                quote = Some(character);
+                in_word = true;
+            }
+            '\\' => {
+                escaped = true;
+                in_word = true;
+            }
+            whitespace if whitespace.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            other => {
+                current.push(other);
+                in_word = true;
+            }
+        }
+    }
+
+    if escaped || quote.is_some() {
+        return None;
+    }
+    if in_word {
+        words.push(current);
+    }
+    Some(words)
 }
 
 fn run(
@@ -456,6 +628,55 @@ fn theme_number_from_key(code: KeyCode, modifiers: KeyModifiers) -> Option<usize
     match code {
         KeyCode::F(key @ 2..=10) => Some((key - 1) as usize),
         _ => None,
+    }
+}
+
+
+#[cfg(test)]
+mod ssh_dispatch_tests {
+    use super::{detect_file_transfer_request, split_command_words, FileTransferRequest};
+
+    #[test]
+    fn detects_external_sftp_subsystem() {
+        assert_eq!(
+            detect_file_transfer_request("/usr/lib/openssh/sftp-server"),
+            Some(FileTransferRequest::Sftp)
+        );
+        assert_eq!(
+            detect_file_transfer_request("/usr/lib/openssh/sftp-server -f AUTHPRIV -l INFO"),
+            Some(FileTransferRequest::Sftp)
+        );
+    }
+
+    #[test]
+    fn detects_legacy_scp_upload_and_download_requests() {
+        assert_eq!(
+            detect_file_transfer_request("scp -t '/home/jordan/a file'"),
+            Some(FileTransferRequest::LegacyScp)
+        );
+        assert_eq!(
+            detect_file_transfer_request("/usr/bin/scp -f /tmp/archive.tar"),
+            Some(FileTransferRequest::LegacyScp)
+        );
+    }
+
+    #[test]
+    fn does_not_misclassify_interactive_or_unrelated_remote_commands() {
+        assert_eq!(detect_file_transfer_request("hostname"), None);
+        assert_eq!(detect_file_transfer_request("scp local-file /tmp/file"), None);
+        assert_eq!(detect_file_transfer_request("scp -r source destination"), None);
+    }
+
+    #[test]
+    fn command_word_splitter_preserves_quoted_sftp_arguments() {
+        assert_eq!(
+            split_command_words("/usr/lib/openssh/sftp-server -d '/home/jordan/My Files'"),
+            Some(vec![
+                "/usr/lib/openssh/sftp-server".to_string(),
+                "-d".to_string(),
+                "/home/jordan/My Files".to_string()
+            ])
+        );
     }
 }
 
