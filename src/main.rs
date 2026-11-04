@@ -289,26 +289,55 @@ fn default_journal_path() -> PathBuf {
 
 /// Map Alt+1..Alt+9 to their 1-based theme indexes.
 ///
-/// AltGr on several non-US layouts is emitted as Ctrl+Alt. The character
-/// can also be the layout's shifted/third-level symbol rather than an ASCII
-/// digit, so accept the common US and Québec French number-row characters.
+/// On some terminal/layout combinations Ctrl+Alt number-row presses arrive
+/// as control-key aliases instead of the AltGr character. Handle both the
+/// produced Canadian-French symbols and common control-byte translations.
 fn theme_number_from_key(code: KeyCode, modifiers: KeyModifiers) -> Option<usize> {
-    if !modifiers.contains(KeyModifiers::ALT) {
-        return None;
+    let alt = modifiers.contains(KeyModifiers::ALT);
+    let control = modifiers.contains(KeyModifiers::CONTROL);
+
+    // Normal Alt-number events and layout-produced characters.
+    if alt {
+        match code {
+            KeyCode::Char('1' | '!' | '±') => return Some(1),
+            KeyCode::Char('2' | '@' | '"') => return Some(2),
+            KeyCode::Char('3' | '#' | '/' | '£') => return Some(3),
+            KeyCode::Char('4' | '$' | '¢') => return Some(4),
+            KeyCode::Char('5' | '%' | '¤') => return Some(5),
+            KeyCode::Char('6' | '^' | '?' | '¬') => return Some(6),
+            KeyCode::Char('7' | '&' | '¦' | '¡') => return Some(7),
+            KeyCode::Char('8' | '*' | '²') => return Some(8),
+            KeyCode::Char('9' | '(' | '³') => return Some(9),
+            _ => {}
+        }
     }
 
-    match code {
-        KeyCode::Char('1' | '!' | '±') => Some(1),
-        KeyCode::Char('2' | '@' | '"') => Some(2),
-        KeyCode::Char('3' | '#' | '/' | '£') => Some(3),
-        KeyCode::Char('4' | '$' | '¢') => Some(4),
-        KeyCode::Char('5' | '%' | '¤') => Some(5),
-        KeyCode::Char('6' | '^' | '?' | '¬') => Some(6),
-        KeyCode::Char('7' | '&' | '¦') => Some(7),
-        KeyCode::Char('8' | '*' | '²') => Some(8),
-        KeyCode::Char('9' | '(' | '³') => Some(9),
-        _ => None,
+    // Some terminals reduce Ctrl+Alt+2/3/8 to control-key events:
+    // Ctrl+@ -> NUL/space, Ctrl+3 -> ESC, and Ctrl+8 -> backspace/Ctrl+H.
+    // Accept these only when Alt is also present so ordinary Ctrl keys remain
+    // available to StreamNote.
+    if alt && control {
+        match code {
+            KeyCode::Char(' ') => return Some(2),
+            KeyCode::Esc => return Some(3),
+            KeyCode::Char('h' | 'H') | KeyCode::Backspace => return Some(8),
+            _ => {}
+        }
     }
+
+    // Some Windows/terminal backends keep the AltGr-produced character but
+    // drop the ALT bit, leaving only CONTROL. Limit this fallback to the
+    // three affected layout-specific characters.
+    if control && !alt {
+        match code {
+            KeyCode::Char('@') => return Some(2),
+            KeyCode::Char('£') => return Some(3),
+            KeyCode::Char('²') => return Some(8),
+            _ => {}
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -351,6 +380,31 @@ mod theme_shortcut_tests {
                 Some(expected)
             );
         }
+    }
+
+    #[test]
+    fn recognizes_control_byte_aliases_for_altgr_two_three_and_eight() {
+        let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        assert_eq!(theme_number_from_key(KeyCode::Char(' '), altgr), Some(2));
+        assert_eq!(theme_number_from_key(KeyCode::Esc, altgr), Some(3));
+        assert_eq!(theme_number_from_key(KeyCode::Char('h'), altgr), Some(8));
+        assert_eq!(theme_number_from_key(KeyCode::Backspace, altgr), Some(8));
+    }
+
+    #[test]
+    fn recognizes_altgr_symbols_when_backend_drops_alt_modifier() {
+        assert_eq!(
+            theme_number_from_key(KeyCode::Char('@'), KeyModifiers::CONTROL),
+            Some(2)
+        );
+        assert_eq!(
+            theme_number_from_key(KeyCode::Char('£'), KeyModifiers::CONTROL),
+            Some(3)
+        );
+        assert_eq!(
+            theme_number_from_key(KeyCode::Char('²'), KeyModifiers::CONTROL),
+            Some(8)
+        );
     }
 
     #[test]
