@@ -33,6 +33,9 @@ The default input mode is **TERMINAL**.
 
 - ASCII-art banner and live one-line input footer with draft preview.
 - Unwrapped feed: each record is one row; long records are horizontally clipped, never word-wrapped.
+- Every row displays its full local date and time, including seconds and the UTC offset.
+- Click a transcript row to select it, or left-click and drag to select text across rows.
+- Ctrl+C copies a selected transcript range through OSC 52; without a selection it retains its normal shell-interrupt / draft-clear behavior.
 - Arrow keys, Page Up/Down, Home/End, and mouse-wheel scrolling.
 - `Alt+Left` / `Alt+Right` horizontally pan the feed.
 - Unbounded in-memory `Vec<Entry>` with no application-level cache eviction.
@@ -46,7 +49,7 @@ The default input mode is **TERMINAL**.
 
 - Debian or another Unix-like OS with a PTY implementation.
 - Rust stable toolchain (install with [rustup](https://rustup.rs/)).
-- A terminal with mouse support for wheel scrolling.
+- A terminal with mouse support for wheel scrolling and OSC 52 clipboard access for selection copying (support varies by terminal emulator and SSH client).
 - `$SHELL` set to a valid interactive shell, or `/bin/bash` available.
 
 ## Build and run
@@ -117,6 +120,10 @@ The palettes are built into StreamNote and require no external theme package or 
 | `Home` | Oldest record |
 | `End` / `Ctrl+L` | Follow the latest record |
 | Mouse wheel | Scroll vertically |
+| Left-click a transcript row | Select the complete row |
+| Left-click + drag | Select text across one or more transcript rows |
+| `Ctrl+C` with a selection | Copy selected transcript text via OSC 52 |
+| `Ctrl+C` without a selection | Send SIGINT to shell (TERMINAL) or clear the draft (NOTES) |
 | `Shift` + mouse wheel | Faster vertical scroll |
 | `Alt+Left` / `Alt+Right` | Pan feed horizontally |
 | `Tab` | Complete shell commands and filesystem paths (four-space indent in NOTES mode) |
@@ -137,6 +144,8 @@ Each line in `journal.jsonl` is an independent JSON object. Example:
 {"timestamp":"2026-10-31T17:30:00-04:00","kind":"terminal_command","text":"uname -a"}
 {"timestamp":"2026-10-31T17:30:01-04:00","kind":"terminal_output","text":"Linux debian 6.1.0-amd64 ..."}
 {"timestamp":"2026-10-31T17:31:00-04:00","kind":"note","text":"Investigate kernel update"}
+
+The transcript renders each stored RFC 3339 timestamp as local `YYYY-MM-DD HH:MM:SS ±HH:MM`, so the date, time and UTC offset are visible for every row.
 ```
 
 Kinds are `note`, `terminal_command`, `terminal_output`, and `system`. Old records without `kind` are treated as notes. The journal is append-only from the application's perspective; malformed lines are skipped at load and counted in the startup status. It is never truncated by StreamNote. Input entered while terminal echo is off is intentionally not included.
@@ -155,6 +164,7 @@ Commands run with the permissions of the user who launched StreamNote. Terminal 
 
 - PTY stdout and stderr are merged by design; StreamNote records what the shell terminal visibly emits.
 - ANSI escape sequences are removed before storage. This keeps the transcript searchable and avoids injecting terminal control sequences into the UI.
+- The full timestamp is retained in the journal and shown in local time with its UTC offset. Mouse selection operates on rendered transcript columns; OSC 52 copying depends on terminal clipboard support.
 - PTY data can be emitted in partial chunks. An unfinished visible prompt/line is flushed after a brief idle interval and again when the shell exits.
 - UTF-8 characters split across PTY reads are reassembled; invalid byte sequences are represented with U+FFFD.
 - Full-screen applications are not rendered inside the transcript. A future screen-passthrough mode would need to temporarily suspend Ratatui or embed a terminal emulator.
