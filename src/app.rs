@@ -168,6 +168,55 @@ impl App {
         }
     }
 
+    /// Extend a full-row transcript selection with Shift+Up/Down.
+    /// The first keypress anchors at the current row (or visible edge).
+    pub fn extend_row_selection(&mut self, direction: i8) {
+        let entry_count = self.journal.entries.len();
+        if entry_count == 0 {
+            return;
+        }
+
+        let top = self.current_top().min(entry_count - 1);
+        let bottom = top
+            .saturating_add(self.feed_viewport_height.max(1).saturating_sub(1))
+            .min(entry_count - 1);
+        let anchor_row = self.selection
+            .filter(|selection| selection.whole_row)
+            .map(|selection| selection.anchor.row)
+            .unwrap_or_else(|| self.selected_row.unwrap_or(if direction < 0 { bottom } else { top }));
+        let current_row = self.selection
+            .filter(|selection| selection.whole_row)
+            .map(|selection| selection.active.row)
+            .unwrap_or(anchor_row);
+        let next_row = if direction < 0 {
+            current_row.saturating_sub(1)
+        } else {
+            current_row.saturating_add(1).min(entry_count - 1)
+        };
+
+        self.selection = Some(TranscriptSelection {
+            anchor: TranscriptPoint { row: anchor_row, column: 0 },
+            active: TranscriptPoint { row: next_row, column: usize::MAX },
+            whole_row: true,
+        });
+        self.selection_dragging = false;
+        self.selected_row = Some(next_row);
+        self.follow_tail = false;
+        let viewport = self.feed_viewport_height.max(1);
+        let mut new_top = self.scroll_top.min(self.max_top());
+        if next_row < new_top {
+            new_top = next_row;
+        } else if next_row >= new_top.saturating_add(viewport) {
+            new_top = next_row.saturating_add(1).saturating_sub(viewport);
+        }
+        self.scroll_top = new_top.min(self.max_top());
+        self.status = format!(
+            "Selected transcript rows {}–{}; Ctrl+C copies the range.",
+            anchor_row.min(next_row) + 1,
+            anchor_row.max(next_row) + 1
+        );
+    }
+
     pub fn move_row_selection(&mut self, direction: i8) {
         let entry_count = self.journal.entries.len();
         if entry_count == 0 {
@@ -380,7 +429,9 @@ impl App {
     ) -> Option<(usize, usize)> {
         let selection = self.selection?;
         if selection.whole_row {
-            return (row == selection.anchor.row && line_width > 0)
+            let first = selection.anchor.row.min(selection.active.row);
+            let last = selection.anchor.row.max(selection.active.row);
+            return (row >= first && row <= last && line_width > 0)
                 .then_some((0, line_width));
         }
 
