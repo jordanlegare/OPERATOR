@@ -26,12 +26,6 @@ impl InputMode {
         }
     }
 
-    pub fn prompt(self) -> &'static str {
-        match self {
-            Self::Terminal => "user@host:~$ ",
-            Self::Notes => "note› ",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -978,6 +972,22 @@ mod tests {
         let _ = fs::remove_file(&path);
         let journal = Journal::open(path.clone()).expect("open test journal");
         (App::new(journal, String::new()), path)
+    }
+
+    #[test]
+    fn submitted_secret_is_not_journaled_and_rearms_mask_for_next_prompt() {
+        let (mut app, path) = test_app();
+        app.secret_input = true;
+        app.input = "do-not-log-this".to_string();
+        app.cursor = app.input.len();
+
+        app.submit(None);
+
+        assert!(!app.secret_input);
+        assert!(app.input.is_empty());
+        assert!(app.history.is_empty());
+        assert!(app.journal.entries.is_empty());
+        let _ = fs::remove_file(path);
     }
 
     #[test]
