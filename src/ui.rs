@@ -222,7 +222,7 @@ fn draw_maple_watermark(frame: &mut Frame, area: Rect, theme: Theme) {
             let position = (left + x, top + y);
             if let Some(cell) = buffer.cell_mut(position) {
                 if cell.symbol() == " "
-                    && cell.diff_option != CellDiffOption::Skip
+                    && cell.diff_option == CellDiffOption::None
                     && cell.bg != theme.selected_row
                     && cell.bg != theme.search_bg
                 {
