@@ -965,6 +965,33 @@ mod tests {
     }
 
     #[test]
+    fn dragging_selects_a_partial_text_range() {
+        use crate::storage::{entry_transcript_text, Entry, EntryKind};
+        use ratatui::layout::Rect;
+        use unicode_width::UnicodeWidthStr;
+
+        let (mut app, path) = test_app();
+        app.journal
+            .append(Entry::with_kind(EntryKind::Note, "select this note".to_string()))
+            .expect("append test row");
+        app.feed_viewport_height = 3;
+        app.feed_area = Rect::new(10, 5, 100, 3);
+
+        let row = entry_transcript_text(&app.journal.entries[0], 0);
+        let start_column = UnicodeWidthStr::width(&row[..row.find("select").unwrap()]);
+        let x = 10 + start_column as u16;
+        app.begin_transcript_selection(x, 5);
+        app.drag_transcript_selection(x + 5, 5);
+        app.end_transcript_selection(x + 5, 5);
+
+        assert_eq!(
+            app.selected_transcript_text().as_deref(),
+            Some("select")
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn dragging_selects_text_across_transcript_rows() {
         use crate::storage::{Entry, EntryKind};
         use ratatui::layout::Rect;
