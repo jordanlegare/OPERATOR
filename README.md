@@ -104,6 +104,7 @@ The palettes are built into StreamNote and require no external theme package or 
 | `/path` | Show the journal file path |
 | `/mode [shell|notes]` | Switch mode; no argument toggles |
 | `/help` or F1 | Open help |
+| `F12` then a key | Display the received key code and modifiers for keyboard diagnostics |
 | `/quit` or `/q` | Save pending records and quit |
 | `//text` | Store text beginning with `/` literally as a note |
 
@@ -126,6 +127,7 @@ The palettes are built into StreamNote and require no external theme package or 
 | `Ctrl+C` | Send Ctrl+C (SIGINT) to the embedded shell in TERMINAL mode; clear the draft in NOTES mode |
 | `Ctrl+D` | Send end-of-input to the shell when the terminal input is empty |
 | `Ctrl+Q` | Quit StreamNote |
+| `F12` | Arm a one-shot keyboard event diagnostic; press the key to inspect next |
 
 ## Journal format
 
