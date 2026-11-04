@@ -898,16 +898,15 @@ impl App {
             }
             "/path" => self.status = format!("Journal: {}", self.journal.path.display()),
             "/scp" => match argument.to_ascii_lowercase().as_str() {
-                "" | "toggle" => self.set_scp_sftp_passthrough(!self.scp_sftp_passthrough),
-                "status" => {
+                "" | "status" => {
                     self.status = format!(
-                        "SCP/SFTP passthrough is {}. Usage: /scp [on|off|status]",
+                        "SCP/SFTP passthrough is {}. Usage: /scp on | /scp off | /scp status",
                         if self.scp_sftp_passthrough { "enabled" } else { "disabled" }
                     );
                 }
                 "on" | "enable" | "enabled" => self.set_scp_sftp_passthrough(true),
                 "off" | "disable" | "disabled" => self.set_scp_sftp_passthrough(false),
-                _ => self.status = "Usage: /scp [on|off|status]".to_string(),
+                _ => self.status = "Usage: /scp on | /scp off | /scp status".to_string(),
             },
             "/canada" => match argument.to_ascii_lowercase().as_str() {
                 "" | "toggle" => self.set_canada_watermark(!self.show_canada_watermark),
