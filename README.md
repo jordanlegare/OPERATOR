@@ -7,9 +7,18 @@ A Rust terminal workspace combining a live **Debian shell**, a persistent comman
 StreamNote starts the configured interactive shell (`$SHELL`, falling back to `/bin/bash`) in a real pseudo-terminal (PTY) when the application initializes. The PTY gives commands a TTY rather than plain stdin/stdout pipes.
 
 - Type a shell command in the footer and press Enter.
-- Each non-secret submitted command is recorded as a `CMD` journal entry. Secret input submitted while PTY echo is disabled is deliberately omitted.
+- Each non-secret submitted command is recorded once as a `CMD` journal entry. PTY input echo (including newline echo) is disabled, so the submitted command is not duplicated as an `OUT` row. Secret input is still omitted from the journal.
 - PTY output is read asynchronously. stdout and stderr share the PTY and are recorded as `OUT` entries.
-- The shell's prompt and visible output are captured as transcript entries.
+- The shell's prompt and visible output are captured as transcript entries. The input footer prompt shows `user@hostname:current_path# StreeNote
+
+A Rust terminal workspace combining a live **Debian shell**, a persistent command/output transcript, and a fast append-only note stream. Built with **Ratatui**, **Crossterm**, and **portable-pty**.
+
+## What's new: embedded Debian shell
+
+StreamNote starts the configured interactive shell (`$SHELL`, falling back to `/bin/bash`) in a real pseudo-terminal (PTY) when the application initializes. The PTY gives commands a TTY rather than plain stdin/stdout pipes.
+
+- Type a shell command in the footer and press Enter.
+ and refreshes as the shell changes directories; the home directory is abbreviated as `~`.
 - ANSI escape sequences are stripped from the transcript; carriage-return progress updates are represented as their final line.
 - Terminal commands, output, notes, and system events all share the same searchable feed and append-only JSONL journal.
 - The shell is launched at startup using the user's normal interactive shell configuration.
