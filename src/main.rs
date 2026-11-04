@@ -146,7 +146,11 @@ fn run(
         }
 
         match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
+            Event::Key(key)
+                if key.kind == KeyEventKind::Press
+                    || (key.kind == KeyEventKind::Repeat
+                        && matches!(key.code, KeyCode::Up | KeyCode::Down)) =>
+            {
                 if handle_key(key.code, key.modifiers, app, shell)? {
                     break;
                 }
