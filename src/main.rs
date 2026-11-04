@@ -212,7 +212,7 @@ fn handle_key(
                         match copy_to_terminal_clipboard(&selected) {
                             Ok(()) => {
                                 app.status = format!(
-                                    "Copied {} characters from transcript via OSC 52 clipboard.",
+                                    "Sent {} characters to the terminal clipboard via OSC 52.",
                                     selected.chars().count()
                                 );
                             }
