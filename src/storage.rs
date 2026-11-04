@@ -78,6 +78,13 @@ impl Journal {
             match serde_json::from_str::<Entry>(&line) {
                 Ok(mut entry) => {
                     entry.text = sanitize_single_line(&entry.text);
+                    if entry.kind == EntryKind::TerminalOutput
+                        && should_suppress_terminal_output(&entry.text)
+                    {
+                        // Old empty rows and shell prompts are omitted from the
+                        // in-memory transcript without rewriting the user's journal.
+                        continue;
+                    }
                     total_text_bytes = total_text_bytes.saturating_add(entry.text.len());
                     entries.push(entry);
                 }
@@ -97,6 +104,11 @@ impl Journal {
     /// Adds to the in-memory cache first, then appends the record to disk.
     /// No cache limit or truncation is applied. A failed disk write stays queued for retry.
     pub fn append(&mut self, entry: Entry) -> io::Result<()> {
+        if entry.kind == EntryKind::TerminalOutput
+            && should_suppress_terminal_output(&entry.text)
+        {
+            return Ok(());
+        }
         self.total_text_bytes = self.total_text_bytes.saturating_add(entry.text.len());
         self.entries.push(entry.clone());
 
@@ -118,6 +130,13 @@ impl Journal {
     /// Batch append is used for PTY output so high-volume commands do not force
     /// one fsync per output line. Entries enter the cache before any disk I/O.
     pub fn append_batch(&mut self, entries: Vec<Entry>) -> io::Result<()> {
+        let entries: Vec<Entry> = entries
+            .into_iter()
+            .filter(|entry| {
+                entry.kind != EntryKind::TerminalOutput
+                    || !should_suppress_terminal_output(&entry.text)
+            })
+            .collect();
         if entries.is_empty() {
             return Ok(());
         }
@@ -210,6 +229,105 @@ impl Journal {
     }
 }
 
+/// Return true for PTY rows that are presentation noise rather than useful output:
+/// blank lines and the standard user@host:path$ / user@host:path# shell prompt.
+/// The prompt is already shown in StreamNote's live input footer.
+pub fn should_suppress_terminal_output(line: &str) -> bool {
+    let line = line.trim();
+    if line.is_empty() {
+        return true;
+    }
+
+    let Some((identity, path_prompt)) = line.rsplit_once(':') else {
+        return false;
+    };
+    let Some((user, host)) = identity.split_once('@') else {
+        return false;
+    };
+    let path = path_prompt
+        .strip_suffix('
+    match kind {
+        EntryKind::Note => "NOTE",
+        EntryKind::TerminalCommand => "CMD",
+        EntryKind::TerminalOutput => "OUT",
+        EntryKind::System => "SYS",
+    }
+}
+
+/// Format a journal timestamp in the current local timezone, retaining its UTC offset.
+pub fn format_timestamp(timestamp: &str) -> String {
+    DateTime::parse_from_rfc3339(timestamp)
+        .map(|time| {
+            time.with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S %:z")
+                .to_string()
+        })
+        .unwrap_or_else(|_| timestamp.to_string())
+}
+
+/// Plain-text equivalent of a rendered transcript row, used by mouse selection and copy.
+pub fn entry_transcript_text(entry: &Entry, index: usize) -> String {
+    format!(
+        "{:>6} {} {:<4} │ {}",
+        index + 1,
+        format_timestamp(&entry.timestamp),
+        entry_kind_label(entry.kind),
+        entry.text
+    )
+}
+
+fn append_jsonl(path: &Path, entry: &Entry) -> io::Result<()> {
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut bytes = serde_json::to_vec(entry).map_err(io::Error::other)?;
+    bytes.push(b'\n');
+    file.write_all(&bytes)?;
+    file.flush()?;
+    file.sync_data()
+}
+
+pub fn sanitize_single_line(input: &str) -> String {
+    input
+        .chars()
+        .filter_map(|ch| match ch {
+            '\n' | '\r' | '\t' => Some(' '),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::format_timestamp;
+
+    #[test]
+    fn timestamp_display_includes_date_time_and_offset() {
+        let formatted = format_timestamp("2026-11-03T22:44:00-05:00");
+        assert!(formatted.contains("2026"));
+        assert!(formatted.contains(':'));
+        assert!(formatted.len() >= 25);
+    }
+
+    #[test]
+    fn malformed_legacy_timestamp_is_preserved_in_full() {
+        let timestamp = "legacy-timestamp-value";
+        assert_eq!(format_timestamp(timestamp), timestamp);
+    }
+}
+)
+        .or_else(|| path_prompt.strip_suffix('#'));
+    let Some(path) = path.map(str::trim) else {
+        return false;
+    };
+
+    !user.is_empty()
+        && !host.is_empty()
+        && !user.chars().any(char::is_whitespace)
+        && !host.chars().any(char::is_whitespace)
+        && (path == "~" || path.starts_with("~/") || path.starts_with('/'))
+}
+
 pub fn entry_kind_label(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::Note => "NOTE",
@@ -278,5 +396,33 @@ mod timestamp_tests {
     fn malformed_legacy_timestamp_is_preserved_in_full() {
         let timestamp = "legacy-timestamp-value";
         assert_eq!(format_timestamp(timestamp), timestamp);
+    }
+}
+
+
+#[cfg(test)]
+mod terminal_output_filter_tests {
+    use super::should_suppress_terminal_output;
+
+    #[test]
+    fn suppresses_empty_and_whitespace_only_terminal_rows() {
+        assert!(should_suppress_terminal_output(""));
+        assert!(should_suppress_terminal_output("   "));
+        assert!(should_suppress_terminal_output("\t  "));
+    }
+
+    #[test]
+    fn suppresses_user_host_working_directory_prompts() {
+        assert!(should_suppress_terminal_output("jordan@server:~$ "));
+        assert!(should_suppress_terminal_output("jordan@server:~/Desktop$"));
+        assert!(should_suppress_terminal_output("root@debian:/etc# "));
+    }
+
+    #[test]
+    fn retains_normal_terminal_output() {
+        assert!(!should_suppress_terminal_output("/home/jordan"));
+        assert!(!should_suppress_terminal_output("BACKUPS Desktop Documents"));
+        assert!(!should_suppress_terminal_output("jordan@server is connected"));
+        assert!(!should_suppress_terminal_output("total 12"));
     }
 }
