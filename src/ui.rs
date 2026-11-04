@@ -18,22 +18,29 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let theme = THEMES.get(app.theme_index.saturating_sub(1)).copied().unwrap_or(THEMES[0]);
     frame.render_widget(Block::default().style(Style::default().bg(theme.bg)), frame.area());
 
+    let mut constraints = Vec::with_capacity(5);
+    if app.show_banner {
+        constraints.push(Constraint::Length(5));
+    }
+    constraints.extend([
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(3),
+        Constraint::Length(1),
+    ]);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(5),
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(3),
-            Constraint::Length(1),
-        ])
+        .constraints(constraints)
         .split(frame.area());
 
-    draw_banner(frame, chunks[0], theme);
-    draw_status(frame, chunks[1], app, theme);
-    draw_feed(frame, chunks[2], app, theme);
-    draw_input(frame, chunks[3], app, theme);
-    draw_hints(frame, chunks[4], theme);
+    let offset = usize::from(app.show_banner);
+    if app.show_banner {
+        draw_banner(frame, chunks[0], theme);
+    }
+    draw_status(frame, chunks[offset], app, theme);
+    draw_feed(frame, chunks[offset + 1], app, theme);
+    draw_input(frame, chunks[offset + 2], app, theme);
+    draw_hints(frame, chunks[offset + 3], theme);
 
     if app.show_help {
         draw_help(frame, frame.area(), theme);
@@ -365,7 +372,7 @@ fn draw_hints(frame: &mut Frame, area: Rect, theme: Theme) {
         Span::styled("F1 ", Style::default().fg(theme.primary)),
         Span::styled("help  ", Style::default().fg(theme.muted)),
         Span::styled("F12 ", Style::default().fg(theme.primary)),
-        Span::styled("key test  ", Style::default().fg(theme.muted)),
+        Span::styled("banner  ", Style::default().fg(theme.muted)),
         Span::styled("drag ", Style::default().fg(theme.primary)),
         Span::styled("select  ", Style::default().fg(theme.muted)),
         Span::styled("Ctrl+C ", Style::default().fg(theme.primary)),
@@ -420,7 +427,7 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         Line::from("Tab completes shell commands and paths · four spaces in Notes mode"),
         Line::from(format!("F2–F10 switches high-contrast palettes (F2 = 1, F10 = 9) · active: {}", theme.name)),
         Line::from("Alt+←/→ horizontal pan · Ctrl+P/N command history · Ctrl+S save · Ctrl+T mode"),
-        Line::from("F12 then press a key to display its Crossterm key code and modifiers for diagnostics"),
+        Line::from("Esc clears the input line · F12 shows or hides the ASCII-art banner"),
         Line::from("Ctrl+C sends SIGINT to the shell · Ctrl+D sends EOF · Ctrl+Q quits StreamNote"),
         Line::from(""),
         Line::from(Span::styled(
