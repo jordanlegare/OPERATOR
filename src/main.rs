@@ -318,6 +318,16 @@ fn handle_key(
             KeyCode::Char('e') => app.cursor_to_end(),
             KeyCode::Char('f') => app.focus_search_hint(),
             KeyCode::Char('t') => app.toggle_mode(),
+            KeyCode::Char('w') => {
+                app.wrap_transcript = !app.wrap_transcript;
+                if app.wrap_transcript {
+                    app.feed_hscroll = 0;
+                }
+                app.status = format!(
+                    "Transcript word wrap {}.",
+                    if app.wrap_transcript { "enabled" } else { "disabled" }
+                );
+            }
             _ => {}
         }
         return Ok(false);
