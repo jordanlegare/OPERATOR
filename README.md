@@ -119,6 +119,7 @@ The palettes are built into StreamNote and require no external theme package or 
 | Key | Action |
 |---|---|
 | `↑` / `↓` | Move the highlighted row one record at a time (hold to repeat); highlighted `CMD` entries load into the input line |
+| `Shift+↑` / `Shift+↓` | Extend or shrink a full-row transcript selection |
 | `PageUp` / `PageDown` | Scroll one viewport while keeping the highlighted row visible |
 | `Home` | Oldest record |
 | `End` | Select the latest row and load it into input when it is a `CMD` entry |
@@ -128,6 +129,7 @@ The palettes are built into StreamNote and require no external theme package or 
 | Left-click a `NOTE`, `OUT`, or `SYS` row | No action; the input line is left unchanged |
 | Left-click + drag | Select text across one or more transcript rows |
 | `Ctrl+C` with a selection | Copy selected transcript text via OSC 52 |
+| `Shift+↑` / `Shift+↓`, then `Ctrl+C` | Select and copy multiple complete transcript rows via OSC 52 |
 | `Ctrl+C` without a selection | Send SIGINT to shell (TERMINAL) or clear the draft (NOTES) |
 | `Shift` + mouse wheel | Faster vertical scroll |
 | `Alt+Left` / `Alt+Right` | Pan feed horizontally |
