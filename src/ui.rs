@@ -403,6 +403,7 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         .style(Style::default().bg(theme.panel));
     frame.render_widget(
         Paragraph::new(text)
+            .style(Style::default().fg(theme.text).bg(theme.panel))
             .block(block)
             .wrap(Wrap { trim: false }),
         popup,
