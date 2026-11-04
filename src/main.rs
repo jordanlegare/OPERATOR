@@ -15,6 +15,7 @@ use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
         EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -44,8 +45,15 @@ impl TerminalGuard {
             EnterAlternateScreen,
             EnableMouseCapture,
             EnableBracketedPaste,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+            ),
             crossterm::cursor::Hide
         ) {
+            // Best-effort rollback in case the keyboard-protocol push was sent
+            // before a later terminal command failed.
+            let _ = execute!(out, PopKeyboardEnhancementFlags);
             let _ = disable_raw_mode();
             return Err(error);
         }
@@ -59,6 +67,7 @@ impl Drop for TerminalGuard {
         let mut out = stdout();
         let _ = execute!(
             out,
+            PopKeyboardEnhancementFlags,
             DisableBracketedPaste,
             DisableMouseCapture,
             LeaveAlternateScreen,
@@ -168,6 +177,8 @@ fn handle_key(
     app: &mut App,
     shell: &mut Option<ShellSession>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    // Prefer unambiguous modified-key events when the terminal supports the
+    // Kitty keyboard protocol; the parser below retains legacy/AltGr fallbacks.
     // Alt+1 through Alt+9 selects the built-in color themes.
     if let Some(number) = theme_number_from_key(code, modifiers) {
         app.set_theme(number);
