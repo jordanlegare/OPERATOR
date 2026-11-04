@@ -18,7 +18,7 @@ StreamNote starts the configured interactive shell (`$SHELL`, falling back to `/
 
 When STREENOTE is installed as an SSH login shell, SSH non-interactive requests are dispatched before the TUI starts. SFTP subsystem requests execute the configured external SFTP server directly with the original SSH stdin/stdout/stderr; legacy SCP server requests are delegated to Bash. Ordinary remote SSH commands are also run through Bash. No transfer data enters the STREENOTE PTYs, terminal renderer, transcript, or journal.
 
-Use `/scp on`, `/scp off`, or `/scp status` inside STREENOTE to control SCP/SFTP passthrough for new SSH connections. The bottom hint line continuously displays `/scp ON` or `/scp OFF` so the active setting is visible without opening the status command. It is enabled by default and persisted in `~/.config/streenote/config.json` (or `$XDG_CONFIG_HOME/streenote/config.json`). Disabling it rejects recognized SFTP subsystem and legacy SCP server requests; it does not disable ordinary remote SSH commands.
+Use `/scp on`, `/scp off`, or `/scp status` inside STREENOTE to control SCP/SFTP passthrough for new SSH connections. The bottom hint line continuously displays `/scp ON` or `/scp OFF` so the active setting is visible without opening the status command. It is enabled by default and persisted in `~/.config/streenote/config.json` (or `$XDG_CONFIG_HOME/streenote/config.json`). The same file stores `theme_index`, `wrap_transcript`, and `show_banner`; F2–F10, Ctrl+W, and F12 save their changes immediately. Disabling it rejects recognized SFTP subsystem and legacy SCP server requests; it does not disable ordinary remote SSH commands.
 
 Press F1 to open a separate interactive terminal workspace backed by its own independent PTY and shell process. Full-screen programs such as `vim`, `nano`, `less`, `top`, and `htop` use the terminal emulator normally. Press F1 again to return to the transcript; closing the workspace does not interrupt STREENOTE's primary shell. Workspace terminal output is displayed directly and is not added to the journal; only workspace open/close and shell-exit system events are recorded. The primary STREENOTE shell and its transcript continue independently.
 
@@ -36,8 +36,9 @@ The default input mode is **TERMINAL**.
 
 ## Other features
 
-- ASCII-art banner that can be shown or hidden with F12, plus a live one-line input footer.
-- Transcript display can toggle between unwrapped, horizontally clipped rows and word-wrapped rows with Ctrl+W; the setting is session-local.
+- ASCII-art banner that can be shown or hidden with F12, plus a live one-line input footer; banner visibility is restored at startup.
+- Transcript display can toggle between unwrapped, horizontally clipped rows and word-wrapped rows with Ctrl+W; the selected mode is restored at startup.
+- The selected F2–F10 color theme is restored at startup; theme, word-wrap, banner visibility, and SCP/SFTP passthrough preferences are saved together in the same config file.
 - A subdued ASCII maple-leaf watermark is centered behind the transcript, scaled to an 80% viewport region, and drawn only into unused cells so transcript text and selection remain readable.
 - Every row displays its full local date and time, including seconds and the UTC offset.
 - Click a `CMD` transcript row to select it and load its command into the editable input line; clicking notes or output rows does not change the input. Drag selection still works across any transcript rows.
