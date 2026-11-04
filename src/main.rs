@@ -168,16 +168,12 @@ fn handle_key(
     app: &mut App,
     shell: &mut Option<ShellSession>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    // Terminals commonly report Shift+1..Shift+9 as their US-layout
-    // symbols (! @ # $ % ^ & * (). Some report the digit plus SHIFT instead.
-    if modifiers.contains(KeyModifiers::SHIFT)
-        && !modifiers.contains(KeyModifiers::CONTROL)
-        && !modifiers.contains(KeyModifiers::ALT)
-    {
-        if let Some(number) = theme_number_from_shifted_key(code) {
-            app.set_theme(number);
-            return Ok(false);
-        }
+    // Require both Ctrl and Shift for theme selection. Terminals commonly
+    // report the shifted US-layout symbols (! @ # $ % ^ & * (); some report
+    // the digit itself with SHIFT and CONTROL modifiers set.
+    if let Some(number) = theme_number_from_key(code, modifiers) {
+        app.set_theme(number);
+        return Ok(false);
     }
 
     if modifiers.contains(KeyModifiers::CONTROL) {
@@ -293,8 +289,18 @@ fn default_journal_path() -> PathBuf {
 }
 
 
-/// Map Shift+1..Shift+9 to theme numbers. Supports both the physical US
-/// keyboard symbols and terminals that preserve the digit with SHIFT set.
+/// Map Ctrl+Shift+1..Ctrl+Shift+9 to theme numbers. Supports both US-layout
+/// shifted symbols and terminals that preserve the digit key event.
+fn theme_number_from_key(code: KeyCode, modifiers: KeyModifiers) -> Option<usize> {
+    if !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        || modifiers.contains(KeyModifiers::ALT)
+    {
+        return None;
+    }
+
+    theme_number_from_shifted_key(code)
+}
+
 fn theme_number_from_shifted_key(code: KeyCode) -> Option<usize> {
     match code {
         KeyCode::Char('!' | '1') => Some(1),
@@ -312,8 +318,8 @@ fn theme_number_from_shifted_key(code: KeyCode) -> Option<usize> {
 
 #[cfg(test)]
 mod theme_shortcut_tests {
-    use super::theme_number_from_shifted_key;
-    use crossterm::event::KeyCode;
+    use super::theme_number_from_key;
+    use crossterm::event::{KeyCode, KeyModifiers};
 
     #[test]
     fn recognizes_shifted_number_symbols_and_digit_events() {
@@ -325,7 +331,10 @@ mod theme_shortcut_tests {
         ];
         for (character, expected) in cases {
             assert_eq!(
-                theme_number_from_shifted_key(KeyCode::Char(character)),
+                theme_number_from_key(
+                    KeyCode::Char(character),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                ),
                 Some(expected)
             );
         }
@@ -333,8 +342,27 @@ mod theme_shortcut_tests {
 
     #[test]
     fn ignores_unrelated_keys() {
-        assert_eq!(theme_number_from_shifted_key(KeyCode::Char('0')), None);
-        assert_eq!(theme_number_from_shifted_key(KeyCode::Char('q')), None);
-        assert_eq!(theme_number_from_shifted_key(KeyCode::Enter), None);
+        let both = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        assert_eq!(theme_number_from_key(KeyCode::Char('0'), both), None);
+        assert_eq!(theme_number_from_key(KeyCode::Char('q'), both), None);
+        assert_eq!(theme_number_from_key(KeyCode::Enter, both), None);
+        assert_eq!(
+            theme_number_from_key(KeyCode::Char('1'), KeyModifiers::SHIFT),
+            None,
+            "Shift alone must not switch themes"
+        );
+        assert_eq!(
+            theme_number_from_key(KeyCode::Char('1'), KeyModifiers::CONTROL),
+            None,
+            "Ctrl alone must not switch themes"
+        );
+        assert_eq!(
+            theme_number_from_key(
+                KeyCode::Char('1'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT | KeyModifiers::ALT,
+            ),
+            None,
+            "Ctrl+Shift+Alt must not switch themes"
+        );
     }
 }
