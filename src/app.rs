@@ -985,6 +985,29 @@ mod tests {
     }
 
     #[test]
+    fn clicking_a_row_does_not_replace_hidden_secret_input() {
+        use crate::storage::{Entry, EntryKind};
+        use ratatui::layout::Rect;
+
+        let (mut app, path) = test_app();
+        app.journal
+            .append(Entry::with_kind(EntryKind::Note, "ordinary transcript text".to_string()))
+            .expect("append test row");
+        app.input = "hidden password".to_string();
+        app.cursor = app.input.len();
+        app.secret_input = true;
+        app.feed_viewport_height = 3;
+        app.feed_area = Rect::new(10, 5, 60, 3);
+
+        app.begin_transcript_selection(15, 5);
+        app.end_transcript_selection(15, 5);
+
+        assert_eq!(app.input, "hidden password");
+        assert_eq!(app.cursor, "hidden password".len());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn dragging_selects_a_partial_text_range() {
         use crate::storage::{entry_transcript_text, Entry, EntryKind};
         use ratatui::layout::Rect;
