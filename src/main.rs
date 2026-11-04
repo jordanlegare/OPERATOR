@@ -299,8 +299,8 @@ fn theme_number_from_key(code: KeyCode, modifiers: KeyModifiers) -> Option<usize
 
     match code {
         KeyCode::Char('1' | '!' | '±') => Some(1),
-        KeyCode::Char('2' | '@' | '"' | '²') => Some(2),
-        KeyCode::Char('3' | '#' | '/' | '£' | '³') => Some(3),
+        KeyCode::Char('2' | '@' | '"') => Some(2),
+        KeyCode::Char('3' | '#' | '/' | '£') => Some(3),
         KeyCode::Char('4' | '$' | '¢') => Some(4),
         KeyCode::Char('5' | '%' | '¤') => Some(5),
         KeyCode::Char('6' | '^' | '?' | '¬') => Some(6),
