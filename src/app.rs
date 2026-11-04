@@ -622,8 +622,9 @@ impl App {
         if entries.is_empty() {
             return;
         }
-        let selected_live_tail =
-            self.follow_tail && self.selected_row == self.journal.entries.len().checked_sub(1);
+        let selected_live_tail = self.follow_tail
+            && self.selected_row.is_some()
+            && self.selected_row == self.journal.entries.len().checked_sub(1);
         match self.journal.append_batch(entries) {
             Ok(()) => self.status = format!("Captured terminal output · {} records in journal.", self.journal.entries.len()),
             Err(error) => self.status = format!(
@@ -1337,6 +1338,33 @@ mod tests {
         assert_eq!(app.current_top(), 1);
         assert_eq!(app.selected_row, Some(3));
 
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn selected_live_tail_tracks_new_terminal_output() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        app.journal
+            .append(Entry::with_kind(EntryKind::Note, "existing row".to_string()))
+            .expect("append existing row");
+        app.feed_viewport_height = 1;
+        app.jump_to_latest();
+        assert_eq!(app.selected_row, Some(0));
+
+        app.capture_terminal_output(vec!["new terminal output".to_string()]);
+
+        assert_eq!(app.selected_row, Some(1));
+        assert_eq!(app.current_top(), 1);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn app_without_a_keyboard_selection_does_not_select_new_output_automatically() {
+        let (mut app, path) = test_app();
+        app.capture_terminal_output(vec!["first terminal output".to_string()]);
+        assert_eq!(app.selected_row, None);
         let _ = fs::remove_file(path);
     }
 
