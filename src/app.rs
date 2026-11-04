@@ -8,7 +8,10 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     shell::ShellSession,
-    storage::{entry_transcript_text, sanitize_single_line, Entry, EntryKind, Journal},
+    storage::{
+        entry_transcript_text, sanitize_single_line, should_suppress_terminal_output, Entry,
+        EntryKind, Journal,
+    },
     theme::THEMES,
 };
 
@@ -546,13 +549,15 @@ impl App {
     }
 
     pub fn capture_terminal_output(&mut self, lines: Vec<String>) {
-        if lines.is_empty() {
+        let entries: Vec<Entry> = lines
+            .into_iter()
+            .map(|line| sanitize_single_line(&line))
+            .filter(|line| !should_suppress_terminal_output(line))
+            .map(|line| Entry::with_kind(EntryKind::TerminalOutput, line))
+            .collect();
+        if entries.is_empty() {
             return;
         }
-        let entries = lines
-            .into_iter()
-            .map(|line| Entry::with_kind(EntryKind::TerminalOutput, sanitize_single_line(&line)))
-            .collect();
         match self.journal.append_batch(entries) {
             Ok(()) => self.status = format!("Captured terminal output · {} records in journal.", self.journal.entries.len()),
             Err(error) => self.status = format!(
