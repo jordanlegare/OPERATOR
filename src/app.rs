@@ -84,6 +84,8 @@ pub struct App {
     pub show_help: bool,
     /// Whether the ASCII-art banner is currently visible.
     pub show_banner: bool,
+    /// Whether the Canadian maple-leaf watermark is displayed behind the transcript.
+    pub show_canada_watermark: bool,
     /// Whether SSH SCP/SFTP requests are delegated directly to their handlers.
     pub scp_sftp_passthrough: bool,
     pub should_quit: bool,
@@ -138,6 +140,7 @@ impl App {
             status,
             show_help: false,
             show_banner: settings.show_banner,
+            show_canada_watermark: settings.show_canada_watermark,
             scp_sftp_passthrough: settings.scp_sftp_passthrough,
             should_quit: false,
         }
@@ -785,6 +788,7 @@ impl App {
             theme_index: self.theme_index,
             wrap_transcript: self.wrap_transcript,
             show_banner: self.show_banner,
+            show_canada_watermark: self.show_canada_watermark,
         }
         .save()
     }
@@ -806,6 +810,27 @@ impl App {
             ),
             Err(error) => format!(
                 "SCP/SFTP passthrough changed for this session but could not be saved: {error}"
+            ),
+        };
+    }
+
+    fn set_canada_watermark(&mut self, enabled: bool) {
+        if self.show_canada_watermark == enabled {
+            self.status = format!(
+                "Canadian maple-leaf watermark is already {}.",
+                if enabled { "on" } else { "off" }
+            );
+            return;
+        }
+
+        self.show_canada_watermark = enabled;
+        self.status = match self.persist_settings() {
+            Ok(()) => format!(
+                "Canadian maple-leaf watermark {} (saved).",
+                if enabled { "enabled" } else { "disabled" }
+            ),
+            Err(error) => format!(
+                "Canadian maple-leaf watermark changed for this session but could not be saved: {error}"
             ),
         };
     }
@@ -873,15 +898,28 @@ impl App {
             }
             "/path" => self.status = format!("Journal: {}", self.journal.path.display()),
             "/scp" => match argument.to_ascii_lowercase().as_str() {
-                "" | "status" => {
+                "" | "toggle" => self.set_scp_sftp_passthrough(!self.scp_sftp_passthrough),
+                "status" => {
                     self.status = format!(
-                        "SCP/SFTP passthrough is {}. Usage: /scp on | /scp off | /scp status",
+                        "SCP/SFTP passthrough is {}. Usage: /scp [on|off|status]",
                         if self.scp_sftp_passthrough { "enabled" } else { "disabled" }
                     );
                 }
                 "on" | "enable" | "enabled" => self.set_scp_sftp_passthrough(true),
                 "off" | "disable" | "disabled" => self.set_scp_sftp_passthrough(false),
-                _ => self.status = "Usage: /scp on | /scp off | /scp status".to_string(),
+                _ => self.status = "Usage: /scp [on|off|status]".to_string(),
+            },
+            "/canada" => match argument.to_ascii_lowercase().as_str() {
+                "" | "toggle" => self.set_canada_watermark(!self.show_canada_watermark),
+                "status" => {
+                    self.status = format!(
+                        "Canadian maple-leaf watermark is {}. Usage: /canada [on|off|status]",
+                        if self.show_canada_watermark { "on" } else { "off" }
+                    );
+                }
+                "on" | "enable" | "enabled" => self.set_canada_watermark(true),
+                "off" | "disable" | "disabled" => self.set_canada_watermark(false),
+                _ => self.status = "Usage: /canada [on|off|status]".to_string(),
             },
             "/mode" => {
                 if argument.eq_ignore_ascii_case("terminal") || argument.eq_ignore_ascii_case("shell") {
@@ -1162,6 +1200,7 @@ fn is_streamnote_command(line: &str) -> bool {
             | "/stats"
             | "/path"
             | "/scp"
+            | "/canada"
             | "/mode"
             | "/shell"
             | "/terminal"
