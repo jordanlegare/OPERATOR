@@ -427,7 +427,7 @@ mod theme_shortcut_tests {
     }
 
     #[test]
-    fn leaves_help_diagnostic_and_other_function_keys_unmapped() {
+    fn leaves_non_theme_function_keys_unmapped() {
         for function_key in [1, 11, 12] {
             assert_eq!(
                 theme_number_from_key(KeyCode::F(function_key), KeyModifiers::NONE),
