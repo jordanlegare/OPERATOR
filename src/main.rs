@@ -168,11 +168,20 @@ fn handle_key(
     app: &mut App,
     shell: &mut Option<ShellSession>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    // Terminals commonly report Shift+1..Shift+9 as their US-layout
+    // symbols (! @ # $ % ^ & * (). Some report the digit plus SHIFT instead.
+    if modifiers.contains(KeyModifiers::SHIFT)
+        && !modifiers.contains(KeyModifiers::CONTROL)
+        && !modifiers.contains(KeyModifiers::ALT)
+    {
+        if let Some(number) = theme_number_from_shifted_key(code) {
+            app.set_theme(number);
+            return Ok(false);
+        }
+    }
+
     if modifiers.contains(KeyModifiers::CONTROL) {
         match code {
-            KeyCode::Char(digit @ ('1'..='9')) => {
-                app.set_theme(digit.to_digit(10).unwrap_or(1) as usize);
-            }
             KeyCode::Char('q') => return Ok(true),
             KeyCode::Char('c') => {
                 if app.input_mode == InputMode::Terminal {
@@ -281,4 +290,51 @@ fn default_journal_path() -> PathBuf {
         .join("share")
         .join("streamnote")
         .join("journal.jsonl")
+}
+
+
+/// Map Shift+1..Shift+9 to theme numbers. Supports both the physical US
+/// keyboard symbols and terminals that preserve the digit with SHIFT set.
+fn theme_number_from_shifted_key(code: KeyCode) -> Option<usize> {
+    match code {
+        KeyCode::Char('!' | '1') => Some(1),
+        KeyCode::Char('@' | '2') => Some(2),
+        KeyCode::Char('#' | '3') => Some(3),
+        KeyCode::Char('$' | '4') => Some(4),
+        KeyCode::Char('%' | '5') => Some(5),
+        KeyCode::Char('^' | '6') => Some(6),
+        KeyCode::Char('&' | '7') => Some(7),
+        KeyCode::Char('*' | '8') => Some(8),
+        KeyCode::Char('(' | '9') => Some(9),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod theme_shortcut_tests {
+    use super::theme_number_from_shifted_key;
+    use crossterm::event::KeyCode;
+
+    #[test]
+    fn recognizes_shifted_number_symbols_and_digit_events() {
+        let cases = [
+            ('!', 1), ('@', 2), ('#', 3), ('$', 4), ('%', 5),
+            ('^', 6), ('&', 7), ('*', 8), ('(', 9),
+            ('1', 1), ('2', 2), ('3', 3), ('4', 4), ('5', 5),
+            ('6', 6), ('7', 7), ('8', 8), ('9', 9),
+        ];
+        for (character, expected) in cases {
+            assert_eq!(
+                theme_number_from_shifted_key(KeyCode::Char(character)),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_unrelated_keys() {
+        assert_eq!(theme_number_from_shifted_key(KeyCode::Char('0')), None);
+        assert_eq!(theme_number_from_shifted_key(KeyCode::Char('q')), None);
+        assert_eq!(theme_number_from_shifted_key(KeyCode::Enter), None);
+    }
 }
