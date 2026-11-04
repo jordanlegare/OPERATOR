@@ -48,10 +48,9 @@ impl ShellSession {
             })
             .map_err(|error| io::Error::other(error.to_string()))?;
 
-        // A fresh PTY must begin in normal interactive mode. Otherwise a
-        // platform/default PTY state with ECHO disabled is mistaken for a
-        // password prompt, leaving StreamNote in hidden-input mode at startup.
-        set_initial_echo(&*pair.master)?;
+        // Disable line echo so every submitted command appears only once in
+        // the journal (as CMD); PTY output remains fully visible and captured.
+        set_input_echo(&*pair.master, false)?;
 
         // When STREENOTE is the account's SSH login shell, SSH may set
         // $SHELL to this executable. Never launch ourselves as the nested
@@ -125,6 +124,27 @@ impl ShellSession {
     /// The executable actually used for the nested interactive shell.
     pub fn shell_program(&self) -> &Path {
         &self.shell_program
+    }
+
+    /// Build the footer prompt from the real shell process identity and cwd.
+    /// The home directory is displayed as "~" for a compact, familiar prompt.
+    pub fn prompt_label(&self) -> String {
+        let user = env::var("USER")
+            .or_else(|_| env::var("LOGNAME"))
+            .unwrap_or_else(|_| "user".to_string());
+        let hostname = fs::read_to_string("/etc/hostname")
+            .map(|value| value.trim().to_string())
+            .ok()
+            .filter(|value| !value.is_empty())
+            .or_else(|| env::var("HOSTNAME").ok())
+            .unwrap_or_else(|| "localhost".to_string());
+        let cwd = self
+            .child
+            .process_id()
+            .and_then(|pid| fs::read_link(format!("/proc/{pid}/cwd")).ok())
+            .or_else(|| env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("?"));
+        format_shell_prompt(&user, &hostname, &cwd, env::var_os("HOME").as_deref().map(Path::new))
     }
 
     /// Ask Bash for command and filesystem completions in the live shell's cwd.
@@ -209,6 +229,8 @@ impl ShellSession {
     }
 
     /// Send one line to the interactive shell's PTY.
+    /// Disable terminal input echo before writing so the command is logged
+    /// exactly once as a CMD record rather than again as PTY OUT text.
     pub fn send_line(&mut self, command: &str) -> io::Result<()> {
         if self.exited {
             return Err(io::Error::new(
@@ -216,6 +238,7 @@ impl ShellSession {
                 "the shell process has exited",
             ));
         }
+        set_input_echo(&*self.master, false)?;
         self.writer.write_all(command.as_bytes())?;
         self.writer.write_all(b"\r")?;
         self.writer.flush()
@@ -323,6 +346,21 @@ impl ShellSession {
 }
 
 
+fn format_shell_prompt(user: &str, hostname: &str, cwd: &Path, home: Option<&Path>) -> String {
+    let shown_path = home
+        .and_then(|home| cwd.strip_prefix(home).ok())
+        .map(|relative| {
+            if relative.as_os_str().is_empty() {
+                PathBuf::from("~")
+            } else {
+                PathBuf::from("~").join(relative)
+            }
+        })
+        .unwrap_or_else(|| cwd.to_path_buf());
+
+    format!("{user}@{hostname}:{}$ ", shown_path.display())
+}
+
 /// Select a real interactive shell, avoiding recursion when STREENOTE itself
 /// is configured as the user's login shell.
 fn resolve_shell_program() -> PathBuf {
@@ -349,11 +387,10 @@ fn resolve_shell_program() -> PathBuf {
     PathBuf::from("/bin/bash")
 }
 
-/// Put a newly-created PTY into normal interactive echo mode before the
-/// child shell starts. The shell can still disable ECHO later for password
-/// prompts; input_is_echoed() will detect that transition.
+/// Turn off PTY input echo without suppressing output written by the shell.
+/// ECHONL is cleared as well so submitted CR/LF characters are not emitted.
 #[cfg(unix)]
-fn set_initial_echo(master: &dyn MasterPty) -> io::Result<()> {
+fn set_input_echo(master: &dyn MasterPty, enabled: bool) -> io::Result<()> {
     let fd = master
         .as_raw_fd()
         .ok_or_else(|| io::Error::other("PTY master does not expose a file descriptor"))?;
@@ -365,7 +402,11 @@ fn set_initial_echo(master: &dyn MasterPty) -> io::Result<()> {
     }
     // SAFETY: the successful tcgetattr call initialized attributes.
     let mut attributes = unsafe { attributes.assume_init() };
-    attributes.c_lflag |= libc::ECHO | libc::ECHONL;
+    if enabled {
+        attributes.c_lflag |= libc::ECHO | libc::ECHONL;
+    } else {
+        attributes.c_lflag &= !(libc::ECHO | libc::ECHONL);
+    }
 
     // SAFETY: attributes was initialized by tcgetattr and remains valid.
     if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &attributes) } != 0 {
@@ -375,7 +416,7 @@ fn set_initial_echo(master: &dyn MasterPty) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn set_initial_echo(_master: &dyn MasterPty) -> io::Result<()> {
+fn set_input_echo(_master: &dyn MasterPty, _enabled: bool) -> io::Result<()> {
     Ok(())
 }
 
@@ -563,6 +604,26 @@ mod tests {
         let mut parser = TranscriptParser::default();
         let lines = parser.feed(b"\x1b[32mgreen\x1b[0m\r\nnext\r\x1b[Kdone\n");
         assert_eq!(lines, vec!["green".to_string(), "done".to_string()]);
+    }
+
+    #[test]
+    fn shell_prompt_includes_identity_and_abbreviated_current_path() {
+        use super::format_shell_prompt;
+        use std::path::Path;
+
+        assert_eq!(
+            format_shell_prompt(
+                "jordan",
+                "server",
+                Path::new("/home/jordan/Projects/STREENOTE"),
+                Some(Path::new("/home/jordan"))
+            ),
+            "jordan@server:~/Projects/STREENOTE$ "
+        );
+        assert_eq!(
+            format_shell_prompt("jordan", "server", Path::new("/tmp"), Some(Path::new("/home/jordan"))),
+            "jordan@server:/tmp$ "
+        );
     }
 
     #[test]
