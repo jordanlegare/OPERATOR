@@ -1,4 +1,5 @@
 use std::{
+    io,
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -116,7 +117,7 @@ impl App {
             cursor: 0,
             input_hscroll: 0,
             feed_hscroll: 0,
-            wrap_transcript: false,
+            wrap_transcript: settings.wrap_transcript,
             scroll_top: 0,
             selected_row: None,
             feed_viewport_height: 1,
@@ -131,12 +132,12 @@ impl App {
             history_position: None,
             input_mode: InputMode::Terminal,
             terminal_prompt: "user@host:~$ ".to_string(),
-            theme_index: 1,
+            theme_index: settings.theme_index.clamp(1, THEMES.len()),
             secret_input: false,
             secret_prompt_deadline: None,
             status,
             show_help: false,
-            show_banner: true,
+            show_banner: settings.show_banner,
             scp_sftp_passthrough: settings.scp_sftp_passthrough,
             should_quit: false,
         }
@@ -778,6 +779,16 @@ impl App {
         self.jump_to_latest();
     }
 
+    fn persist_settings(&self) -> io::Result<()> {
+        Settings {
+            scp_sftp_passthrough: self.scp_sftp_passthrough,
+            theme_index: self.theme_index,
+            wrap_transcript: self.wrap_transcript,
+            show_banner: self.show_banner,
+        }
+        .save()
+    }
+
     fn set_scp_sftp_passthrough(&mut self, enabled: bool) {
         if self.scp_sftp_passthrough == enabled {
             self.status = format!(
@@ -787,21 +798,45 @@ impl App {
             return;
         }
 
-        let settings = Settings {
-            scp_sftp_passthrough: enabled,
+        self.scp_sftp_passthrough = enabled;
+        self.status = match self.persist_settings() {
+            Ok(()) => format!(
+                "SCP/SFTP passthrough {}. Applies to new SSH connections; settings saved.",
+                if enabled { "enabled" } else { "disabled" }
+            ),
+            Err(error) => format!(
+                "SCP/SFTP passthrough changed for this session but could not be saved: {error}"
+            ),
         };
-        match settings.save() {
-            Ok(()) => {
-                self.scp_sftp_passthrough = enabled;
-                self.status = format!(
-                    "SCP/SFTP passthrough {}. Applies to new SSH connections.",
-                    if enabled { "enabled" } else { "disabled" }
-                );
-            }
-            Err(error) => {
-                self.status = format!("Could not save SCP/SFTP setting; unchanged: {error}");
-            }
+    }
+
+    pub fn toggle_wrap_transcript(&mut self) {
+        self.wrap_transcript = !self.wrap_transcript;
+        if self.wrap_transcript {
+            self.feed_hscroll = 0;
         }
+        self.status = match self.persist_settings() {
+            Ok(()) => format!(
+                "Transcript word wrap {} (saved).",
+                if self.wrap_transcript { "enabled" } else { "disabled" }
+            ),
+            Err(error) => format!(
+                "Transcript word wrap changed for this session but could not be saved: {error}"
+            ),
+        };
+    }
+
+    pub fn toggle_banner(&mut self) {
+        self.show_banner = !self.show_banner;
+        self.status = match self.persist_settings() {
+            Ok(()) => format!(
+                "Banner {} (saved).",
+                if self.show_banner { "shown" } else { "hidden" }
+            ),
+            Err(error) => format!(
+                "Banner visibility changed for this session but could not be saved: {error}"
+            ),
+        };
     }
 
     fn execute_command(&mut self, command_line: &str) {
@@ -1023,7 +1058,13 @@ impl App {
     pub fn set_theme(&mut self, number: usize) {
         if let Some(theme) = number.checked_sub(1).and_then(|index| THEMES.get(index)) {
             self.theme_index = number;
-            self.status = format!("Color theme {number}/9 selected: {}.", theme.name);
+            self.status = match self.persist_settings() {
+                Ok(()) => format!("Color theme {number}/9 selected: {} (saved).", theme.name),
+                Err(error) => format!(
+                    "Color theme {number}/9 selected: {}, but settings could not be saved: {error}",
+                    theme.name
+                ),
+            };
         }
     }
 
