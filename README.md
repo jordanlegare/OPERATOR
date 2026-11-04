@@ -76,7 +76,7 @@ Switch palettes at any time with **Alt+1** through **Alt+9**. On keyboard layout
 |---|---|
 | `Alt+1` | Abyss Cyan |
 | `Alt+2` | Carbon Amber |
-| `Alt+3` | Dracula Contrast |
+| `Alt+3` or `Alt+F3` | Dracula Contrast (Alt+F3 fallback for terminals that send Ctrl+Alt+3 as plain Escape) |
 | `Alt+4` | Solarized Light |
 | `Alt+5` | Paper High Contrast |
 | `Alt+6` | Forest Signal |
