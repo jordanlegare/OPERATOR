@@ -1130,37 +1130,65 @@ mod tests {
     }
 
     #[test]
-    fn clicking_a_transcript_row_selects_the_complete_row() {
+    fn clicking_a_command_row_selects_it_and_loads_its_command() {
         use crate::storage::{Entry, EntryKind};
         use ratatui::layout::Rect;
 
         let (mut app, path) = test_app();
         app.journal
-            .append(Entry::with_kind(EntryKind::Note, "select this note".to_string()))
-            .expect("append test row");
+            .append(Entry::with_kind(EntryKind::TerminalCommand, "ls -lah /home".to_string()))
+            .expect("append command");
+        app.input = "replace this draft".to_string();
+        app.cursor = app.input.len();
         app.feed_viewport_height = 3;
         app.feed_area = Rect::new(10, 5, 60, 3);
 
         app.begin_transcript_selection(15, 5);
         app.end_transcript_selection(15, 5);
 
-        let selected = app.selected_transcript_text().expect("selected row");
-        assert!(selected.contains("NOTE"));
-        assert!(selected.ends_with("select this note"));
-        assert_eq!(app.input, "select this note");
+        let selected = app.selected_transcript_text().expect("selected command row");
+        assert!(selected.contains("CMD"));
+        assert!(selected.ends_with("ls -lah /home"));
+        assert_eq!(app.input, "ls -lah /home");
         assert_eq!(app.cursor, app.input.len());
+        assert_eq!(app.selected_row, None);
         let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn clicking_a_row_does_not_replace_hidden_secret_input() {
+    fn clicking_a_non_command_row_does_not_select_it_or_change_the_input() {
         use crate::storage::{Entry, EntryKind};
         use ratatui::layout::Rect;
 
         let (mut app, path) = test_app();
         app.journal
-            .append(Entry::with_kind(EntryKind::Note, "ordinary transcript text".to_string()))
-            .expect("append test row");
+            .append(Entry::with_kind(EntryKind::Note, "do not load this note".to_string()))
+            .expect("append note");
+        app.input = "keep this draft".to_string();
+        app.cursor = app.input.len();
+        app.selected_row = Some(0);
+        app.feed_viewport_height = 3;
+        app.feed_area = Rect::new(10, 5, 60, 3);
+
+        app.begin_transcript_selection(15, 5);
+        app.end_transcript_selection(15, 5);
+
+        assert_eq!(app.selected_transcript_text(), None);
+        assert_eq!(app.input, "keep this draft");
+        assert_eq!(app.cursor, "keep this draft".len());
+        assert_eq!(app.selected_row, Some(0));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn clicking_a_command_row_does_not_replace_hidden_secret_input() {
+        use crate::storage::{Entry, EntryKind};
+        use ratatui::layout::Rect;
+
+        let (mut app, path) = test_app();
+        app.journal
+            .append(Entry::with_kind(EntryKind::TerminalCommand, "sudo apt update".to_string()))
+            .expect("append test command");
         app.input = "hidden password".to_string();
         app.cursor = app.input.len();
         app.secret_input = true;
@@ -1170,6 +1198,7 @@ mod tests {
         app.begin_transcript_selection(15, 5);
         app.end_transcript_selection(15, 5);
 
+        assert!(app.selected_transcript_text().is_some());
         assert_eq!(app.input, "hidden password");
         assert_eq!(app.cursor, "hidden password".len());
         let _ = fs::remove_file(path);
