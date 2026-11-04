@@ -9,8 +9,30 @@ StreamNote starts the configured interactive shell (`$SHELL`, falling back to `/
 - Type a shell command in the footer and press Enter.
 - Each non-secret submitted command is recorded once as a `CMD` journal entry. PTY input echo (including newline echo) is disabled, so the submitted command is not duplicated as an `OUT` row. Secret input is still omitted from the journal.
 - PTY output is read asynchronously. stdout and stderr share the PTY and are recorded as `OUT` entries.
-- The shell's prompt and visible output are captured as transcript entries.
-- The input footer prompt displays `user@hostname:current_path$` and refreshes when the shell changes directories; the home directory is abbreviated as `~`.
+- Visible command output is captured as transcript entries. Blank output rows and the standard `user@hostname:current_path# StreeNote
+
+A Rust terminal workspace combining a live **Debian shell**, a persistent command/output transcript, and a fast append-only note stream. Built with **Ratatui**, **Crossterm**, and **portable-pty**.
+
+## What's new: embedded Debian shell
+
+StreamNote starts the configured interactive shell (`$SHELL`, falling back to `/bin/bash`) in a real pseudo-terminal (PTY) when the application initializes. The PTY gives commands a TTY rather than plain stdin/stdout pipes.
+
+- Type a shell command in the footer and press Enter.
+- Each non-secret submitted command is recorded once as a `CMD` journal entry. PTY input echo (including newline echo) is disabled, so the submitted command is not duplicated as an `OUT` row. Secret input is still omitted from the journal.
+- PTY output is read asynchronously. stdout and stderr share the PTY and are recorded as `OUT` entries.
+ shell prompt are suppressed because the live prompt is already shown in the input footer.
+- The input footer prompt displays `user@hostname:current_path# StreeNote
+
+A Rust terminal workspace combining a live **Debian shell**, a persistent command/output transcript, and a fast append-only note stream. Built with **Ratatui**, **Crossterm**, and **portable-pty**.
+
+## What's new: embedded Debian shell
+
+StreamNote starts the configured interactive shell (`$SHELL`, falling back to `/bin/bash`) in a real pseudo-terminal (PTY) when the application initializes. The PTY gives commands a TTY rather than plain stdin/stdout pipes.
+
+- Type a shell command in the footer and press Enter.
+- Each non-secret submitted command is recorded once as a `CMD` journal entry. PTY input echo (including newline echo) is disabled, so the submitted command is not duplicated as an `OUT` row. Secret input is still omitted from the journal.
+- PTY output is read asynchronously. stdout and stderr share the PTY and are recorded as `OUT` entries.
+ and refreshes when the shell changes directories; the home directory is abbreviated as `~`.
 - ANSI escape sequences are stripped from the transcript; carriage-return progress updates are represented as their final line.
 - Terminal commands, output, notes, and system events all share the same searchable feed and append-only JSONL journal.
 - The shell is launched at startup using the user's normal interactive shell configuration.
@@ -41,7 +63,7 @@ The default input mode is **TERMINAL**.
 - Arrow keys, Page Up/Down, Home/End, and mouse-wheel scrolling.
 - `Alt+Left` / `Alt+Right` horizontally pan the feed.
 - Unbounded in-memory `Vec<Entry>` with no application-level cache eviction.
-- JSON Lines persistence; non-secret commands, notes, terminal output records, and system events are appended to the journal.
+- JSON Lines persistence; non-secret commands, notes, useful terminal output records, and system events are appended to the journal. Empty terminal-output rows and standard shell-prompt rows are filtered both when loading older journals and when appending new output; existing journal files are not rewritten.
 - `/search <terms>` searches all cached notes, commands, and terminal output case-insensitively and jumps to the latest match with surrounding context.
 - `n` / `N` navigate search hits.
 - Command/input history, Bash-powered Tab completion for commands and filesystem paths, nine high-contrast color palettes, help overlay, export, stats, path display, and save/retry.
