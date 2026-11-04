@@ -56,6 +56,8 @@ pub struct App {
     secret_prompt_deadline: Option<Instant>,
     pub status: String,
     pub show_help: bool,
+    /// Capture the next key event and display its Crossterm representation.
+    pub capture_next_key: bool,
     pub should_quit: bool,
 }
 
@@ -89,6 +91,7 @@ impl App {
             secret_prompt_deadline: None,
             status,
             show_help: false,
+            capture_next_key: false,
             should_quit: false,
         }
     }
