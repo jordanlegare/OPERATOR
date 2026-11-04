@@ -16,7 +16,7 @@ StreamNote starts the configured interactive shell (`$SHELL`, falling back to `/
 - The shell is launched at startup using the user's normal interactive shell configuration.
 - PTY dimensions follow the terminal window size.
 
-Press F1 to open a separate interactive terminal workspace backed by its own independent PTY and shell process. Full-screen programs such as `vim`, `nano`, `less`, `top`, and `htop` use the terminal emulator normally. Press F1 again to return to the transcript; closing the workspace does not interrupt STREENOTE's primary shell. Readable workspace output is also captured in the journal while raw ANSI output is displayed live.
+Press F1 to open a separate interactive terminal workspace backed by its own independent PTY and shell process. Full-screen programs such as `vim`, `nano`, `less`, `top`, and `htop` use the terminal emulator normally. Press F1 again to return to the transcript; closing the workspace does not interrupt STREENOTE's primary shell. Workspace terminal output is displayed directly and is not added to the journal; only workspace open/close and shell-exit system events are recorded. The primary STREENOTE shell and its transcript continue independently.
 
 ## Modes
 
