@@ -326,6 +326,8 @@ fn theme_number_from_key(code: KeyCode, modifiers: KeyModifiers) -> Option<usize
             KeyCode::Char('1' | '!' | '±') => return Some(1),
             KeyCode::Char('2' | '@' | '"') => return Some(2),
             KeyCode::Char('3' | '#' | '/' | '£') => return Some(3),
+            // Reliable fallback: bare ESC from the current Ctrl+Alt+3 cannot be distinguished from Escape.
+            KeyCode::F(3) => return Some(3),
             KeyCode::Char('4' | '$' | '¢') => return Some(4),
             KeyCode::Char('5' | '%' | '¤') => return Some(5),
             KeyCode::Char('6' | '^' | '?' | '¬') => return Some(6),
@@ -398,6 +400,11 @@ mod theme_shortcut_tests {
                 Some(number as usize)
             );
         }
+    }
+
+    #[test]
+    fn recognizes_alt_f3_fallback_for_theme_three() {
+        assert_eq!(theme_number_from_key(KeyCode::F(3), KeyModifiers::ALT), Some(3));
     }
 
     #[test]
