@@ -24,7 +24,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             Constraint::Length(5),
             Constraint::Length(1),
             Constraint::Min(3),
-            Constraint::Length(2),
             Constraint::Length(3),
             Constraint::Length(1),
         ])
@@ -33,9 +32,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_banner(frame, chunks[0], theme);
     draw_status(frame, chunks[1], app, theme);
     draw_feed(frame, chunks[2], app, theme);
-    draw_draft(frame, chunks[3], app, theme);
-    draw_input(frame, chunks[4], app, theme);
-    draw_hints(frame, chunks[5], theme);
+    draw_input(frame, chunks[3], app, theme);
+    draw_hints(frame, chunks[4], theme);
 
     if app.show_help {
         draw_help(frame, frame.area(), theme);
@@ -274,31 +272,6 @@ fn apply_selection(
     }
 
     Line::from(result)
-}
-
-fn draw_draft(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
-    let prompt = app.input_prompt().to_string();
-    let preview = if app.input.is_empty() {
-        // The actual editable prompt is shown in the input box below.
-        // Keep the preview panel blank rather than repeating "waiting for input".
-        Line::from("")
-    } else {
-        Line::from(vec![
-            Span::styled("  ", Style::default().fg(theme.muted)),
-            Span::styled(prompt, Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)),
-            Span::styled(visible_input(app), Style::default().fg(theme.text)),
-        ])
-    };
-    let block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(theme.border))
-        .title(Span::styled(" LIVE INPUT PREVIEW ", Style::default().fg(theme.warning)));
-    frame.render_widget(
-        Paragraph::new(preview)
-            .scroll((0, app.input_hscroll as u16))
-            .block(block),
-        area,
-    );
 }
 
 fn draw_input(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
