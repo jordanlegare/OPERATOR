@@ -602,10 +602,39 @@ fn paginate_access_notice(
 ) -> Vec<Vec<Line<'static>>> {
     let lines = wrap_access_notice(rows, width);
     let capacity = page_height.max(1);
-    lines
-        .chunks(capacity)
-        .map(|chunk| chunk.to_vec())
-        .collect()
+    let mut pages = Vec::new();
+    let mut start = 0usize;
+
+    while start < lines.len() {
+        let mut end = start.saturating_add(capacity).min(lines.len());
+
+        // Prefer a blank separator as the page boundary so a section heading
+        // and its divider are not stranded at the bottom of a page.
+        if end < lines.len() {
+            let mut preferred_end = end;
+            while preferred_end > start
+                && !lines[preferred_end - 1]
+                    .spans
+                    .iter()
+                    .all(|span| span.content.trim().is_empty())
+            {
+                preferred_end -= 1;
+            }
+
+            if preferred_end > start {
+                end = preferred_end;
+            }
+        }
+
+        if end <= start {
+            end = start.saturating_add(capacity).min(lines.len());
+        }
+
+        pages.push(lines[start..end].to_vec());
+        start = end;
+    }
+
+    pages
 }
 
 
