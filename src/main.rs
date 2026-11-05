@@ -155,14 +155,7 @@ fn show_access_disclaimer(
 
         terminal.draw(|frame| {
             let area = frame.area();
-            let popup = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(1),
-                    Constraint::Min(0),
-                    Constraint::Length(1),
-                ])
-                .split(area)[1];
+            let popup = area;
 
             let olive = Color::Rgb(38, 48, 31);
             let warning = Color::Rgb(255, 190, 70);
@@ -319,12 +312,22 @@ fn access_notice_policy(
     let warning_style = Style::default()
         .fg(warning)
         .add_modifier(Modifier::BOLD);
-    let body_style = Style::default().fg(normal);
+    let body_style = Style::default().fg(normal).add_modifier(Modifier::BOLD);
 
-    let rows: Vec<(&str, Style)> = vec![
-        ("RESTRICTED SYSTEM — CONTROLLED ACCESS", critical_style),
-        ("AUTHORIZED PERSONNEL ONLY", warning_style),
-        ("NOTICE OF CONDITIONS, RESPONSIBILITIES, AND RESTRICTED HANDLING", warning_style),
+    let mut rows: Vec<(String, Style)> = Vec::new();
+
+    for line in large_notice_word("RESTRICTED") {
+        rows.push((line, critical_style));
+    }
+    rows.push((String::new(), body_style));
+    for line in large_notice_word("ACCESS") {
+        rows.push((line, critical_style));
+    }
+    rows.push((String::new(), body_style));
+    rows.push(("AUTHORIZED PERSONNEL ONLY".to_string(), warning_style));
+    rows.push(("CONTROLLED SYSTEM // READ ALL OPERATOR TERMS".to_string(), warning_style));
+    rows.push((String::new(), body_style));
+    rows.push(("".to_string(), body_style));
         ("", body_style),
         ("1. AUTHORIZATION, IDENTITY, AND SCOPE", warning_style),
         ("Access is permitted only to an individual who has received express authorization", body_style),
@@ -484,10 +487,42 @@ fn access_notice_policy(
         ("", body_style),
         ("UNAUTHORIZED PERSONNEL: DISCONNECT NOW. DO NOT PROCEED.", critical_style),
     ];
+    rows.extend(
+        policy_rows
+            .into_iter()
+            .map(|(text, style)| (text.to_string(), style)),
+    );
+    rows
+}
 
-    rows.into_iter()
-        .map(|(text, style)| (text.to_string(), style))
-        .collect()
+/// Render a word in a 5x7 block-letter bitmap. This gives the terminal
+/// notice a genuinely oversized visual masthead without changing the
+/// terminal emulator's user-controlled font settings.
+fn large_notice_word(word: &str) -> Vec<String> {
+    let mut output = vec![String::new(); 7];
+
+    for character in word.chars() {
+        let glyph: [&str; 7] = match character {
+            'A' => ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
+            'C' => ["01111", "10000", "10000", "10000", "10000", "10000", "01111"],
+            'D' => ["11110", "10001", "10001", "10001", "10001", "10001", "11110"],
+            'E' => ["11111", "10000", "10000", "11110", "10000", "10000", "11111"],
+            'I' => ["11111", "00100", "00100", "00100", "00100", "00100", "11111"],
+            'R' => ["11110", "10001", "10001", "11110", "10100", "10010", "10001"],
+            'S' => ["01111", "10000", "10000", "01110", "00001", "00001", "11110"],
+            'T' => ["11111", "00100", "00100", "00100", "00100", "00100", "00100"],
+            _ => ["00000", "00000", "00000", "00000", "00000", "00000", "00000"],
+        };
+
+        for (line, glyph_row) in output.iter_mut().zip(glyph) {
+            for bit in glyph_row.chars() {
+                line.push(if bit == '1' { '█' } else { ' ' });
+            }
+            line.push(' ');
+        }
+    }
+
+    output
 }
 
 /// Wraps policy paragraphs to terminal width without discarding any wording.
@@ -500,6 +535,7 @@ fn wrap_access_notice(
 
     for (row, style) in rows {
         if row.trim().is_empty() {
+            wrapped.push(Line::from(""));
             wrapped.push(Line::from(""));
             continue;
         }
@@ -531,7 +567,19 @@ fn wrap_access_notice(
         }
 
         if !current.is_empty() {
+            let is_section_heading = current
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_digit)
+                && current.contains(". ");
             wrapped.push(Line::from(Span::styled(current, style)));
+            if is_section_heading {
+                wrapped.push(Line::from(Span::styled(
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                    style,
+                )));
+                wrapped.push(Line::from(""));
+            }
         }
     }
 
