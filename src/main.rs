@@ -116,10 +116,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut app = App::new(journal, startup_message);
     match shell.as_ref() {
-        Some(session) => app.record_system(format!(
-            "Connected to interactive shell ({}) · commands are recorded once; PTY input echo is disabled.",
-            session.shell_program().display()
-        )),
+        Some(session) => {
+            let client = ssh_client_ip()
+                .map(|ip| format!("Client {ip} connected · "))
+                .unwrap_or_default();
+            app.record_system(format!(
+                "{client}Connected to interactive shell ({}) · commands are recorded once; PTY input echo is disabled.",
+                session.shell_program().display()
+            ));
+        }
         None => {
             app.set_mode(InputMode::Notes);
             app.record_system(
@@ -644,6 +649,28 @@ enum FileTransferRequest {
     LegacyScp,
 }
 
+/// Return the peer address supplied by OpenSSH for this login session.
+/// SSH_CONNECTION contains: client_ip client_port server_ip server_port.
+/// SSH_CLIENT is retained as a compatibility fallback.
+fn ssh_client_ip() -> Option<std::net::IpAddr> {
+    let ssh_connection = std::env::var("SSH_CONNECTION").ok();
+    let ssh_client = std::env::var("SSH_CLIENT").ok();
+    parse_ssh_client_ip(ssh_connection.as_deref(), ssh_client.as_deref())
+}
+
+fn parse_ssh_client_ip(
+    ssh_connection: Option<&str>,
+    ssh_client: Option<&str>,
+) -> Option<std::net::IpAddr> {
+    fn first_address(value: &str) -> Option<std::net::IpAddr> {
+        value.split_whitespace().next()?.parse().ok()
+    }
+
+    ssh_connection
+        .and_then(first_address)
+        .or_else(|| ssh_client.and_then(first_address))
+}
+
 /// Dispatch sshd's non-interactive login-shell invocations before the TUI
 /// initializes. Transfer data retains the original SSH channel file descriptors.
 #[cfg(unix)]
@@ -1136,7 +1163,49 @@ fn theme_number_from_key(code: KeyCode, modifiers: KeyModifiers) -> Option<usize
 
 #[cfg(test)]
 mod ssh_dispatch_tests {
-    use super::{detect_file_transfer_request, split_command_words, FileTransferRequest};
+    use super::{
+        detect_file_transfer_request, parse_ssh_client_ip, split_command_words, FileTransferRequest,
+    };
+
+    #[test]
+    fn extracts_ipv4_and_ipv6_client_addresses_from_ssh_connection() {
+        assert_eq!(
+            parse_ssh_client_ip(
+                Some("192.168.50.125 52341 192.168.50.54 22"),
+                None
+            )
+            .map(|ip| ip.to_string()),
+            Some("192.168.50.125".to_string())
+        );
+        assert_eq!(
+            parse_ssh_client_ip(
+                Some("2001:db8::25 52341 2001:db8::54 22"),
+                None
+            )
+            .map(|ip| ip.to_string()),
+            Some("2001:db8::25".to_string())
+        );
+    }
+
+    #[test]
+    fn falls_back_to_ssh_client_when_ssh_connection_is_unavailable_or_invalid() {
+        assert_eq!(
+            parse_ssh_client_ip(None, Some("10.0.0.7 52341 22"))
+                .map(|ip| ip.to_string()),
+            Some("10.0.0.7".to_string())
+        );
+        assert_eq!(
+            parse_ssh_client_ip(Some("not-an-ip malformed"), Some("10.0.0.7 52341 22"))
+                .map(|ip| ip.to_string()),
+            Some("10.0.0.7".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_missing_or_invalid_ssh_client_addresses() {
+        assert_eq!(parse_ssh_client_ip(None, None), None);
+        assert_eq!(parse_ssh_client_ip(Some("bad address"), Some("also-bad")), None);
+    }
 
     #[test]
     fn detects_external_sftp_subsystem() {
