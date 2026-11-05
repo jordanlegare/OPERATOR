@@ -22,12 +22,13 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use unicode_width::UnicodeWidthStr;
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph},
     Terminal,
 };
 
@@ -147,82 +148,101 @@ fn show_access_disclaimer(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
+        let mut can_continue = false;
+
         terminal.draw(|frame| {
             let area = frame.area();
             let vertical = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Percentage(5),
-                    Constraint::Percentage(90),
-                    Constraint::Percentage(5),
+                    Constraint::Length(1),
+                    Constraint::Min(0),
+                    Constraint::Length(1),
                 ])
                 .split(area);
             let popup = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
-                    Constraint::Percentage(4),
-                    Constraint::Percentage(92),
-                    Constraint::Percentage(4),
+                    Constraint::Length(1),
+                    Constraint::Min(0),
+                    Constraint::Length(1),
                 ])
                 .split(vertical[1])[1];
 
             let olive = Color::Rgb(38, 48, 31);
             let warning = Color::Rgb(255, 190, 70);
             let critical = Color::Rgb(255, 90, 70);
-            let text = vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "RESTRICTED SYSTEM — CONTROLLED ACCESS",
-                    Style::default().fg(critical).add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "AUTHORIZED PERSONNEL ONLY",
-                    Style::default().fg(warning).add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from("Access is limited to operators expressly authorized to use this system."),
-                Line::from(Span::styled(
-                    "UNAUTHORIZED ACCESS, USE, COPYING, OR DISCLOSURE IS PROHIBITED.",
-                    Style::default().fg(critical).add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from("All activity may be monitored, recorded, and audited."),
-                Line::from("Unauthorized activity may result in loss of access and civil or"),
-                Line::from("criminal prosecution under applicable law."),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "DISCONNECT NOW IF YOU ARE NOT AN AUTHORIZED OPERATOR.",
-                    Style::default().fg(critical).add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "[ ENTER ]  I ACKNOWLEDGE — CONTINUE",
-                    Style::default().fg(warning).add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(
-                    "[ ESC ]    EXIT",
-                    Style::default().fg(Color::Gray),
-                )),
-                Line::from(""),
-            ];
+            let normal = Color::Rgb(225, 229, 210);
 
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(warning).add_modifier(Modifier::BOLD))
                 .title(Span::styled(
-                    " STREENOTE // OPERATOR ACCESS NOTICE ",
+                    " STREENOTE // RESTRICTED SYSTEM TERMS ",
                     Style::default().fg(warning).add_modifier(Modifier::BOLD),
                 ))
-                .style(Style::default().fg(Color::Rgb(225, 229, 210)).bg(olive));
+                .style(Style::default().fg(normal).bg(olive));
+            let inner = block.inner(popup);
+
+            let full = wrap_access_notice(
+                access_notice_policy(critical, warning, normal, 0),
+                inner.width,
+            );
+            let compact = wrap_access_notice(
+                access_notice_policy(critical, warning, normal, 1),
+                inner.width,
+            );
+            let brief = wrap_access_notice(
+                access_notice_policy(critical, warning, normal, 2),
+                inner.width,
+            );
+
+            let notice = if full.len() <= inner.height as usize {
+                can_continue = true;
+                full
+            } else if compact.len() <= inner.height as usize {
+                can_continue = true;
+                compact
+            } else if brief.len() <= inner.height as usize {
+                can_continue = true;
+                brief
+            } else {
+                can_continue = false;
+                wrap_access_notice(
+                    vec![
+                        (
+                            "TERMINAL WINDOW TOO SMALL".to_string(),
+                            Style::default().fg(critical).add_modifier(Modifier::BOLD),
+                        ),
+                        (
+                            "Resize the terminal to read the complete access notice.".to_string(),
+                            Style::default().fg(normal),
+                        ),
+                        (
+                            "[ ESC ] EXIT".to_string(),
+                            Style::default().fg(warning).add_modifier(Modifier::BOLD),
+                        ),
+                    ],
+                    inner.width,
+                )
+            };
+
+            let content_height = (notice.len() as u16).min(inner.height);
+            let top_padding = inner.height.saturating_sub(content_height) / 2;
+            let content_area = Rect::new(
+                inner.x,
+                inner.y.saturating_add(top_padding),
+                inner.width,
+                content_height,
+            );
+
             frame.render_widget(Clear, popup);
+            frame.render_widget(block, popup);
             frame.render_widget(
-                Paragraph::new(text)
+                Paragraph::new(notice)
                     .alignment(Alignment::Center)
-                    .style(Style::default().fg(Color::Rgb(225, 229, 210)).bg(olive))
-                    .wrap(Wrap { trim: false })
-                    .block(block),
-                popup,
+                    .style(Style::default().fg(normal).bg(olive)),
+                content_area,
             );
         })?;
 
@@ -234,14 +254,133 @@ fn show_access_disclaimer(
                 continue;
             }
             match key.code {
-                KeyCode::Enter => return Ok(()),
+                KeyCode::Enter if can_continue => return Ok(()),
                 KeyCode::Esc => {
-                    return Err("Operator declined the access notice; STREENOTE was not started.".into());
+                    return Err(
+                        "Operator declined the access notice; STREENOTE was not started.".into(),
+                    );
                 }
                 _ => {}
             }
         }
     }
+}
+
+/// Full, compact, and brief forms keep the notice readable in smaller terminals.
+fn access_notice_policy(
+    critical: Color,
+    warning: Color,
+    normal: Color,
+    detail: u8,
+) -> Vec<(String, Style)> {
+    let critical_style = Style::default()
+        .fg(critical)
+        .add_modifier(Modifier::BOLD);
+    let warning_style = Style::default()
+        .fg(warning)
+        .add_modifier(Modifier::BOLD);
+    let body_style = Style::default().fg(normal);
+    let action_style = warning_style;
+
+    let rows: Vec<(&str, Style)> = match detail {
+        0 => vec![
+            ("RESTRICTED SYSTEM — CONTROLLED ACCESS", critical_style),
+            ("AUTHORIZED PERSONNEL ONLY", warning_style),
+            ("AUTHORITY — Use only with express permission and assigned scope.", warning_style),
+            ("RESPONSIBLE USE — Approved lawful purposes only. No access bypass,", warning_style),
+            ("intrusion, malware, harassment, disruption, or unlawful activity.", body_style),
+            ("CONFIDENTIALITY — Treat marked or sensitive files, notes, logs,", warning_style),
+            ("transcripts, exports, credentials, and system details as restricted.", body_style),
+            ("FILE OWNERSHIP / LICENSE — Files remain with creators/rights-holders.", warning_style),
+            ("Storage transfers no title/copyright and grants no proprietary license.", body_style),
+            ("Proprietary files: authorized use only. Obtain the owner's", body_style),
+            ("written license before copying, disclosing, modifying, or sharing.", body_style),
+            ("Third-party terms apply; STREENOTE code remains MIT-licensed.", body_style),
+            ("DATA CARE — Journals/output may retain sensitive data; protect", warning_style),
+            ("credentials, restrict permissions, secure backups/exports. Report misuse.", body_style),
+            ("MONITORING — Activity may be logged or reviewed by authorized admins.", warning_style),
+            ("Violations may lead to revoked access and lawful civil/criminal action.", body_style),
+            ("Use only data you are entitled to access. Respect privacy and retention.", body_style),
+            ("DISCONNECT IF UNAUTHORIZED. [ENTER] ACKNOWLEDGE / CONTINUE [ESC] EXIT", critical_style),
+        ],
+        1 => vec![
+            ("RESTRICTED SYSTEM — CONTROLLED ACCESS", critical_style),
+            ("AUTHORIZED PERSONNEL ONLY", warning_style),
+            ("AUTHORITY — Express permission and assigned scope are required.", warning_style),
+            ("Use only for lawful approved work. No intrusion, bypass, malware,", body_style),
+            ("harassment, disruption, or unlawful activity.", body_style),
+            ("Treat files, notes, logs, transcripts, exports, and credentials", body_style),
+            ("as restricted. Access only on an authorized need-to-know basis.", body_style),
+            ("Files stay with their rights-holders. Storage transfers no copyright", warning_style),
+            ("or proprietary license. Proprietary files require written owner permission.", body_style),
+            ("Third-party terms apply; STREENOTE code remains MIT-licensed.", body_style),
+            ("Journals/output may retain sensitive data. Protect credentials,", body_style),
+            ("permissions, backups, and exports; report suspected exposure.", body_style),
+            ("Activity may be logged. Misuse may revoke access and lead to", warning_style),
+            ("lawful civil/criminal action. Respect privacy and retention rules.", body_style),
+            ("DISCONNECT IF UNAUTHORIZED. [ENTER] ACKNOWLEDGE / CONTINUE [ESC] EXIT", critical_style),
+        ],
+        _ => vec![
+            ("RESTRICTED SYSTEM — AUTHORIZED PERSONNEL ONLY", critical_style),
+            ("Express authorization and assigned scope are required.", warning_style),
+            ("Lawful use only. No bypass, intrusion, malware, or misuse.", body_style),
+            ("Treat files, notes, logs, exports, and credentials as restricted.", body_style),
+            ("Files stay with rights-holders. Storage transfers no copyright", warning_style),
+            ("or proprietary license; third-party terms still apply.", body_style),
+            ("Proprietary files require separate written owner permission.", body_style),
+            ("Protect data and credentials. Report suspected exposure.", body_style),
+            ("Activity may be logged. Misuse may revoke access or lead to", body_style),
+            ("lawful action. Respect privacy and applicable retention rules.", body_style),
+            ("DISCONNECT IF UNAUTHORIZED. [ENTER] ACKNOWLEDGE / CONTINUE [ESC] EXIT", critical_style),
+        ],
+    };
+
+    rows.into_iter()
+        .map(|(text, style)| (text.to_string(), style))
+        .collect()
+}
+
+/// Word-wraps each policy row while preserving its emphasis style.
+fn wrap_access_notice(
+    rows: Vec<(String, Style)>,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let max_width = usize::from(width.max(1));
+    let mut wrapped = Vec::new();
+
+    for (row, style) in rows {
+        let mut current = String::new();
+        let mut current_width = 0usize;
+
+        for word in row.split_whitespace() {
+            let word_width = UnicodeWidthStr::width(word);
+            let separator_width = usize::from(!current.is_empty());
+
+            if !current.is_empty()
+                && current_width.saturating_add(separator_width).saturating_add(word_width)
+                    > max_width
+            {
+                wrapped.push(Line::from(Span::styled(
+                    std::mem::take(&mut current),
+                    style,
+                )));
+                current_width = 0;
+            }
+
+            if !current.is_empty() {
+                current.push(' ');
+                current_width += 1;
+            }
+            current.push_str(word);
+            current_width = current_width.saturating_add(word_width);
+        }
+
+        if !current.is_empty() {
+            wrapped.push(Line::from(Span::styled(current, style)));
+        }
+    }
+
+    wrapped
 }
 
 
