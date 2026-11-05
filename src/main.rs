@@ -280,8 +280,6 @@ fn access_notice_policy(
         .fg(warning)
         .add_modifier(Modifier::BOLD);
     let body_style = Style::default().fg(normal);
-    let action_style = warning_style;
-
     let rows: Vec<(&str, Style)> = match detail {
         0 => vec![
             ("RESTRICTED SYSTEM — CONTROLLED ACCESS", critical_style),
