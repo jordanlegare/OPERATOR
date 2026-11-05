@@ -328,6 +328,8 @@ fn access_notice_policy(
     rows.push(("CONTROLLED SYSTEM // READ ALL OPERATOR TERMS".to_string(), warning_style));
     rows.push((String::new(), body_style));
     rows.push(("".to_string(), body_style));
+
+    let policy_rows: Vec<(&str, Style)> = vec![
         ("", body_style),
         ("1. AUTHORIZATION, IDENTITY, AND SCOPE", warning_style),
         ("Access is permitted only to an individual who has received express authorization", body_style),
@@ -537,6 +539,12 @@ fn wrap_access_notice(
         if row.trim().is_empty() {
             wrapped.push(Line::from(""));
             wrapped.push(Line::from(""));
+            continue;
+        }
+
+        // Preserve literal spaces in the pixel-art masthead; they form the glyphs.
+        if row.contains('█') {
+            wrapped.push(Line::from(Span::styled(row, style)));
             continue;
         }
 
