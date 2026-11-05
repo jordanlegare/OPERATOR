@@ -147,102 +147,134 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn show_access_disclaimer(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let mut page_index = 0usize;
+
     loop {
+        let mut page_count = 1usize;
         let mut can_continue = false;
 
         terminal.draw(|frame| {
             let area = frame.area();
-            let vertical = Layout::default()
+            let popup = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(1),
                     Constraint::Min(0),
                     Constraint::Length(1),
                 ])
-                .split(area);
-            let popup = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Length(1),
-                    Constraint::Min(0),
-                    Constraint::Length(1),
-                ])
-                .split(vertical[1])[1];
+                .split(area)[1];
 
             let olive = Color::Rgb(38, 48, 31);
             let warning = Color::Rgb(255, 190, 70);
             let critical = Color::Rgb(255, 90, 70);
             let normal = Color::Rgb(225, 229, 210);
 
-            let block = Block::default()
+            let base_block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(warning).add_modifier(Modifier::BOLD))
-                .title(Span::styled(
-                    " STREENOTE // RESTRICTED SYSTEM TERMS ",
-                    Style::default().fg(warning).add_modifier(Modifier::BOLD),
-                ))
                 .style(Style::default().fg(normal).bg(olive));
-            let inner = block.inner(popup);
+            let inner = base_block.inner(popup);
+            let available_text_rows = inner.height.saturating_sub(1);
 
-            let full = wrap_access_notice(
-                access_notice_policy(critical, warning, normal, 0),
-                inner.width,
-            );
-            let compact = wrap_access_notice(
-                access_notice_policy(critical, warning, normal, 1),
-                inner.width,
-            );
-            let brief = wrap_access_notice(
-                access_notice_policy(critical, warning, normal, 2),
-                inner.width,
-            );
-
-            let notice = if full.len() <= inner.height as usize {
-                can_continue = true;
-                full
-            } else if compact.len() <= inner.height as usize {
-                can_continue = true;
-                compact
-            } else if brief.len() <= inner.height as usize {
-                can_continue = true;
-                brief
+            let too_small = inner.width < 24 || available_text_rows < 4;
+            let pages = if too_small {
+                Vec::new()
             } else {
-                can_continue = false;
-                wrap_access_notice(
-                    vec![
-                        (
-                            "TERMINAL WINDOW TOO SMALL".to_string(),
-                            Style::default().fg(critical).add_modifier(Modifier::BOLD),
-                        ),
-                        (
-                            "Resize the terminal to read the complete access notice.".to_string(),
-                            Style::default().fg(normal),
-                        ),
-                        (
-                            "[ ESC ] EXIT".to_string(),
-                            Style::default().fg(warning).add_modifier(Modifier::BOLD),
-                        ),
-                    ],
+                paginate_access_notice(
+                    access_notice_policy(critical, warning, normal),
                     inner.width,
+                    usize::from(available_text_rows),
                 )
             };
 
-            let content_height = (notice.len() as u16).min(inner.height);
-            let top_padding = inner.height.saturating_sub(content_height) / 2;
-            let content_area = Rect::new(
-                inner.x,
-                inner.y.saturating_add(top_padding),
-                inner.width,
-                content_height,
-            );
+            if too_small {
+                page_count = 1;
+                page_index = 0;
+                can_continue = false;
+            } else {
+                page_count = pages.len().max(1);
+                page_index = page_index.min(page_count.saturating_sub(1));
+                can_continue = page_index + 1 == page_count;
+            }
+
+            let title = if too_small {
+                " STREENOTE // RESTRICTED SYSTEM TERMS ".to_string()
+            } else {
+                format!(
+                    " STREENOTE // RESTRICTED SYSTEM TERMS // PAGE {} OF {} ",
+                    page_index + 1,
+                    page_count
+                )
+            };
+            let block = base_block.title(Span::styled(
+                title,
+                Style::default().fg(warning).add_modifier(Modifier::BOLD),
+            ));
 
             frame.render_widget(Clear, popup);
             frame.render_widget(block, popup);
+
+            if too_small {
+                let message = vec![
+                    Line::from(Span::styled(
+                        "TERMINAL WINDOW TOO SMALL",
+                        Style::default().fg(critical).add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                    Line::from("Increase terminal width and height to read"),
+                    Line::from("the complete operator policy."),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "[ ESC ] EXIT",
+                        Style::default().fg(warning).add_modifier(Modifier::BOLD),
+                    )),
+                ];
+                let height = (message.len() as u16).min(inner.height);
+                let top = inner.y.saturating_add(inner.height.saturating_sub(height) / 2);
+                frame.render_widget(
+                    Paragraph::new(message)
+                        .alignment(Alignment::Center)
+                        .style(Style::default().fg(normal).bg(olive)),
+                    Rect::new(inner.x, top, inner.width, height),
+                );
+                return;
+            }
+
+            let current_page = &pages[page_index];
+            let text_height = (current_page.len() as u16).min(available_text_rows);
+            let top_padding = available_text_rows.saturating_sub(text_height) / 2;
+            let text_area = Rect::new(
+                inner.x,
+                inner.y.saturating_add(top_padding),
+                inner.width,
+                text_height,
+            );
+
             frame.render_widget(
-                Paragraph::new(notice)
+                Paragraph::new(current_page.clone())
                     .alignment(Alignment::Center)
                     .style(Style::default().fg(normal).bg(olive)),
-                content_area,
+                text_area,
+            );
+
+            let footer_y = inner.y.saturating_add(inner.height.saturating_sub(1));
+            let footer = if page_count > 1 && !can_continue {
+                "[PGDN / RIGHT / SPACE] NEXT   [PGUP / LEFT] PREVIOUS   [ESC] EXIT"
+            } else if page_count > 1 {
+                "[PGUP / LEFT] PREVIOUS   [ENTER] ACKNOWLEDGE   [ESC] EXIT"
+            } else {
+                "[ENTER] I ACKNOWLEDGE — CONTINUE     [ESC] EXIT"
+            };
+            frame.render_widget(
+                Paragraph::new(footer)
+                    .alignment(Alignment::Center)
+                    .style(
+                        Style::default()
+                            .fg(warning)
+                            .bg(olive)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                Rect::new(inner.x, footer_y, inner.width, 1),
             );
         })?;
 
@@ -255,6 +287,14 @@ fn show_access_disclaimer(
             }
             match key.code {
                 KeyCode::Enter if can_continue => return Ok(()),
+                KeyCode::PageDown | KeyCode::Right | KeyCode::Down | KeyCode::Char(' ') => {
+                    if page_index + 1 < page_count {
+                        page_index += 1;
+                    }
+                }
+                KeyCode::PageUp | KeyCode::Left | KeyCode::Up => {
+                    page_index = page_index.saturating_sub(1);
+                }
                 KeyCode::Esc => {
                     return Err(
                         "Operator declined the access notice; STREENOTE was not started.".into(),
@@ -266,12 +306,12 @@ fn show_access_disclaimer(
     }
 }
 
-/// Full, compact, and brief forms keep the notice readable in smaller terminals.
+/// Expanded operator terms. These govern system use; they do not transfer
+/// ownership of files or replace a separately executed proprietary licence.
 fn access_notice_policy(
     critical: Color,
     warning: Color,
     normal: Color,
-    detail: u8,
 ) -> Vec<(String, Style)> {
     let critical_style = Style::default()
         .fg(critical)
@@ -280,66 +320,177 @@ fn access_notice_policy(
         .fg(warning)
         .add_modifier(Modifier::BOLD);
     let body_style = Style::default().fg(normal);
-    let rows: Vec<(&str, Style)> = match detail {
-        0 => vec![
-            ("RESTRICTED SYSTEM — CONTROLLED ACCESS", critical_style),
-            ("AUTHORIZED PERSONNEL ONLY", warning_style),
-            ("AUTHORITY — Use only with express permission and assigned scope.", warning_style),
-            ("RESPONSIBLE USE — Approved lawful purposes only. No access bypass,", warning_style),
-            ("intrusion, malware, harassment, disruption, or unlawful activity.", body_style),
-            ("CONFIDENTIALITY — Treat marked or sensitive files, notes, logs,", warning_style),
-            ("transcripts, exports, credentials, and system details as restricted.", body_style),
-            ("FILE OWNERSHIP / LICENSE — Files remain with creators/rights-holders.", warning_style),
-            ("Storage conveys no copyright or implied/proprietary license.", body_style),
-            ("Proprietary files require the rights-holder's separate written license.", body_style),
-            ("Use is non-exclusive, purpose-limited, non-transferable, non-sublicensable.", body_style),
-            ("Third-party terms apply; STREENOTE code remains MIT-licensed.", body_style),
-            ("DATA CARE — Journals/output may retain sensitive data; protect", warning_style),
-            ("credentials, restrict permissions, secure backups/exports. Report misuse.", body_style),
-            ("MONITORING — Activity may be logged or reviewed by authorized admins.", warning_style),
-            ("Violations may lead to revoked access and lawful civil/criminal action.", body_style),
-            ("Use only data you are entitled to access. Respect privacy and retention.", body_style),
-            ("DISCONNECT IF UNAUTHORIZED. [ENTER] ACKNOWLEDGE / CONTINUE [ESC] EXIT", critical_style),
-        ],
-        1 => vec![
-            ("RESTRICTED SYSTEM — CONTROLLED ACCESS", critical_style),
-            ("AUTHORIZED PERSONNEL ONLY", warning_style),
-            ("AUTHORITY — Express permission and assigned scope are required.", warning_style),
-            ("Use only for lawful approved work. No intrusion, bypass, malware,", body_style),
-            ("harassment, disruption, or unlawful activity.", body_style),
-            ("Treat files, notes, logs, transcripts, exports, and credentials", body_style),
-            ("as restricted. Access only on an authorized need-to-know basis.", body_style),
-            ("Files stay with rights-holders; storage conveys no copyright or license.", warning_style),
-            ("Proprietary files need a written, non-exclusive, limited-use license.", body_style),
-            ("It is non-transferable and non-sublicensable.", body_style),
-            ("Third-party terms apply; STREENOTE code remains MIT-licensed.", body_style),
-            ("Journals/output may retain sensitive data. Protect credentials,", body_style),
-            ("permissions, backups, and exports; report suspected exposure.", body_style),
-            ("Activity may be logged. Misuse may revoke access and lead to", warning_style),
-            ("lawful civil/criminal action. Respect privacy and retention rules.", body_style),
-            ("DISCONNECT IF UNAUTHORIZED. [ENTER] ACKNOWLEDGE / CONTINUE [ESC] EXIT", critical_style),
-        ],
-        _ => vec![
-            ("RESTRICTED SYSTEM — AUTHORIZED PERSONNEL ONLY", critical_style),
-            ("Express authorization and assigned scope are required.", warning_style),
-            ("Lawful use only. No bypass, intrusion, malware, or misuse.", body_style),
-            ("Treat files, notes, logs, exports, and credentials as restricted.", body_style),
-            ("Files stay with rights-holders; storage conveys no copyright or license.", warning_style),
-            ("Proprietary files need written, non-exclusive, limited-use permission.", body_style),
-            ("No transfer or sublicense; third-party terms still apply.", body_style),
-            ("Protect data and credentials. Report suspected exposure.", body_style),
-            ("Activity may be logged. Misuse may revoke access or lead to", body_style),
-            ("lawful action. Respect privacy and applicable retention rules.", body_style),
-            ("DISCONNECT IF UNAUTHORIZED. [ENTER] ACKNOWLEDGE / CONTINUE [ESC] EXIT", critical_style),
-        ],
-    };
+
+    let rows: Vec<(&str, Style)> = vec![
+        ("RESTRICTED SYSTEM — CONTROLLED ACCESS", critical_style),
+        ("AUTHORIZED PERSONNEL ONLY", warning_style),
+        ("NOTICE OF CONDITIONS, RESPONSIBILITIES, AND RESTRICTED HANDLING", warning_style),
+        ("", body_style),
+        ("1. AUTHORIZATION, IDENTITY, AND SCOPE", warning_style),
+        ("Access is permitted only to an individual who has received express authorization", body_style),
+        ("from the system owner or an administrator acting with delegated authority.", body_style),
+        ("Authorization is limited to the account, device, network, time period, purpose,", body_style),
+        ("and resources assigned to that operator. Access to one folder or service does not", body_style),
+        ("imply permission to inspect other users' accounts, private files, or system areas.", body_style),
+        ("Operators must use their own assigned identity and must not impersonate another", body_style),
+        ("person, share accounts, lend credentials, or conceal the identity of an activity.", body_style),
+        ("Any access beyond the granted scope requires prior approval from the responsible", body_style),
+        ("owner. A successful login, visible file, readable directory, or available command", body_style),
+        ("is not, by itself, evidence that the operator is authorized to use that resource.", body_style),
+        ("", body_style),
+        ("2. RESPONSIBLE AND LAWFUL USE", warning_style),
+        ("Use the system solely for legitimate, approved purposes and in accordance with", body_style),
+        ("applicable law, organizational rules, contractual duties, and written instructions.", body_style),
+        ("Operators must exercise care, professional judgment, and restraint at all times.", body_style),
+        ("Do not bypass authentication, access controls, quotas, monitoring, security tools,", body_style),
+        ("or administrative restrictions. Do not probe, scan, exploit, damage, degrade, or", body_style),
+        ("disrupt systems or networks without specific written authorization and scope.", body_style),
+        ("Do not introduce malware, malicious scripts, unauthorized persistence, destructive", body_style),
+        ("commands, denial-of-service activity, or tools intended to evade detection.", body_style),
+        ("Do not use the system for harassment, threats, stalking, fraud, unlawful surveillance,", body_style),
+        ("copyright infringement, privacy violations, or any other unlawful or abusive conduct.", body_style),
+        ("Do not use stored information to discriminate, intimidate, retaliate, or gain an", body_style),
+        ("improper advantage. Stop work when authorization is unclear or appears withdrawn.", body_style),
+        ("", body_style),
+        ("3. FILE OWNERSHIP, COPYRIGHT, AND PROPRIETARY LICENSING", warning_style),
+        ("Files, notes, source code, documents, datasets, credentials, and other materials", body_style),
+        ("remain owned by their respective authors, employers, licensors, or rights-holders.", body_style),
+        ("Placing a file on this system, indexing it, backing it up, or viewing it here does", body_style),
+        ("not transfer ownership, copyright, title, or any broader intellectual-property right.", body_style),
+        ("No implied licence is granted merely because a file is present, accessible, or stored.", body_style),
+        ("The system owner does not claim ownership of user or third-party content solely", body_style),
+        ("because that content is processed, cached, journaled, transmitted, or backed up here.", body_style),
+        ("Proprietary or confidential materials may be accessed only where the rights-holder", body_style),
+        ("or authorized representative has granted permission for the specific intended use.", body_style),
+        ("Where a proprietary file licence is required, the preferred permission model is", body_style),
+        ("a separate written, non-exclusive, purpose-limited, non-transferable, and", body_style),
+        ("non-sublicensable licence. It should identify the licensor, permitted operator,", body_style),
+        ("covered files, allowed purpose, duration, territory where relevant, and any limits", body_style),
+        ("on copying, modification, export, disclosure, retention, and deletion.", body_style),
+        ("The licence must be granted by a party that actually holds or controls the rights.", body_style),
+        ("It must not purport to grant rights that the licensor does not possess.", body_style),
+        ("No operator may copy, publish, distribute, adapt, reverse engineer, sell, sublicense,", body_style),
+        ("or disclose proprietary material except to the extent expressly permitted in writing", body_style),
+        ("or allowed by applicable law. Any permitted working copy must remain within the", body_style),
+        ("approved scope and be protected against access by unauthorized persons.", body_style),
+        ("Third-party notices, open-source licences, commercial terms, confidentiality duties,", body_style),
+        ("database rights, privacy requirements, and contractual restrictions continue to apply.", body_style),
+        ("Where terms conflict or permissions are uncertain, stop the relevant activity and", body_style),
+        ("obtain clarification from the rights-holder or responsible administrator.", body_style),
+        ("This operator notice is not itself a transfer of copyright or a complete proprietary", body_style),
+        ("file licence. A separate signed or otherwise valid written agreement may be needed.", body_style),
+        ("STREENOTE application source code is separately distributed under the MIT licence", body_style),
+        ("identified in the repository LICENSE file. That software licence does not grant", body_style),
+        ("rights to third-party files, user data, credentials, or content stored in the journal.", body_style),
+        ("", body_style),
+        ("4. CONFIDENTIALITY AND NEED-TO-KNOW HANDLING", warning_style),
+        ("Treat material marked confidential, proprietary, private, restricted, or sensitive", body_style),
+        ("as protected information. Apply the same care to material that a reasonable operator", body_style),
+        ("should recognize as sensitive even when it has no visible classification label.", body_style),
+        ("Access only the minimum information needed for the approved task. Do not browse", body_style),
+        ("curiously, collect unrelated personal information, or inspect another user's work", body_style),
+        ("without a documented operational need and appropriate authorization.", body_style),
+        ("Do not disclose protected information in chat rooms, public repositories, screenshots,", body_style),
+        ("support tickets, demonstrations, issue reports, or external services unless the", body_style),
+        ("recipient is authorized and the disclosure method is approved.", body_style),
+        ("Before sharing diagnostic output, remove passwords, tokens, private keys, personal", body_style),
+        ("information, internal hostnames, sensitive paths, and unrelated user content.", body_style),
+        ("Confidentiality obligations continue after access ends, to the extent required by", body_style),
+        ("the applicable agreement, policy, and law. Return or securely delete material when", body_style),
+        ("the authorized purpose ends or when the rights-holder or administrator directs.", body_style),
+        ("", body_style),
+        ("5. JOURNALS, TRANSCRIPTS, STORAGE, AND DATA RETENTION", warning_style),
+        ("STREENOTE may record commands, notes, system messages, and terminal output in a", body_style),
+        ("local journal. Output can reveal usernames, host details, directory paths, network", body_style),
+        ("addresses, filenames, application data, personal information, or business secrets.", body_style),
+        ("A command may cause a program to print sensitive material even when the operator", body_style),
+        ("did not intend to save it. Review output before sharing, exporting, or retaining it.", body_style),
+        ("Hidden-input handling is a safeguard, not a guarantee that all secrets are protected.", body_style),
+        ("Avoid entering passwords, tokens, private keys, recovery codes, or confidential data", body_style),
+        ("as ordinary command arguments or notes. Use purpose-built secret-management tools.", body_style),
+        ("Journal files, exports, backups, temporary files, and copied records must be stored", body_style),
+        ("only in approved locations with access permissions appropriate to their contents.", body_style),
+        ("Do not weaken file permissions, expose journals through public web servers, commit", body_style),
+        ("sensitive data to public version control, or place restricted content in unapproved", body_style),
+        ("cloud storage, synchronization services, removable media, or personal accounts.", body_style),
+        ("Retain information only for an authorized operational, contractual, or legal purpose.", body_style),
+        ("Follow the applicable retention schedule and any preservation or deletion hold.", body_style),
+        ("Do not destroy, alter, conceal, or selectively remove records to obstruct an audit,", body_style),
+        ("investigation, legal obligation, or authorized review.", body_style),
+        ("", body_style),
+        ("6. CREDENTIALS, DEVICES, AND SECURITY CONTROLS", warning_style),
+        ("Keep passwords, access tokens, private keys, certificates, and recovery codes secret.", body_style),
+        ("Use approved authentication methods and unique credentials. Enable multi-factor", body_style),
+        ("authentication where available and required by the system owner.", body_style),
+        ("Lock unattended sessions and protect devices from theft, shared access, and shoulder", body_style),
+        ("surfing. Do not store credentials in scripts, shell history, notes, or journal files.", body_style),
+        ("Do not disable endpoint protection, firewall rules, backups, audit functions, or", body_style),
+        ("security updates. Do not install packages, extensions, agents, or remote-access tools", body_style),
+        ("unless the change is authorized and obtained from a trusted source.", body_style),
+        ("Use secure connections and verify destinations before transferring protected data.", body_style),
+        ("Limit file and directory permissions to the minimum required. Protect backup copies", body_style),
+        ("to the same standard as the originals, including encryption where appropriate.", body_style),
+        ("", body_style),
+        ("7. MONITORING, AUDIT, AND ADMINISTRATIVE ACCESS", warning_style),
+        ("To the extent permitted by applicable law and disclosed organizational policy,", body_style),
+        ("system activity may be logged, monitored, retained, or reviewed for security,", body_style),
+        ("reliability, troubleshooting, compliance, and incident response.", body_style),
+        ("Records may include login events, command history, journal entries, file access,", body_style),
+        ("network activity, configuration changes, and administrative actions.", body_style),
+        ("Authorized administrators may investigate suspected misuse, preserve relevant", body_style),
+        ("records, restrict sessions, or disable accounts where reasonably necessary.", body_style),
+        ("Monitoring is not a promise that every action is observed, nor does it authorize", body_style),
+        ("operators to monitor other people or access their content without permission.", body_style),
+        ("", body_style),
+        ("8. INCIDENT REPORTING AND RESPONSE", warning_style),
+        ("Promptly report suspected credential compromise, accidental disclosure, malware,", body_style),
+        ("lost devices, unauthorized access, corrupted records, or policy violations to the", body_style),
+        ("designated system owner or security contact using the approved reporting channel.", body_style),
+        ("Include relevant facts and timing, but do not circulate exposed secrets or copy", body_style),
+        ("sensitive evidence to unapproved destinations. Preserve relevant records when safe.", body_style),
+        ("Do not attempt an independent investigation that could expand access, destroy evidence,", body_style),
+        ("alert an attacker, or worsen the incident. Follow administrator instructions.", body_style),
+        ("", body_style),
+        ("9. THIRD-PARTY DATA AND PRIVACY", warning_style),
+        ("Access personal information only for a legitimate authorized purpose and only to", body_style),
+        ("the extent necessary. Respect applicable privacy, employment, confidentiality, and", body_style),
+        ("data-protection obligations. Do not infer consent from technical accessibility.", body_style),
+        ("Do not upload another person's information to an external AI, hosting, analytics,", body_style),
+        ("translation, or synchronization service unless the data owner and responsible", body_style),
+        ("administrator have approved that specific service and transfer.", body_style),
+        ("Respect data residency, cross-border transfer, retention, deletion, and breach", body_style),
+        ("notification requirements that apply to the data and the responsible organization.", body_style),
+        ("", body_style),
+        ("10. ENFORCEMENT AND CONSEQUENCES", warning_style),
+        ("A suspected violation may result in suspension or revocation of access, removal of", body_style),
+        ("sessions, preservation of relevant records, internal review, or referral to the", body_style),
+        ("appropriate rights-holder, employer, administrator, regulator, or law-enforcement", body_style),
+        ("authority, as permitted or required by applicable law.", body_style),
+        ("Unauthorized access, disclosure, copying, damage, or misuse may create civil,", body_style),
+        ("contractual, employment, or criminal consequences depending on the facts and law.", body_style),
+        ("No penalty or legal outcome is predetermined by this notice; competent authorities", body_style),
+        ("and courts determine consequences under the applicable rules.", body_style),
+        ("", body_style),
+        ("11. ACKNOWLEDGMENT AND LIMITS OF THIS NOTICE", warning_style),
+        ("By selecting ACKNOWLEDGE, the operator confirms that they have read this notice,", body_style),
+        ("understand the stated operating rules, and will stop and seek clarification where", body_style),
+        ("authority, ownership, licence scope, or permitted use is uncertain.", body_style),
+        ("Acknowledgment does not create rights in another person's files, replace a required", body_style),
+        ("proprietary licence, override third-party terms, or waive rights that cannot lawfully", body_style),
+        ("be waived. It does not replace a separate employment, confidentiality, data-processing,", body_style),
+        ("acceptable-use, or software agreement where one is required.", body_style),
+        ("The system owner should publish and maintain the applicable contact, retention", body_style),
+        ("schedule, security procedure, and any additional written terms outside this notice.", body_style),
+        ("", body_style),
+        ("UNAUTHORIZED PERSONNEL: DISCONNECT NOW. DO NOT PROCEED.", critical_style),
+    ];
 
     rows.into_iter()
         .map(|(text, style)| (text.to_string(), style))
         .collect()
 }
 
-/// Word-wraps each policy row while preserving its emphasis style.
+/// Wraps policy paragraphs to terminal width without discarding any wording.
 fn wrap_access_notice(
     rows: Vec<(String, Style)>,
     width: u16,
@@ -348,6 +499,11 @@ fn wrap_access_notice(
     let mut wrapped = Vec::new();
 
     for (row, style) in rows {
+        if row.trim().is_empty() {
+            wrapped.push(Line::from(""));
+            continue;
+        }
+
         let mut current = String::new();
         let mut current_width = 0usize;
 
@@ -380,6 +536,20 @@ fn wrap_access_notice(
     }
 
     wrapped
+}
+
+/// Splits wrapped policy lines into pages sized to the current modal viewport.
+fn paginate_access_notice(
+    rows: Vec<(String, Style)>,
+    width: u16,
+    page_height: usize,
+) -> Vec<Vec<Line<'static>>> {
+    let lines = wrap_access_notice(rows, width);
+    let capacity = page_height.max(1);
+    lines
+        .chunks(capacity)
+        .map(|chunk| chunk.to_vec())
+        .collect()
 }
 
 
