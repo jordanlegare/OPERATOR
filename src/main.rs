@@ -892,7 +892,7 @@ fn run(
                                 "Opened independent terminal workspace ({}) with its own PTY.",
                                 workspace_session.shell_program().display()
                             ));
-                            run_terminal_workspace(terminal, app, &mut workspace_session)?;
+                            run_terminal_workspace(terminal, app, &mut workspace_session, hermes_bridge)?;
                             // Dropping this session closes only the workspace shell.
                             // STREENOTE's primary transcript shell remains untouched.
                             app.record_system("Closed independent terminal workspace; returned to STREENOTE.".to_string());
@@ -939,7 +939,7 @@ fn run(
 
 /// Temporarily hand the real terminal to the shell PTY for full-screen programs.
 /// F1 returns to the StreeNote transcript workspace.
-fn run_terminal_workspace(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App, session: &mut ShellSession) -> Result<(), Box<dyn std::error::Error>> {
+fn run_terminal_workspace(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App, session: &mut ShellSession, hermes_bridge: &mut HermesBridge) -> Result<(), Box<dyn std::error::Error>> {
     let mut out = stdout();
     let size = terminal.size()?;
     session.resize(size.width, size.height)?;
@@ -948,6 +948,19 @@ fn run_terminal_workspace(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     out.flush()?;
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         loop {
+            // Import Hermes hook events while the F1 PTY is active. They are
+            // appended to the same parent STREENOTE journal, not a workspace
+            // or Hermes-session-specific journal.
+            match hermes_bridge.drain(&mut app.journal) {
+                Ok(imported) if imported > 0 => {
+                    app.status = format!("Imported {imported} Hermes conversation event(s) from F1 workspace.");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    app.status = format!("Hermes journal import pending: {error}");
+                }
+            }
+
             let raw = session.drain_raw_output();
             if !raw.is_empty() { out.write_all(&raw)?; out.flush()?; }
             if let Some(code) = session.check_exit()? { app.record_system(format!("Workspace shell exited with status {code}.")); break; }
