@@ -58,7 +58,7 @@ The default input mode is **TERMINAL**.
 
 STREENOTE can capture Hermes CLI prompts and final assistant responses in the same chronological JSONL journal as notes and shell activity. This uses Hermes shell hooks; it does not scrape terminal rendering or create a second conversation journal.
 
-The primary and F1 PTY shells export `STREENOTE_HERMES_INBOX`. Hermes inherits this variable when launched from a STREENOTE-managed shell. The hook is a no-op when Hermes is launched outside STREENOTE.
+The primary PTY shell and the independent F1 terminal workspace both export `STREENOTE_HERMES_INBOX`. Launch `hermes --tui` from the F1 workspace and its hooks write to the same inbox consumed by the STREENOTE instance that opened that workspace. STREENOTE imports those events into the parent journal while the F1 workspace is running; it does not create a separate workspace journal or split entries by Hermes session ID. The hook is a no-op when Hermes is launched outside a STREENOTE-managed shell.
 
 Install the hook script:
 
