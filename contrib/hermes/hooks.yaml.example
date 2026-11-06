@@ -1,12 +1,24 @@
 # Merge these entries into the existing ~/.hermes/config.yaml hooks: block.
 # Replace /home/jordan with the account's actual home directory.
-# Do not add a second top-level "hooks:" block if one already exists.
+# Do not add a second top-level "hooks:" block.
+#
+# The wrapper exports STREENOTE_HERMES_INBOX for hooks run by a separate
+# systemd-managed Hermes gateway. For a direct CLI-only setup, the Python
+# script can be used as the command when the variable is already inherited.
 
 hooks:
   pre_llm_call:
-    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture.py"
+    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture"
       timeout: 3
 
   post_llm_call:
-    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture.py"
+    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture"
+      timeout: 3
+
+  pre_tool_call:
+    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture"
+      timeout: 3
+
+  post_tool_call:
+    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture"
       timeout: 3
