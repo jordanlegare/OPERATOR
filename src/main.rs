@@ -1,4 +1,5 @@
 mod app;
+mod hermes_bridge;
 mod shell;
 mod settings;
 mod storage;
@@ -33,6 +34,7 @@ use ratatui::{
 };
 
 use app::{App, InputMode};
+use hermes_bridge::HermesBridge;
 use shell::ShellSession;
 use storage::Journal;
 
@@ -133,8 +135,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let result = run(&mut terminal, &mut app, &mut shell);
-    // Drain any output already buffered before the shell is stopped.
+    let mut hermes_bridge = HermesBridge::default();
+    let result = run(&mut terminal, &mut app, &mut shell, &mut hermes_bridge);
+    // Import any Hermes events queued before shutdown, then drain shell output.
+    if let Err(error) = hermes_bridge.drain(&mut app.journal) {
+        app.status = format!("Hermes journal import pending: {error}");
+    }
     drain_shell(&mut app, &mut shell)?;
     let save_result = app.journal.save_pending();
     drop(shell);
@@ -850,9 +856,19 @@ fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     shell: &mut Option<ShellSession>,
+    hermes_bridge: &mut HermesBridge,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         drain_shell(app, shell)?;
+        match hermes_bridge.drain(&mut app.journal) {
+            Ok(imported) if imported > 0 => {
+                app.status = format!("Imported {imported} Hermes conversation event(s).");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                app.status = format!("Hermes journal import pending: {error}");
+            }
+        }
         if let Some(session) = shell.as_ref() {
             app.set_terminal_prompt(session.prompt_label());
         }
