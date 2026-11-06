@@ -999,6 +999,25 @@ fn handle_key(
     app: &mut App,
     shell: &mut Option<ShellSession>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    // The full Hermes message viewer owns keyboard focus until dismissed.
+    if app.message_view_index.is_some() {
+        match code {
+            KeyCode::Esc => app.close_hermes_message(),
+            KeyCode::Up => app.scroll_hermes_message(-1),
+            KeyCode::Down => app.scroll_hermes_message(1),
+            KeyCode::PageUp => {
+                app.scroll_hermes_message(-(app.feed_viewport_height.max(1) as i32));
+            }
+            KeyCode::PageDown => {
+                app.scroll_hermes_message(app.feed_viewport_height.max(1) as i32);
+            }
+            KeyCode::Home => app.message_view_scroll = 0,
+            KeyCode::End => app.message_view_scroll = u16::MAX,
+            _ => {}
+        }
+        return Ok(false);
+    }
+
     // Unmodified F2-F10 select the nine built-in color themes.
     if let Some(number) = theme_number_from_key(code, modifiers) {
         app.set_theme(number);
