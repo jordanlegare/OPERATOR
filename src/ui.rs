@@ -10,7 +10,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{App, InputMode},
-    storage::{entry_transcript_text, format_timestamp, Entry, EntryKind},
+    storage::{entry_display_text, entry_transcript_text, format_timestamp, Entry, EntryKind},
     theme::{Theme, THEMES},
 };
 
@@ -43,6 +43,63 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_input(frame, chunks[offset + 2], app, theme);
     draw_hints(frame, chunks[offset + 3], app, theme);
 
+    if let Some(index) = app.message_view_index {
+        if let Some(entry) = app.journal.entries.get(index) {
+            draw_hermes_message(frame, entry, index, app.message_view_scroll, theme);
+        }
+    }
+}
+
+fn draw_hermes_message(
+    frame: &mut Frame,
+    entry: &Entry,
+    index: usize,
+    scroll: u16,
+    theme: Theme,
+) {
+    let popup = centered_rect(90, 88, frame.area());
+    frame.render_widget(Clear, popup);
+
+    let title = match entry.kind {
+        EntryKind::HermesUser => format!(
+            " HERMES USER MESSAGE · ROW {} · {} ",
+            index + 1,
+            format_timestamp(&entry.timestamp)
+        ),
+        EntryKind::HermesAssistant => format!(
+            " HERMES ASSISTANT RESPONSE · ROW {} · {} ",
+            index + 1,
+            format_timestamp(&entry.timestamp)
+        ),
+        _ => " HERMES MESSAGE ".to_string(),
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.primary))
+        .title(Span::styled(
+            title,
+            Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(theme.panel));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(entry.text.clone())
+            .style(Style::default().fg(theme.text).bg(theme.panel))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        sections[0],
+    );
+    frame.render_widget(
+        Paragraph::new(" ↑/↓ scroll · PgUp/PgDn page · Home/End · Esc close ")
+            .style(Style::default().fg(theme.muted).bg(theme.panel)),
+        sections[1],
+    );
 }
 
 fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
@@ -247,6 +304,7 @@ fn entry_line(entry: &Entry, index: usize, app: &App, theme: Theme) -> Line<'sta
     let timestamp = format_timestamp(&entry.timestamp);
     let number = format!("{:>6} ", index + 1);
     let row_text = entry_transcript_text(entry, index);
+    let display_text = entry_display_text(entry);
     let selected_columns =
         app.selection_columns_for_row(index, UnicodeWidthStr::width(row_text.as_str()));
     let active = app.is_active_match(index);
@@ -262,6 +320,8 @@ fn entry_line(entry: &Entry, index: usize, app: &App, theme: Theme) -> Line<'sta
         EntryKind::TerminalCommand => ("CMD ", theme.warning),
         EntryKind::TerminalOutput => ("OUT ", theme.info),
         EntryKind::System => ("SYS ", theme.success),
+        EntryKind::HermesUser => ("HUSR", theme.info),
+        EntryKind::HermesAssistant => ("HAI ", theme.success),
     };
 
     let mut spans = vec![
@@ -273,7 +333,7 @@ fn entry_line(entry: &Entry, index: usize, app: &App, theme: Theme) -> Line<'sta
 
     if let Some(query) = app.search_query.as_deref().filter(|_| hit) {
         let needle = query.to_ascii_lowercase();
-        let haystack = entry.text.to_ascii_lowercase();
+        let haystack = display_text.to_ascii_lowercase();
         if let Some(start) = haystack.find(needle.as_str()) {
             let end = start + query.len();
             if start <= entry.text.len()
@@ -282,11 +342,11 @@ fn entry_line(entry: &Entry, index: usize, app: &App, theme: Theme) -> Line<'sta
                 && entry.text.is_char_boundary(end)
             {
                 spans.push(Span::styled(
-                    entry.text[..start].to_string(),
+                    display_text[..start].to_string(),
                     Style::default().fg(theme.text).patch(row_style),
                 ));
                 spans.push(Span::styled(
-                    entry.text[start..end].to_string(),
+                    display_text[start..end].to_string(),
                     Style::default()
                         .fg(theme.search_fg)
                         .bg(theme.search_bg)
@@ -294,18 +354,18 @@ fn entry_line(entry: &Entry, index: usize, app: &App, theme: Theme) -> Line<'sta
                         .patch(row_style),
                 ));
                 spans.push(Span::styled(
-                    entry.text[end..].to_string(),
+                    display_text[end..].to_string(),
                     Style::default().fg(theme.text).patch(row_style),
                 ));
             } else {
                 spans.push(Span::styled(
-                    entry.text.clone(),
+                    display_text.clone(),
                     Style::default().fg(theme.text).patch(row_style),
                 ));
             }
         } else {
             spans.push(Span::styled(
-                entry.text.clone(),
+                display_text.clone(),
                 Style::default().fg(theme.text).patch(row_style),
             ));
         }
@@ -527,6 +587,7 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         Line::from(""),
         Line::from(vec![Span::styled("LOCAL COMMANDS", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD))]),
         Line::from(vec![Span::styled("/search WORDS", Style::default().fg(theme.warning)), Span::raw("  Search the entire journal and jump to the latest hit with context.")]),
+        Line::from(vec![Span::styled("/view", Style::default().fg(theme.warning)), Span::raw("           Open the full Markdown body of a selected Hermes message.")]),
         Line::from(vec![Span::styled("n / N", Style::default().fg(theme.warning)), Span::raw("          Next / previous search result when input is empty.")]),
         Line::from(vec![Span::styled("/mode [shell|notes]", Style::default().fg(theme.warning)), Span::raw("  Switch input mode; no argument toggles.")]),
         Line::from(vec![Span::styled("/note TEXT", Style::default().fg(theme.warning)), Span::raw("      Save a note without leaving terminal mode; /note alone switches to Notes mode.")]),
