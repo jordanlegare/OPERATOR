@@ -45,10 +45,6 @@ impl HermesBridge {
         Self { inbox }
     }
 
-    pub fn inbox_path(&self) -> &Path {
-        &self.inbox
-    }
-
     /// Import queued events in filename order. A file is removed only after
     /// Journal::append confirms that the event is already durable or has been
     /// safely deduplicated against a previously durable event.
