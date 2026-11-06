@@ -330,8 +330,8 @@ mod tool_event_tests {
         fs::create_dir_all(&ready).expect("create ready directory");
 
         for (event_id, kind, text) in [
-            ("call-001", "hermes_tool_call", "Tool: terminal\\nArguments:\\n{}"),
-            ("result-001", "hermes_tool_result", "Tool: terminal\\nStatus: ok\\nResult:\\n{}"),
+            ("call-001", "hermes_tool_call", "Tool: terminal\nArguments:\n{}"),
+            ("result-001", "hermes_tool_result", "Tool: terminal\nStatus: ok\nResult:\n{}"),
         ] {
             let json = serde_json::json!({
                 "version": 1,
