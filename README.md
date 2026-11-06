@@ -53,6 +53,53 @@ The default input mode is **TERMINAL**.
 - Command/input history, Bash-powered Tab completion for commands and filesystem paths, nine high-contrast color palettes, export, stats, path display, and save/retry.
 - Older journal entries without a `kind` field remain compatible and load as `note` entries.
 
+
+## Hermes CLI conversation capture
+
+STREENOTE can capture Hermes CLI prompts and final assistant responses in the same chronological JSONL journal as notes and shell activity. This uses Hermes shell hooks; it does not scrape terminal rendering or create a second conversation journal.
+
+The primary and F1 PTY shells export `STREENOTE_HERMES_INBOX`. Hermes inherits this variable when launched from a STREENOTE-managed shell. The hook is a no-op when Hermes is launched outside STREENOTE.
+
+Install the hook script:
+
+```bash
+mkdir -p ~/.hermes/agent-hooks
+install -m 700 contrib/hermes/streenote-capture.py \
+  ~/.hermes/agent-hooks/streenote-capture.py
+```
+
+Merge the following into the existing `hooks:` block in `~/.hermes/config.yaml`. Replace `/home/jordan` with the actual account home directory. Do not create a duplicate top-level `hooks:` key if one already exists.
+
+```yaml
+hooks:
+  pre_llm_call:
+    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture.py"
+      timeout: 3
+  post_llm_call:
+    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture.py"
+      timeout: 3
+```
+
+Hermes requests first-use approval for each hook event/command combination. Review and approve the STREENOTE capture script when prompted, then inspect the result:
+
+```bash
+hermes hooks list
+hermes hooks doctor
+```
+
+Rebuild and restart STREENOTE so its new PTY shell exports the inbox variable, then launch Hermes from that shell.
+
+- `pre_llm_call` captures the user's prompt as a `hermes_user` entry.
+- `post_llm_call` captures the successful final answer as a `hermes_assistant` entry.
+- Tool arguments and raw tool results are intentionally not captured in this first increment.
+- Interrupted or unsuccessful turns can have a prompt entry without a final-answer entry.
+- Full Markdown is retained in JSONL. The transcript shows a compact preview; select a Hermes row and enter `/view` to read the complete message. `/search` searches the complete message body.
+- Hermes events use stable event IDs for retry deduplication. Those IDs are internal metadata, not journal partitions or visible session labels.
+
+Events are staged in `~/.local/share/streenote/hermes-inbox/ready` (or under `$XDG_DATA_HOME/streenote/hermes-inbox/ready`) with private directory/file permissions. STREENOTE imports them through its in-memory journal and normal append/retry path. Malformed or oversized events are moved to the inbox's `failed` directory.
+
+Conversation prompts and answers may contain sensitive information. Protect the journal and its backups accordingly.
+
 ## Requirements
 
 - Debian or another Unix-like OS with a PTY implementation.
