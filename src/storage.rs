@@ -558,11 +558,11 @@ mod hermes_tool_entry_tests {
     fn tool_events_have_distinct_serialized_kinds_and_row_labels() {
         let call = Entry::with_kind(
             EntryKind::HermesToolCall,
-            "Tool: terminal\\nArguments:\\n{}".to_string(),
+            "Tool: terminal\nArguments:\n{}".to_string(),
         );
         let result = Entry::with_kind(
             EntryKind::HermesToolResult,
-            "Tool: terminal\\nStatus: ok\\nResult:\\n{}".to_string(),
+            "Tool: terminal\nStatus: ok\nResult:\n{}".to_string(),
         );
 
         assert_eq!(serde_json::to_value(&call).unwrap()["kind"], "hermes_tool_call");
@@ -573,7 +573,7 @@ mod hermes_tool_entry_tests {
 
     #[test]
     fn tool_event_previews_and_multiline_text_are_preserved() {
-        let text = "Tool: terminal\\nArguments:\\n{\\n  \"command\": \"pwd\"\\n}";
+        let text = "Tool: terminal\nArguments:\n{\n  \"command\": \"pwd\"\n}";
         assert_eq!(sanitize_entry_text(EntryKind::HermesToolCall, text), text);
         let entry = Entry::with_kind(EntryKind::HermesToolCall, text.to_string());
         assert_eq!(entry_display_text(&entry), "Tool: terminal  ↳ [full message]");
