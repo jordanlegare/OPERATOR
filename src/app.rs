@@ -379,6 +379,26 @@ impl App {
         });
 
         if let Some(row) = clicked_row {
+            let is_hermes_event = self.journal.entries.get(row).is_some_and(|entry| {
+                matches!(
+                    entry.kind,
+                    EntryKind::HermesUser
+                        | EntryKind::HermesAssistant
+                        | EntryKind::HermesToolCall
+                        | EntryKind::HermesToolResult
+                )
+            });
+
+            if is_hermes_event {
+                // A stationary click on a Hermes transcript row is the mouse
+                // equivalent of selecting that row and executing /view.
+                self.selection = None;
+                self.selected_row = Some(row);
+                self.follow_tail = false;
+                self.open_hermes_message();
+                return;
+            }
+
             let command = self
                 .journal
                 .entries
