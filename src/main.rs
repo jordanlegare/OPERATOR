@@ -888,14 +888,9 @@ fn run(
                     let size = terminal.size()?;
                     match ShellSession::spawn(size.width, size.height) {
                         Ok(mut workspace_session) => {
-                            app.record_system(format!(
-                                "Opened independent terminal workspace ({}) with its own PTY.",
-                                workspace_session.shell_program().display()
-                            ));
                             run_terminal_workspace(terminal, app, &mut workspace_session, hermes_bridge)?;
                             // Dropping this session closes only the workspace shell.
                             // STREENOTE's primary transcript shell remains untouched.
-                            app.record_system("Closed independent terminal workspace; returned to STREENOTE.".to_string());
                             terminal.clear()?;
                         }
                         Err(error) => {
@@ -963,7 +958,7 @@ fn run_terminal_workspace(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 
             let raw = session.drain_raw_output();
             if !raw.is_empty() { out.write_all(&raw)?; out.flush()?; }
-            if let Some(code) = session.check_exit()? { app.record_system(format!("Workspace shell exited with status {code}.")); break; }
+            if session.check_exit()?.is_some() { break; }
             if !event::poll(Duration::from_millis(12))? { continue; }
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat => {
