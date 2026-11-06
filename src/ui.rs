@@ -71,6 +71,16 @@ fn draw_hermes_message(
             index + 1,
             format_timestamp(&entry.timestamp)
         ),
+        EntryKind::HermesToolCall => format!(
+            " HERMES TOOL CALL · ROW {} · {} ",
+            index + 1,
+            format_timestamp(&entry.timestamp)
+        ),
+        EntryKind::HermesToolResult => format!(
+            " HERMES TOOL RESULT · ROW {} · {} ",
+            index + 1,
+            format_timestamp(&entry.timestamp)
+        ),
         _ => " HERMES MESSAGE ".to_string(),
     };
     let block = Block::default()
@@ -322,6 +332,8 @@ fn entry_line(entry: &Entry, index: usize, app: &App, theme: Theme) -> Line<'sta
         EntryKind::System => ("SYS ", theme.success),
         EntryKind::HermesUser => ("HUSR", theme.info),
         EntryKind::HermesAssistant => ("HAI ", theme.success),
+        EntryKind::HermesToolCall => ("HCAL", theme.warning),
+        EntryKind::HermesToolResult => ("HRES", theme.success),
     };
 
     let mut spans = vec![
