@@ -368,7 +368,7 @@ pub fn format_timestamp(timestamp: &str) -> String {
 /// journal and in the message viewer.
 pub fn entry_display_text(entry: &Entry) -> String {
     if matches!(entry.kind, EntryKind::HermesUser | EntryKind::HermesAssistant) {
-        let first_line = entry.text.lines().next().unwrap_or("");
+        let first_line = entry.text.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
         if entry.text.contains('\n') {
             format!("{first_line}  ↳ [full message]")
         } else {
