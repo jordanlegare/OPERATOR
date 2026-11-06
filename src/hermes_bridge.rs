@@ -89,7 +89,13 @@ impl HermesBridge {
                 || event.event_id.len() > 128
                 || event.text.is_empty()
                 || event.text.len() > MAX_EVENT_BYTES as usize
-                || !matches!(event.kind, EntryKind::HermesUser | EntryKind::HermesAssistant)
+                || !matches!(
+                    event.kind,
+                    EntryKind::HermesUser
+                        | EntryKind::HermesAssistant
+                        | EntryKind::HermesToolCall
+                        | EntryKind::HermesToolResult
+                )
             {
                 quarantine(&path, &failed)?;
                 continue;
@@ -298,6 +304,54 @@ mod tests {
         let mut bridge = HermesBridge::new(root.clone());
         assert_eq!(bridge.drain(&mut journal).expect("drain malformed event"), 0);
         assert!(root.join("failed/broken.json").exists());
+
+        drop(journal);
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+
+#[cfg(test)]
+mod tool_event_tests {
+    use super::HermesBridge;
+    use crate::storage::{EntryKind, Journal};
+    use std::{env, fs, sync::atomic::{AtomicUsize, Ordering}};
+
+    static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn imports_tool_call_and_tool_result_events() {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let root = env::temp_dir().join(format!(
+            "streenote-hermes-tools-{}-{id}",
+            std::process::id()
+        ));
+        let ready = root.join("ready");
+        fs::create_dir_all(&ready).expect("create ready directory");
+
+        for (event_id, kind, text) in [
+            ("call-001", "hermes_tool_call", "Tool: terminal\nArguments:\n{}"),
+            ("result-001", "hermes_tool_result", "Tool: terminal\nStatus: ok\nResult:\n{}"),
+        ] {
+            let json = serde_json::json!({
+                "version": 1,
+                "event_id": event_id,
+                "kind": kind,
+                "timestamp": "2026-11-06T12:00:00-05:00",
+                "text": text
+            });
+            fs::write(
+                ready.join(format!("{event_id}.json")),
+                serde_json::to_vec(&json).expect("serialize event"),
+            ).expect("write event");
+        }
+
+        let mut journal = Journal::open(root.join("journal.jsonl")).expect("open journal");
+        let mut bridge = HermesBridge::new(root.clone());
+        assert_eq!(bridge.drain(&mut journal).expect("drain inbox"), 2);
+        assert_eq!(journal.entries.len(), 2);
+        assert_eq!(journal.entries[0].kind, EntryKind::HermesToolCall);
+        assert_eq!(journal.entries[1].kind, EntryKind::HermesToolResult);
 
         drop(journal);
         let _ = fs::remove_dir_all(root);
