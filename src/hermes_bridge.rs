@@ -154,7 +154,7 @@ fn resolve_inbox_path(
         })
         .unwrap_or_else(|| {
             std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
+                .unwrap_or_else(|_| PathBuf::from("/"))
                 .join(".local/share")
         });
 
