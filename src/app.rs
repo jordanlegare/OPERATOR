@@ -82,6 +82,10 @@ pub struct App {
     secret_prompt_deadline: Option<Instant>,
     pub status: String,
     pub show_help: bool,
+    /// Journal row currently displayed in the full-screen Hermes message viewer.
+    pub message_view_index: Option<usize>,
+    /// Vertical scroll offset within the Hermes message viewer.
+    pub message_view_scroll: u16,
     /// Whether the ASCII-art banner is currently visible.
     pub show_banner: bool,
     /// Whether the Canadian maple-leaf watermark is displayed behind the transcript.
@@ -139,6 +143,8 @@ impl App {
             secret_prompt_deadline: None,
             status,
             show_help: false,
+            message_view_index: None,
+            message_view_scroll: 0,
             show_banner: settings.show_banner,
             show_canada_watermark: settings.show_canada_watermark,
             scp_sftp_passthrough: settings.scp_sftp_passthrough,
@@ -750,6 +756,47 @@ impl App {
         // output arrives. The feed follows automatically only when already live.
     }
 
+    /// Open the full Markdown body of the selected Hermes prompt or response.
+    pub fn open_hermes_message(&mut self) {
+        let candidate = self
+            .selected_row
+            .or_else(|| {
+                self.active_match
+                    .and_then(|match_index| self.matches.get(match_index).copied())
+            })
+            .or_else(|| self.journal.entries.len().checked_sub(1));
+
+        let Some(index) = candidate else {
+            self.status = "The journal is empty.".to_string();
+            return;
+        };
+        let Some(entry) = self.journal.entries.get(index) else {
+            self.status = "Selected journal row no longer exists.".to_string();
+            return;
+        };
+
+        if !matches!(entry.kind, EntryKind::HermesUser | EntryKind::HermesAssistant) {
+            self.status = "Select a HUSR or HAI row before using /view.".to_string();
+            return;
+        }
+
+        self.message_view_index = Some(index);
+        self.message_view_scroll = 0;
+    }
+
+    pub fn close_hermes_message(&mut self) {
+        self.message_view_index = None;
+        self.message_view_scroll = 0;
+    }
+
+    pub fn scroll_hermes_message(&mut self, amount: i32) {
+        self.message_view_scroll = if amount < 0 {
+            self.message_view_scroll.saturating_sub(amount.unsigned_abs() as u16)
+        } else {
+            self.message_view_scroll.saturating_add(amount as u16)
+        };
+    }
+
     pub fn record_system(&mut self, message: String) {
         let selected_live_tail =
             self.follow_tail && self.selected_row == self.journal.entries.len().checked_sub(1);
@@ -873,6 +920,7 @@ impl App {
 
         match command.as_str() {
             "/help" => self.show_help = true,
+            "/view" => self.open_hermes_message(),
             "/search" => {
                 if argument.is_empty() {
                     self.clear_search();
@@ -1193,6 +1241,7 @@ fn is_streamnote_command(line: &str) -> bool {
     matches!(
         command.as_str(),
         "/help"
+            | "/view"
             | "/search"
             | "/clear"
             | "/save"
