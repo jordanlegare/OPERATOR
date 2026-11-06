@@ -178,6 +178,7 @@ The palettes are built into StreamNote and require no external theme package or 
 | `/note text` | Save a note without switching mode |
 | `!command` | Run a shell command from NOTES mode |
 | `/search phrase` | Search the entire journal and jump to the latest match |
+| `/view` | Open the full Markdown body of the selected Hermes prompt or response |
 | `n` / `N` | Next / previous search result when the input is empty |
 | `/clear` | Clear search and return to the live tail; does not delete data |
 | `/save` | Retry pending writes and sync the journal |
