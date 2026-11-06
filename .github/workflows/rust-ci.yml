@@ -18,5 +18,25 @@ jobs:
         run: cargo check --all-targets
       - name: Test Hermes inbox bridge
         run: cargo test hermes_bridge::tests
+      - name: Smoke-test Hermes shell hook
+        run: |
+          python3 -m py_compile contrib/hermes/streenote-capture.py
+          inbox="$(mktemp -d)"
+          printf '%s' '{"hook_event_name":"pre_llm_call","session_id":"ci-session","extra":{"turn_id":"ci-turn","user_message":"capture smoke test"}}' \
+            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+          printf '%s' '{"hook_event_name":"post_llm_call","session_id":"ci-session","extra":{"turn_id":"ci-turn","assistant_response":"captured answer"}}' \
+            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+          python3 - "$inbox" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          ready = pathlib.Path(sys.argv[1]) / "ready"
+          events = [json.loads(path.read_text()) for path in sorted(ready.glob("*.json"))]
+          assert [event["kind"] for event in events] == ["hermes_user", "hermes_assistant"]
+          assert events[0]["text"] == "capture smoke test"
+          assert events[1]["text"] == "captured answer"
+          assert events[0]["event_id"] != events[1]["event_id"]
+          PY
       - name: Test journal storage compatibility
         run: cargo test storage::terminal_output_filter_tests
