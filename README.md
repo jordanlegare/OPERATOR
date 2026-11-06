@@ -58,7 +58,11 @@ The default input mode is **TERMINAL**.
 
 STREENOTE can capture Hermes CLI prompts and final assistant responses in the same chronological JSONL journal as notes and shell activity. This uses Hermes shell hooks; it does not scrape terminal rendering or create a second conversation journal.
 
-The primary PTY shell and the independent F1 terminal workspace both export `STREENOTE_HERMES_INBOX`. Launch `hermes --tui` from the F1 workspace and its hooks write to the same inbox consumed by the STREENOTE instance that opened that workspace. STREENOTE imports those events into the parent journal while the F1 workspace is running; it does not create a separate workspace journal or split entries by Hermes session ID. The hook is a no-op when Hermes is launched outside a STREENOTE-managed shell.
+The primary shell PTY and the independent F1 terminal workspace both receive `STREENOTE_HERMES_INBOX` directly from Rust when STREENOTE creates their `CommandBuilder`. The variable name is centralized as `HERMES_INBOX_ENV` in `src/hermes_bridge.rs`, and the same Rust path resolver is used by the journal importer and every managed PTY. An absolute `STREENOTE_HERMES_INBOX` already present in STREENOTE's own environment overrides the default; otherwise the path is resolved from `XDG_DATA_HOME`, then `HOME/.local/share`. No export in `.bashrc`, a shell startup file, or the F1 launcher is required.
+
+Processes launched from either STREENOTE-managed PTY inherit this variable normally. Launch `hermes --tui` from the F1 workspace and CLI-launched child processes can write to the same inbox consumed by the STREENOTE instance that opened that workspace. STREENOTE imports those events into the parent journal while the F1 workspace is running; it does not create a separate workspace journal or split entries by Hermes session ID.
+
+**Separate Hermes gateway services are a different process tree.** A systemd-managed Hermes gateway and its hook subprocesses cannot inherit environment variables from the F1 PTY. When Hermes executes hooks through such a gateway, configure the hook command to use a small wrapper that exports `STREENOTE_HERMES_INBOX` to the same resolved inbox path before executing `streenote-capture.py`. That wrapper is a gateway adapter only; Rust-side PTY injection remains the standard contract for programs and tools launched from STREENOTE shells.
 
 Install the hook script:
 
@@ -87,7 +91,7 @@ hermes hooks list
 hermes hooks doctor
 ```
 
-Rebuild and restart STREENOTE so its new PTY shell exports the inbox variable, then launch Hermes from that shell.
+Rebuild and restart STREENOTE so its Rust-created PTYs receive the inbox variable, then launch Hermes from that shell. If your Hermes configuration routes hooks through a separate gateway service, point the hook command at a gateway wrapper that exports the same inbox path; see the process-boundary note above.
 
 - `pre_llm_call` captures the user's prompt as a `hermes_user` entry.
 - `post_llm_call` captures the successful final answer as a `hermes_assistant` entry.
