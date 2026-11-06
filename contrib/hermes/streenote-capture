@@ -1,0 +1,3 @@
+#!/bin/sh
+export STREENOTE_HERMES_INBOX="$HOME/.local/share/streenote/hermes-inbox"
+exec "$HOME/.hermes/hooks/streenote-capture.py"
