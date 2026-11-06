@@ -758,32 +758,33 @@ impl App {
 
     /// Open the full Markdown body of the selected Hermes prompt or response.
     pub fn open_hermes_message(&mut self) {
+        let is_hermes_message = |index: usize| {
+            self.journal.entries.get(index).is_some_and(|entry| {
+                matches!(entry.kind, EntryKind::HermesUser | EntryKind::HermesAssistant)
+            })
+        };
         let candidate = self
             .selected_row
+            .filter(|index| is_hermes_message(*index))
             .or_else(|| {
                 self.active_match
                     .and_then(|match_index| self.matches.get(match_index).copied())
+                    .filter(|index| is_hermes_message(*index))
             })
-            .or_else(|| self.journal.entries.len().checked_sub(1));
+            .or_else(|| {
+                self.journal.entries.iter().rposition(|entry| {
+                    matches!(entry.kind, EntryKind::HermesUser | EntryKind::HermesAssistant)
+                })
+            });
 
         let Some(index) = candidate else {
-            self.status = "The journal is empty.".to_string();
+            self.status = "No Hermes messages are present in the journal.".to_string();
             return;
         };
-        let Some(entry) = self.journal.entries.get(index) else {
-            self.status = "Selected journal row no longer exists.".to_string();
-            return;
-        };
-
-        if !matches!(entry.kind, EntryKind::HermesUser | EntryKind::HermesAssistant) {
-            self.status = "Select a HUSR or HAI row before using /view.".to_string();
-            return;
-        }
 
         self.message_view_index = Some(index);
         self.message_view_scroll = 0;
     }
-
     pub fn close_hermes_message(&mut self) {
         self.message_view_index = None;
         self.message_view_scroll = 0;
