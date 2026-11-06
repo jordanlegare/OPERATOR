@@ -760,7 +760,13 @@ impl App {
     pub fn open_hermes_message(&mut self) {
         let is_hermes_message = |index: usize| {
             self.journal.entries.get(index).is_some_and(|entry| {
-                matches!(entry.kind, EntryKind::HermesUser | EntryKind::HermesAssistant)
+                matches!(
+                entry.kind,
+                EntryKind::HermesUser
+                    | EntryKind::HermesAssistant
+                    | EntryKind::HermesToolCall
+                    | EntryKind::HermesToolResult
+            )
             })
         };
         let candidate = self
@@ -773,12 +779,18 @@ impl App {
             })
             .or_else(|| {
                 self.journal.entries.iter().rposition(|entry| {
-                    matches!(entry.kind, EntryKind::HermesUser | EntryKind::HermesAssistant)
+                    matches!(
+                entry.kind,
+                EntryKind::HermesUser
+                    | EntryKind::HermesAssistant
+                    | EntryKind::HermesToolCall
+                    | EntryKind::HermesToolResult
+            )
                 })
             });
 
         let Some(index) = candidate else {
-            self.status = "No Hermes messages are present in the journal.".to_string();
+            self.status = "No Hermes messages or tool events are present in the journal.".to_string();
             return;
         };
 
