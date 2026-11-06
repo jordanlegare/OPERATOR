@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -14,6 +15,8 @@ pub enum EntryKind {
     TerminalCommand,
     TerminalOutput,
     System,
+    HermesUser,
+    HermesAssistant,
 }
 
 impl Default for EntryKind {
@@ -28,6 +31,9 @@ pub struct Entry {
     #[serde(default)]
     pub kind: EntryKind,
     pub text: String,
+    /// Stable ID for externally imported events; used only for deduplication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
 }
 
 impl Entry {
@@ -39,7 +45,24 @@ impl Entry {
         Self {
             timestamp: Local::now().to_rfc3339_opts(SecondsFormat::Secs, false),
             kind,
-            text,
+            text: sanitize_entry_text(kind, &text),
+            event_id: None,
+        }
+    }
+
+    /// Build a timestamped external event while retaining a stable ID so
+    /// retrying an unacknowledged inbox file cannot duplicate a journal entry.
+    pub fn with_external_event(
+        kind: EntryKind,
+        text: String,
+        timestamp: String,
+        event_id: String,
+    ) -> Self {
+        Self {
+            timestamp,
+            kind,
+            text: sanitize_entry_text(kind, &text),
+            event_id: Some(event_id),
         }
     }
 }
@@ -51,6 +74,10 @@ pub struct Journal {
     pub total_text_bytes: usize,
     pub skipped_corrupt_lines: usize,
     pending: Vec<Entry>,
+    /// Event IDs already durably present in the journal.
+    persisted_event_ids: HashSet<String>,
+    /// Event IDs accepted into memory but not yet confirmed durable.
+    pending_event_ids: HashSet<String>,
 }
 
 impl Journal {
@@ -69,6 +96,7 @@ impl Journal {
         let mut entries = Vec::new();
         let mut total_text_bytes = 0usize;
         let mut skipped_corrupt_lines = 0usize;
+        let mut persisted_event_ids = HashSet::new();
 
         for line in reader.lines() {
             let line = line?;
@@ -77,7 +105,14 @@ impl Journal {
             }
             match serde_json::from_str::<Entry>(&line) {
                 Ok(mut entry) => {
-                    entry.text = sanitize_single_line(&entry.text);
+                    entry.text = sanitize_entry_text(entry.kind, &entry.text);
+                    if let Some(event_id) = entry.event_id.as_ref() {
+                        // A retry after a crash may leave both the original and
+                        // a later import attempt in JSONL. Keep the first copy.
+                        if !persisted_event_ids.insert(event_id.clone()) {
+                            continue;
+                        }
+                    }
                     if entry.kind == EntryKind::TerminalOutput
                         && should_suppress_terminal_output(&entry.text)
                     {
@@ -98,6 +133,8 @@ impl Journal {
             total_text_bytes,
             skipped_corrupt_lines,
             pending: Vec::new(),
+            persisted_event_ids,
+            pending_event_ids: HashSet::new(),
         })
     }
 
@@ -109,18 +146,42 @@ impl Journal {
         {
             return Ok(());
         }
+
+        if let Some(event_id) = entry.event_id.as_ref() {
+            if self.pending_event_ids.contains(event_id) {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "event is in the journal's pending-write queue",
+                ));
+            }
+            if self.persisted_event_ids.contains(event_id) {
+                return Ok(());
+            }
+        }
+
         self.total_text_bytes = self.total_text_bytes.saturating_add(entry.text.len());
         self.entries.push(entry.clone());
 
         // Never let a newer entry overtake an older entry whose disk append failed.
         if !self.pending.is_empty() {
+            if let Some(event_id) = entry.event_id.as_ref() {
+                self.pending_event_ids.insert(event_id.clone());
+            }
             self.pending.push(entry);
             return self.save_pending();
         }
 
         match append_jsonl(&self.path, &entry) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                if let Some(event_id) = entry.event_id.as_ref() {
+                    self.persisted_event_ids.insert(event_id.clone());
+                }
+                Ok(())
+            }
             Err(error) => {
+                if let Some(event_id) = entry.event_id.as_ref() {
+                    self.pending_event_ids.insert(event_id.clone());
+                }
                 self.pending.push(entry);
                 Err(error)
             }
@@ -147,8 +208,19 @@ impl Journal {
         }
 
         if !self.pending.is_empty() {
+            for entry in &entries {
+                if let Some(event_id) = entry.event_id.as_ref() {
+                    self.pending_event_ids.insert(event_id.clone());
+                }
+            }
             self.pending.extend(entries);
             return self.save_pending();
+        }
+
+        for entry in &entries {
+            if let Some(event_id) = entry.event_id.as_ref() {
+                self.pending_event_ids.insert(event_id.clone());
+            }
         }
 
         let mut file = match OpenOptions::new().create(true).append(true).open(&self.path) {
@@ -179,6 +251,7 @@ impl Journal {
         // a later /save retries sync_data for the complete journal.
         file.flush()?;
         file.sync_data()?;
+        self.persisted_event_ids.extend(self.pending_event_ids.drain());
         Ok(())
     }
 
@@ -186,6 +259,7 @@ impl Journal {
         let mut file = OpenOptions::new().create(true).append(true).open(&self.path)?;
         if self.pending.is_empty() {
             file.sync_data()?;
+            self.persisted_event_ids.extend(self.pending_event_ids.drain());
             return Ok(());
         }
 
@@ -194,7 +268,13 @@ impl Journal {
         file.write_all(b"\n")?;
         let pending = std::mem::take(&mut self.pending);
         for (index, entry) in pending.iter().enumerate() {
-            let mut bytes = serde_json::to_vec(entry).map_err(io::Error::other)?;
+            let mut bytes = match serde_json::to_vec(entry) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    self.pending.extend_from_slice(&pending[index..]);
+                    return Err(io::Error::other(error));
+                }
+            };
             bytes.push(b'\n');
             if let Err(error) = file.write_all(&bytes) {
                 self.pending.extend_from_slice(&pending[index..]);
@@ -202,7 +282,9 @@ impl Journal {
             }
         }
         file.flush()?;
-        file.sync_data()
+        file.sync_data()?;
+        self.persisted_event_ids.extend(self.pending_event_ids.drain());
+        Ok(())
     }
 
     pub fn pending_count(&self) -> usize {
@@ -266,6 +348,8 @@ pub fn entry_kind_label(kind: EntryKind) -> &'static str {
         EntryKind::TerminalCommand => "CMD",
         EntryKind::TerminalOutput => "OUT",
         EntryKind::System => "SYS",
+        EntryKind::HermesUser => "HUSR",
+        EntryKind::HermesAssistant => "HAI",
     }
 }
 
@@ -280,6 +364,21 @@ pub fn format_timestamp(timestamp: &str) -> String {
         .unwrap_or_else(|_| timestamp.to_string())
 }
 
+/// Compact single-row preview. Full Hermes Markdown remains available in the
+/// journal and in the message viewer.
+pub fn entry_display_text(entry: &Entry) -> String {
+    if matches!(entry.kind, EntryKind::HermesUser | EntryKind::HermesAssistant) {
+        let first_line = entry.text.lines().next().unwrap_or("");
+        if entry.text.contains('\n') {
+            format!("{first_line}  ↳ [full message]")
+        } else {
+            first_line.to_string()
+        }
+    } else {
+        entry.text.clone()
+    }
+}
+
 /// Plain-text equivalent of a rendered transcript row, used by mouse selection and copy.
 pub fn entry_transcript_text(entry: &Entry, index: usize) -> String {
     format!(
@@ -287,7 +386,7 @@ pub fn entry_transcript_text(entry: &Entry, index: usize) -> String {
         index + 1,
         format_timestamp(&entry.timestamp),
         entry_kind_label(entry.kind),
-        entry.text
+        entry_display_text(entry)
     )
 }
 
@@ -309,6 +408,23 @@ pub fn sanitize_single_line(input: &str) -> String {
             c => Some(c),
         })
         .collect()
+}
+
+/// Preserve Markdown line breaks while removing terminal control characters
+/// that could otherwise affect the STREENOTE display.
+pub fn sanitize_multiline(input: &str) -> String {
+    let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
+    normalized
+        .chars()
+        .filter(|ch| *ch == '\n' || *ch == '\t' || !ch.is_control())
+        .collect()
+}
+
+fn sanitize_entry_text(kind: EntryKind, input: &str) -> String {
+    match kind {
+        EntryKind::HermesUser | EntryKind::HermesAssistant => sanitize_multiline(input),
+        _ => sanitize_single_line(input),
+    }
 }
 
 
