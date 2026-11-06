@@ -118,16 +118,45 @@ impl HermesBridge {
     }
 }
 
-/// Shared by STREENOTE's PTY shell and the Hermes hook. Only shells launched
-/// by STREENOTE inherit this variable, so normal Hermes CLI use is unaffected.
+/// Environment variable shared by STREENOTE-managed PTYs and Hermes hook adapters.
+///
+/// STREENOTE injects this variable into every shell PTY it creates. Processes
+/// launched from those shells inherit the same inbox location automatically.
+pub const HERMES_INBOX_ENV: &str = "STREENOTE_HERMES_INBOX";
+
+/// Resolve the inbox path used by both the journal importer and child PTYs.
+///
+/// An explicit absolute STREENOTE_HERMES_INBOX takes precedence, followed by
+/// XDG_DATA_HOME and then HOME. The resolved path is always absolute so child
+/// processes do not depend on their current working directory.
 pub fn default_inbox_path() -> PathBuf {
-    let data_root = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
+    resolve_inbox_path(
+        std::env::var_os(HERMES_INBOX_ENV).map(PathBuf::from),
+        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
+        std::env::var_os("HOME").map(PathBuf::from),
+    )
+}
+
+fn resolve_inbox_path(
+    explicit: Option<PathBuf>,
+    xdg_data_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> PathBuf {
+    if let Some(path) = explicit.filter(|path| path.is_absolute()) {
+        return path;
+    }
+
+    let data_root = xdg_data_home
         .filter(|path| path.is_absolute())
         .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+            home.filter(|path| path.is_absolute())
+                .map(|path| path.join(".local/share"))
         })
-        .unwrap_or_else(|| PathBuf::from(".local/share"));
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("/"))
+                .join(".local/share")
+        });
 
     data_root.join("streenote").join("hermes-inbox")
 }
@@ -182,6 +211,39 @@ mod tests {
             path.join(format!("00000000000000000001-{event_id}.json")),
             serde_json::to_vec(&json).expect("serialize event"),
         ).expect("write event");
+    }
+
+    #[test]
+    fn explicit_absolute_inbox_override_takes_precedence() {
+        let resolved = super::resolve_inbox_path(
+            Some(PathBuf::from("/srv/streenote/custom-inbox")),
+            Some(PathBuf::from("/xdg/data")),
+            Some(PathBuf::from("/home/test")),
+        );
+        assert_eq!(resolved, PathBuf::from("/srv/streenote/custom-inbox"));
+    }
+
+    #[test]
+    fn xdg_data_home_is_used_when_no_explicit_override_exists() {
+        let resolved = super::resolve_inbox_path(
+            None,
+            Some(PathBuf::from("/xdg/data")),
+            Some(PathBuf::from("/home/test")),
+        );
+        assert_eq!(resolved, PathBuf::from("/xdg/data/streenote/hermes-inbox"));
+    }
+
+    #[test]
+    fn home_is_used_when_xdg_data_home_is_unavailable_or_relative() {
+        let resolved = super::resolve_inbox_path(
+            Some(PathBuf::from("relative/inbox")),
+            Some(PathBuf::from("relative/xdg")),
+            Some(PathBuf::from("/home/test")),
+        );
+        assert_eq!(
+            resolved,
+            PathBuf::from("/home/test/.local/share/streenote/hermes-inbox")
+        );
     }
 
     #[test]

@@ -60,10 +60,11 @@ impl ShellSession {
         // when it does not resolve to this executable.
         let shell = resolve_shell_program();
         let mut command = CommandBuilder::new(&shell);
-        // Hermes CLI hooks inherit this path only when Hermes is launched from
-        // a STREENOTE-managed PTY. Hooks are a no-op in ordinary shells.
+        // Standard Hermes integration contract: every STREENOTE-managed PTY
+        // receives the canonical inbox path from the Rust bridge. Child tools
+        // inherit it; independent gateway services need their own hook adapter.
         command.env(
-            "STREENOTE_HERMES_INBOX",
+            crate::hermes_bridge::HERMES_INBOX_ENV,
             crate::hermes_bridge::default_inbox_path(),
         );
         // Keep subprocesses and shell startup files pointed at the real shell,
