@@ -48,7 +48,7 @@ The default input mode is **TERMINAL**.
 - `Alt+Left` / `Alt+Right` horizontally pan the feed.
 - Unbounded in-memory `Vec<Entry>` with no application-level cache eviction.
 - JSON Lines persistence; non-secret commands, notes, useful terminal output records, and system events are appended to the journal. Empty terminal-output rows and standard shell-prompt rows are filtered both when loading older journals and when appending new output; existing journal files are not rewritten.
-- `/search <terms>` searches all cached notes, commands, and terminal output case-insensitively and jumps to the latest match with surrounding context.
+- `/search <terms>` searches all cached notes, commands, terminal output, and imported Hermes messages case-insensitively and jumps to the latest match with surrounding context.
 - `n` / `N` navigate search hits.
 - Command/input history, Bash-powered Tab completion for commands and filesystem paths, nine high-contrast color palettes, export, stats, path display, and save/retry.
 - Older journal entries without a `kind` field remain compatible and load as `note` entries.
@@ -234,7 +234,7 @@ Each line in `journal.jsonl` is an independent JSON object. Example:
 
 The transcript renders each stored RFC 3339 timestamp as local `YYYY-MM-DD HH:MM:SS ±HH:MM`, so the date, time and UTC offset are visible for every row.
 
-Kinds are `note`, `terminal_command`, `terminal_output`, and `system`. Old records without `kind` are treated as notes. The journal is append-only from the application's perspective; malformed lines are skipped at load and counted in the startup status. It is never truncated by StreamNote. Input entered while terminal echo is off is intentionally not included.
+Kinds are `note`, `terminal_command`, `terminal_output`, `system`, `hermes_user`, and `hermes_assistant`. Old records without `kind` are treated as notes. The journal is append-only from the application's perspective; malformed lines are skipped at load and counted in the startup status. It is never truncated by StreamNote. Input entered while terminal echo is off is intentionally not included.
 
 ## Cache and persistence semantics
 
