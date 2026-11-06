@@ -336,10 +336,10 @@ fn entry_line(entry: &Entry, index: usize, app: &App, theme: Theme) -> Line<'sta
         let haystack = display_text.to_ascii_lowercase();
         if let Some(start) = haystack.find(needle.as_str()) {
             let end = start + query.len();
-            if start <= entry.text.len()
-                && end <= entry.text.len()
-                && entry.text.is_char_boundary(start)
-                && entry.text.is_char_boundary(end)
+            if start <= display_text.len()
+                && end <= display_text.len()
+                && display_text.is_char_boundary(start)
+                && display_text.is_char_boundary(end)
             {
                 spans.push(Span::styled(
                     display_text[..start].to_string(),
@@ -371,7 +371,7 @@ fn entry_line(entry: &Entry, index: usize, app: &App, theme: Theme) -> Line<'sta
         }
     } else {
         spans.push(Span::styled(
-            entry.text.clone(),
+            display_text.clone(),
             Style::default().fg(theme.text).patch(row_style),
         ));
     }
