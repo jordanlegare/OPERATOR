@@ -56,7 +56,7 @@ The default input mode is **TERMINAL**.
 
 ## Hermes CLI conversation capture
 
-STREENOTE can capture Hermes CLI prompts and final assistant responses in the same chronological JSONL journal as notes and shell activity. This uses Hermes shell hooks; it does not scrape terminal rendering or create a second conversation journal.
+STREENOTE can capture Hermes CLI prompts, final assistant responses, tool calls, and tool results in the same chronological JSONL journal as notes and shell activity. This uses Hermes shell hooks; it does not scrape terminal rendering or create a second conversation journal.
 
 The primary shell PTY and the independent F1 terminal workspace both receive `STREENOTE_HERMES_INBOX` directly from Rust when STREENOTE creates their `CommandBuilder`. The variable name is centralized as `HERMES_INBOX_ENV` in `src/hermes_bridge.rs`, and the same Rust path resolver is used by the journal importer and every managed PTY. An absolute `STREENOTE_HERMES_INBOX` already present in STREENOTE's own environment overrides the default; otherwise the path is resolved from `XDG_DATA_HOME`, then `HOME/.local/share`. No export in `.bashrc`, a shell startup file, or the F1 launcher is required.
 
@@ -64,23 +64,37 @@ Processes launched from either STREENOTE-managed PTY inherit this variable norma
 
 **Separate Hermes gateway services are a different process tree.** A systemd-managed Hermes gateway and its hook subprocesses cannot inherit environment variables from the F1 PTY. When Hermes executes hooks through such a gateway, configure the hook command to use a small wrapper that exports `STREENOTE_HERMES_INBOX` to the same resolved inbox path before executing `streenote-capture.py`. That wrapper is a gateway adapter only; Rust-side PTY injection remains the standard contract for programs and tools launched from STREENOTE shells.
 
-Install the hook script:
+Install the hook script and a small gateway adapter:
 
 ```bash
 mkdir -p ~/.hermes/agent-hooks
 install -m 700 contrib/hermes/streenote-capture.py \
   ~/.hermes/agent-hooks/streenote-capture.py
+
+cat > ~/.hermes/agent-hooks/streenote-capture <<'SH'
+#!/bin/sh
+: "${XDG_DATA_HOME:=$HOME/.local/share}"
+export STREENOTE_HERMES_INBOX="${STREENOTE_HERMES_INBOX:-$XDG_DATA_HOME/streenote/hermes-inbox}"
+exec "$HOME/.hermes/agent-hooks/streenote-capture.py"
+SH
+chmod 700 ~/.hermes/agent-hooks/streenote-capture
 ```
 
-Merge the following into the existing `hooks:` block in `~/.hermes/config.yaml`. Replace `/home/jordan` with the actual account home directory. Do not create a duplicate top-level `hooks:` key if one already exists.
+The wrapper explicitly supplies the inbox path when hooks run in a separate systemd-managed gateway. Merge the following into the existing `hooks:` block in `~/.hermes/config.yaml`. Replace `/home/jordan` with the actual account home directory. Do not create a duplicate top-level `hooks:` key if one already exists.
 
 ```yaml
 hooks:
   pre_llm_call:
-    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture.py"
+    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture"
       timeout: 3
   post_llm_call:
-    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture.py"
+    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture"
+      timeout: 3
+  pre_tool_call:
+    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture"
+      timeout: 3
+  post_tool_call:
+    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture"
       timeout: 3
 ```
 
@@ -94,9 +108,12 @@ hermes hooks doctor
 Rebuild and restart STREENOTE so its Rust-created PTYs receive the inbox variable, then launch Hermes from that shell. If your Hermes configuration routes hooks through a separate gateway service, point the hook command at a gateway wrapper that exports the same inbox path; see the process-boundary note above.
 
 - `pre_llm_call` captures the user's prompt as a `hermes_user` entry.
-- `post_llm_call` captures the successful final answer as a `hermes_assistant` entry.
-- Tool arguments and raw tool results are intentionally not captured in this first increment.
-- Interrupted or unsuccessful turns can have a prompt entry without a final-answer entry.
+- `post_llm_call` captures the final assistant response as a `hermes_assistant` entry.
+- `pre_tool_call` captures the tool name and arguments as a `hermes_tool_call` entry.
+- `post_tool_call` captures the tool result, status, duration, and error details (when present) as a `hermes_tool_result` entry.
+- Tool-call and tool-result records share the tool's `tool_call_id` for correlation; pre/post event IDs remain distinct for retry deduplication.
+- Tool argument and result previews are capped at 48 KiB each. Common secret-bearing object keys and common inline token/password assignments are redacted on a best-effort basis; this is not a complete secret filter.
+- Interrupted or unsuccessful turns can have a prompt entry without a final-answer entry. A tool call that never reaches its post-hook can likewise have a call entry without a result entry.
 - Full Markdown is retained in JSONL. The transcript shows a compact preview; select a Hermes row and enter `/view` to read the complete message. `/search` searches the complete message body.
 - Hermes events use stable event IDs for retry deduplication. Those IDs are internal metadata, not journal partitions or visible session labels.
 
@@ -182,7 +199,7 @@ The palettes are built into StreamNote and require no external theme package or 
 | `/note text` | Save a note without switching mode |
 | `!command` | Run a shell command from NOTES mode |
 | `/search phrase` | Search the entire journal and jump to the latest match |
-| `/view` | Open the full Markdown body of the selected Hermes prompt or response |
+| `/view` | Open the full body of the selected Hermes prompt, response, tool call, or tool result |
 | `n` / `N` | Next / previous search result when the input is empty |
 | `/clear` | Clear search and return to the live tail; does not delete data |
 | `/save` | Retry pending writes and sync the journal |
@@ -238,7 +255,7 @@ Each line in `journal.jsonl` is an independent JSON object. Example:
 
 The transcript renders each stored RFC 3339 timestamp as local `YYYY-MM-DD HH:MM:SS ±HH:MM`, so the date, time and UTC offset are visible for every row.
 
-Kinds are `note`, `terminal_command`, `terminal_output`, `system`, `hermes_user`, and `hermes_assistant`. Old records without `kind` are treated as notes. The journal is append-only from the application's perspective; malformed lines are skipped at load and counted in the startup status. It is never truncated by StreamNote. Input entered while terminal echo is off is intentionally not included.
+Kinds are `note`, `terminal_command`, `terminal_output`, `system`, `hermes_user`, `hermes_assistant`, `hermes_tool_call`, and `hermes_tool_result`. Old records without `kind` are treated as notes. The journal is append-only from the application's perspective; malformed lines are skipped at load and counted in the startup status. It is never truncated by StreamNote. Input entered while terminal echo is off is intentionally not included.
 
 ## Cache and persistence semantics
 
