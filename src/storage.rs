@@ -17,6 +17,8 @@ pub enum EntryKind {
     System,
     HermesUser,
     HermesAssistant,
+    HermesToolCall,
+    HermesToolResult,
 }
 
 impl Default for EntryKind {
@@ -350,6 +352,8 @@ pub fn entry_kind_label(kind: EntryKind) -> &'static str {
         EntryKind::System => "SYS",
         EntryKind::HermesUser => "HUSR",
         EntryKind::HermesAssistant => "HAI",
+        EntryKind::HermesToolCall => "HCAL",
+        EntryKind::HermesToolResult => "HRES",
     }
 }
 
@@ -367,7 +371,13 @@ pub fn format_timestamp(timestamp: &str) -> String {
 /// Compact single-row preview. Full Hermes Markdown remains available in the
 /// journal and in the message viewer.
 pub fn entry_display_text(entry: &Entry) -> String {
-    if matches!(entry.kind, EntryKind::HermesUser | EntryKind::HermesAssistant) {
+    if matches!(
+        entry.kind,
+        EntryKind::HermesUser
+            | EntryKind::HermesAssistant
+            | EntryKind::HermesToolCall
+            | EntryKind::HermesToolResult
+    ) {
         let first_line = entry.text.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
         if entry.text.contains('\n') {
             format!("{first_line}  ↳ [full message]")
@@ -422,7 +432,10 @@ pub fn sanitize_multiline(input: &str) -> String {
 
 fn sanitize_entry_text(kind: EntryKind, input: &str) -> String {
     match kind {
-        EntryKind::HermesUser | EntryKind::HermesAssistant => sanitize_multiline(input),
+        EntryKind::HermesUser
+        | EntryKind::HermesAssistant
+        | EntryKind::HermesToolCall
+        | EntryKind::HermesToolResult => sanitize_multiline(input),
         _ => sanitize_single_line(input),
     }
 }
@@ -533,5 +546,36 @@ mod terminal_output_filter_tests {
             contents
         );
         let _ = fs::remove_file(path);
+    }
+}
+
+
+#[cfg(test)]
+mod hermes_tool_entry_tests {
+    use super::{entry_display_text, entry_kind_label, sanitize_entry_text, Entry, EntryKind};
+
+    #[test]
+    fn tool_events_have_distinct_serialized_kinds_and_row_labels() {
+        let call = Entry::with_kind(
+            EntryKind::HermesToolCall,
+            "Tool: terminal\\nArguments:\\n{}".to_string(),
+        );
+        let result = Entry::with_kind(
+            EntryKind::HermesToolResult,
+            "Tool: terminal\\nStatus: ok\\nResult:\\n{}".to_string(),
+        );
+
+        assert_eq!(serde_json::to_value(&call).unwrap()["kind"], "hermes_tool_call");
+        assert_eq!(serde_json::to_value(&result).unwrap()["kind"], "hermes_tool_result");
+        assert_eq!(entry_kind_label(EntryKind::HermesToolCall), "HCAL");
+        assert_eq!(entry_kind_label(EntryKind::HermesToolResult), "HRES");
+    }
+
+    #[test]
+    fn tool_event_previews_and_multiline_text_are_preserved() {
+        let text = "Tool: terminal\\nArguments:\\n{\\n  \"command\": \"pwd\"\\n}";
+        assert_eq!(sanitize_entry_text(EntryKind::HermesToolCall, text), text);
+        let entry = Entry::with_kind(EntryKind::HermesToolCall, text.to_string());
+        assert_eq!(entry_display_text(&entry), "Tool: terminal  ↳ [full message]");
     }
 }
