@@ -1,0 +1,12 @@
+# Merge these entries into the existing ~/.hermes/config.yaml hooks: block.
+# Replace /home/jordan with the account's actual home directory.
+# Do not add a second top-level "hooks:" block if one already exists.
+
+hooks:
+  pre_llm_call:
+    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture.py"
+      timeout: 3
+
+  post_llm_call:
+    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture.py"
+      timeout: 3
