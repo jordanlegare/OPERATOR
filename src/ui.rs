@@ -106,7 +106,7 @@ fn draw_hermes_message(
         sections[0],
     );
     frame.render_widget(
-        Paragraph::new(" ↑/↓ scroll · PgUp/PgDn page · Home/End · Esc close ")
+        Paragraph::new(" ↑/↓ scroll · PgUp/PgDn page · Home/End · Ctrl+C copy · Esc close ")
             .style(Style::default().fg(theme.muted).bg(theme.panel)),
         sections[1],
     );
