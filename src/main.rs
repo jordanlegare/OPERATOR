@@ -1049,7 +1049,7 @@ fn handle_key(
                     match copy_to_terminal_clipboard(&text) {
                         Ok(()) => {
                             app.status = format!(
-                                "Copied all {} characters from the Hermes modal to the clipboard.",
+                                "Copied all {} characters to the client and server clipboards.",
                                 text.chars().count()
                             );
                         }
@@ -1094,7 +1094,7 @@ fn handle_key(
                         match copy_to_terminal_clipboard(&selected) {
                             Ok(()) => {
                                 app.status = format!(
-                                    "Sent {} characters to the terminal clipboard via OSC 52.",
+                                    "Copied {} characters to the client and server clipboards via OSC 52.",
                                     selected.chars().count()
                                 );
                             }
@@ -1211,7 +1211,13 @@ fn server_clipboard_cache_path() -> PathBuf {
 }
 
 fn write_server_clipboard_cache(text: &str) -> io::Result<()> {
-    write_clipboard_cache_to(&server_clipboard_cache_path(), text)
+    let path = server_clipboard_cache_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
+    write_clipboard_cache_to(&path, text)
 }
 
 fn write_clipboard_cache_to(path: &Path, text: &str) -> io::Result<()> {
@@ -1226,8 +1232,6 @@ fn write_clipboard_cache_to(path: &Path, text: &str) -> io::Result<()> {
         io::Error::new(io::ErrorKind::InvalidInput, "clipboard cache has no parent directory")
     })?;
     fs::create_dir_all(parent)?;
-    #[cfg(unix)]
-    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
 
     let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("clipboard");
     let temporary = parent.join(format!("{file_name}.tmp.{}", std::process::id()));
@@ -1668,11 +1672,11 @@ mod clipboard_tests {
 
     #[test]
     fn parses_osc52_bel_and_st_responses() {
-        let bel = b"\\x1b]52;c;SGVsbG8=\\x07";
-        let st = b"\\x1b]52;c;U1NIIHRvIFN0cmVlTm90ZQ==\\x1b\\\\";
+        let bel = b"\x1b]52;c;SGVsbG8=\x07";
+        let st = b"\x1b]52;c;U1NIIHRvIFN0cmVlTm90ZQ==\x1b\\";
         assert_eq!(parse_osc52_response(bel).as_deref(), Some("Hello"));
         assert_eq!(parse_osc52_response(st).as_deref(), Some("SSH to StreeNote"));
-        assert!(parse_osc52_response(b"\\x1b]52;p;SGVsbG8=\\x07").is_none());
+        assert!(parse_osc52_response(b"\x1b]52;p;SGVsbG8=\x07").is_none());
     }
 
     #[test]
