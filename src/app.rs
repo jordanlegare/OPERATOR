@@ -569,7 +569,10 @@ impl App {
     }
 
     pub fn paste(&mut self, value: &str) {
-        let clean = sanitize_single_line(value);
+        // Treat CRLF as one line break before flattening clipboard text into
+        // the single-line command/note input.
+        let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
+        let clean = sanitize_single_line(&normalized);
         self.input.insert_str(self.cursor, &clean);
         self.cursor += clean.len();
         self.history_position = None;

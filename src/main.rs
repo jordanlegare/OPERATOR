@@ -1219,7 +1219,7 @@ fn read_system_clipboard() -> Result<String, String> {
         {
             Ok(output) if output.status.success() => {
                 let text = String::from_utf8_lossy(&output.stdout)
-                    .trim_end_matches(|ch| ch == '\\r' || ch == '\\n')
+                    .trim_end_matches(|ch| ch == '\r' || ch == '\n')
                     .to_string();
                 return Ok(text);
             }
