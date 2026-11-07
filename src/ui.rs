@@ -454,7 +454,7 @@ fn apply_selection(
 fn draw_input(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     app.input_area = area;
     let title = if app.secret_input {
-        " HIDDEN INPUT  ·  ENTER TO SEND WITHOUT LOGGING  ·  CTRL+C TO INTERRUPT "
+        " HIDDEN INPUT  ·  ENTER TO SEND WITHOUT LOGGING  ·  CTRL+V / RIGHT-CLICK TO PASTE  ·  CTRL+C TO INTERRUPT "
     } else {
         match app.input_mode {
             InputMode::Terminal => " DEBIAN TERMINAL  ·  ENTER TO EXECUTE  ·  CTRL+V / RIGHT-CLICK PASTE  ·  CTRL+T FOR NOTES ",
