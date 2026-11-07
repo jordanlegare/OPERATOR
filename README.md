@@ -87,11 +87,11 @@ The default input mode is **TERMINAL**.
 
 ## Hermes CLI conversation capture
 
-STREENOTE can capture Hermes CLI prompts, final assistant responses, tool calls, and tool results in the same chronological JSONL journal as notes and shell activity. This uses Hermes shell hooks; it does not scrape terminal rendering or create a second conversation journal.
+STREENOTE captures Hermes CLI prompts, assistant responses, tool calls/results, and live text-stream deltas in the same chronological JSONL journal as notes and shell activity. Session and turn identifiers correlate those events into expandable conversations; this uses Hermes hooks rather than scraping terminal rendering or maintaining a second conversation journal.
 
 The primary shell PTY and the independent F1 terminal workspace both receive `STREENOTE_HERMES_INBOX` directly from Rust when STREENOTE creates their `CommandBuilder`. The variable name is centralized as `HERMES_INBOX_ENV` in `src/hermes_bridge.rs`, and the same Rust path resolver is used by the journal importer and every managed PTY. An absolute `STREENOTE_HERMES_INBOX` already present in STREENOTE's own environment overrides the default; otherwise the path is resolved from `XDG_DATA_HOME`, then `HOME/.local/share`. No export in `.bashrc`, a shell startup file, or the F1 launcher is required.
 
-Processes launched from either STREENOTE-managed PTY inherit this variable normally. Launch `hermes --tui` from the F1 workspace and CLI-launched child processes can write to the same inbox consumed by the STREENOTE instance that opened that workspace. STREENOTE imports those events into the parent journal while the F1 workspace is running; it does not create a separate workspace journal or split entries by Hermes session ID.
+Processes launched from either STREENOTE-managed PTY inherit this variable normally. Launch `hermes --tui` from the F1 workspace and CLI-launched child processes can write to the same inbox consumed by the STREENOTE instance that opened that workspace. STREENOTE imports those events into the parent journal while the F1 workspace is running; it does not create a separate workspace journal. Events with the same Hermes `session_id` are grouped as one conversation across multiple `turn_id` values.
 
 **Separate Hermes gateway services are a different process tree.** A systemd-managed Hermes gateway and its hook subprocesses cannot inherit environment variables from the F1 PTY. When Hermes executes hooks through such a gateway, configure the hook command to use a small wrapper that exports `STREENOTE_HERMES_INBOX` to the same resolved inbox path before executing `streenote-capture.py`. That wrapper is a gateway adapter only; Rust-side PTY injection remains the standard contract for programs and tools launched from STREENOTE shells.
 
@@ -127,6 +127,15 @@ hooks:
   post_tool_call:
     - command: "/home/jordan/.hermes/agent-hooks/streenote-capture"
       timeout: 3
+  on_stream_start:
+    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture"
+      timeout: 3
+  on_stream_delta:
+    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture"
+      timeout: 3
+  on_stream_end:
+    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture"
+      timeout: 3
 ```
 
 Hermes requests first-use approval for each hook event/command combination. Review and approve the STREENOTE capture script when prompted, then inspect the result:
@@ -142,10 +151,13 @@ Rebuild and restart STREENOTE so its Rust-created PTYs receive the inbox variabl
 - `post_llm_call` captures the final assistant response as a `hermes_assistant` entry.
 - `pre_tool_call` captures the tool name and arguments as a `hermes_tool_call` entry.
 - `post_tool_call` captures the tool result, status, duration, and error details (when present) as a `hermes_tool_result` entry.
+- `on_stream_start`, `on_stream_delta`, and `on_stream_end` capture assistant text incrementally. Reasoning deltas are intentionally excluded.
+- The capture adapter stores `session_id`, `turn_id`, `tool_call_id`, and stream iteration metadata so prompts, responses, and tool events remain correlated.
+- Stream deltas are written durably as separate JSONL events but coalesced into one in-memory assistant bubble per turn/iteration; the thread viewer therefore updates live without creating one visible row per token chunk.
 - Tool-call and tool-result records share the tool's `tool_call_id` for correlation; pre/post event IDs remain distinct for retry deduplication.
 - Tool argument and result previews are capped at 48 KiB each. Common secret-bearing object keys and common inline token/password assignments are redacted on a best-effort basis; this is not a complete secret filter.
 - Interrupted or unsuccessful turns can have a prompt entry without a final-answer entry. A tool call that never reaches its post-hook can likewise have a call entry without a result entry.
-- Full Markdown is retained in JSONL. The transcript shows a compact preview; select a Hermes row and enter `/view` to read the complete message. `/search` searches the complete message body.
+- Full Markdown is retained in JSONL. `/threads` opens a conversation index; select one and press Enter to expand the complete thread. Pressing Enter or clicking any HUSR/HAI/HCAL/HRES row opens its containing conversation. The viewer follows new stream deltas automatically while it is open. `/view` remains available for the selected event's individual body, and `/search` searches complete message content.
 - Hermes events use stable event IDs for retry deduplication. Those IDs are internal metadata, not journal partitions or visible session labels.
 
 Events are staged in `~/.local/share/streenote/hermes-inbox/ready` (or under `$XDG_DATA_HOME/streenote/hermes-inbox/ready`) with private directory/file permissions. STREENOTE imports them through its in-memory journal and normal append/retry path. Malformed or oversized events are moved to the inbox's `failed` directory.
@@ -230,7 +242,8 @@ The palettes are built into StreamNote and require no external theme package or 
 | `/note text` | Save a note without switching mode |
 | `!command` | Run a shell command from NOTES mode |
 | `/search phrase` | Search the entire journal and jump to the latest match |
-| `/view` | Open the full body of the selected Hermes prompt, response, tool call, or tool result |
+| `/view` | Open the full body of the selected Hermes event |
+| `/threads` | Browse expandable Hermes conversations and their complete tool/assistant timeline |
 | `n` / `N` | Next / previous search result when the input is empty |
 | `/clear` | Clear search and return to the live tail; does not delete data |
 | `/save` | Retry pending writes and sync the journal |
@@ -286,7 +299,7 @@ Each line in `journal.jsonl` is an independent JSON object. Example:
 
 The transcript renders each stored RFC 3339 timestamp as local `YYYY-MM-DD HH:MM:SS ±HH:MM`, so the date, time and UTC offset are visible for every row.
 
-Kinds are `note`, `terminal_command`, `terminal_output`, `system`, `hermes_user`, `hermes_assistant`, `hermes_tool_call`, and `hermes_tool_result`. Old records without `kind` are treated as notes. The journal is append-only from the application's perspective; malformed lines are skipped at load and counted in the startup status. It is never truncated by StreamNote. Input entered while terminal echo is off is intentionally not included.
+Kinds include `note`, `terminal_command`, `terminal_output`, `system`, `hermes_user`, `hermes_assistant`, `hermes_tool_call`, `hermes_tool_result`, `hermes_stream_start`, `hermes_stream_delta`, and `hermes_stream_end`. Hermes records also carry optional session, turn, tool-call, and iteration identifiers. Old records without `kind` are treated as notes. The journal is append-only from the application's perspective; malformed lines are skipped at load and counted in the startup status. It is never truncated by StreamNote. Input entered while terminal echo is off is intentionally not included.
 
 ## Cache and persistence semantics
 
