@@ -129,6 +129,75 @@ pub fn build_threads(entries: &[Entry]) -> Vec<ConversationThread> {
     threads
 }
 
+
+/// A thread can receive several stream-delta events for one assistant turn,
+/// including across tool iterations. Collapse them into one uninterrupted
+/// transcript block and hide the duplicate final assistant event for that turn.
+#[derive(Debug, Default)]
+pub struct CollapsedLiveStreams {
+    /// Combined text keyed by the first journal index for each streamed turn.
+    pub text_by_first_index: HashMap<usize, String>,
+    /// Later delta entries folded into the first block.
+    pub hidden_delta_indices: HashSet<usize>,
+    /// Final assistant entries replaced by the captured live stream.
+    pub replaced_assistant_indices: HashSet<usize>,
+}
+
+pub fn collapse_live_streams(entries: &[(usize, &Entry)]) -> CollapsedLiveStreams {
+    let mut current_turn = None::<String>;
+    let mut streams = HashMap::<String, (usize, String, Vec<usize>)>::new();
+    let mut assistant_entries = Vec::<(usize, String)>::new();
+
+    for (index, entry) in entries {
+        if entry.kind == EntryKind::HermesUser {
+            current_turn = Some(
+                entry
+                    .turn_id
+                    .clone()
+                    .unwrap_or_else(|| format!("implicit-turn-{index}")),
+            );
+        } else if let Some(turn_id) = entry.turn_id.as_ref() {
+            current_turn = Some(turn_id.clone());
+        }
+
+        let turn_key = current_turn
+            .clone()
+            .unwrap_or_else(|| "orphan-turn".to_string());
+
+        match entry.kind {
+            EntryKind::HermesStreamDelta => {
+                let stream = streams
+                    .entry(turn_key)
+                    .or_insert_with(|| (*index, String::new(), Vec::new()));
+                stream.1.push_str(&entry.text);
+                stream.2.push(*index);
+            }
+            EntryKind::HermesAssistant => {
+                assistant_entries.push((*index, turn_key));
+            }
+            _ => {}
+        }
+    }
+
+    let streamed_turns = streams.keys().cloned().collect::<HashSet<_>>();
+    let mut collapsed = CollapsedLiveStreams::default();
+
+    for (_, (first_index, text, indices)) in streams {
+        collapsed.text_by_first_index.insert(first_index, text);
+        collapsed.hidden_delta_indices.extend(
+            indices.into_iter().filter(|index| *index != first_index),
+        );
+    }
+
+    collapsed.replaced_assistant_indices.extend(
+        assistant_entries
+            .into_iter()
+            .filter_map(|(index, turn)| streamed_turns.contains(&turn).then_some(index)),
+    );
+
+    collapsed
+}
+
 pub fn thread_for_entry(entries: &[Entry], entry_index: usize) -> Option<String> {
     build_threads(entries)
         .into_iter()
@@ -201,6 +270,54 @@ mod tests {
 
     #[test]
     fn completing_one_iteration_does_not_close_another_iteration_in_the_same_turn() {
+    #[test]
+    fn stream_deltas_across_iterations_become_one_uninterrupted_message() {
+        use super::collapse_live_streams;
+
+        let mut prompt = event(EntryKind::HermesUser, "prompt", Some("session"), Some("turn-1"));
+        prompt.timestamp = "prompt-time".to_string();
+        let mut first = event(EntryKind::HermesStreamDelta, "The basic ", Some("session"), Some("turn-1"));
+        first.iteration = Some(0);
+        let end = event(EntryKind::HermesStreamEnd, "finished", Some("session"), Some("turn-1"));
+        let mut second = event(EntryKind::HermesStreamDelta, "necessities of life.", Some("session"), Some("turn-1"));
+        second.iteration = Some(1);
+        let assistant = event(EntryKind::HermesAssistant, "duplicate final answer", Some("session"), Some("turn-1"));
+        let entries = vec![
+            (0, &prompt),
+            (1, &first),
+            (2, &end),
+            (3, &second),
+            (4, &assistant),
+        ];
+
+        let collapsed = collapse_live_streams(&entries);
+        assert_eq!(
+            collapsed.text_by_first_index.get(&1).map(String::as_str),
+            Some("The basic necessities of life.")
+        );
+        assert!(collapsed.hidden_delta_indices.contains(&3));
+        assert!(collapsed.replaced_assistant_indices.contains(&4));
+    }
+
+    #[test]
+    fn legacy_stream_deltas_without_turn_ids_follow_the_prompt_boundary() {
+        use super::collapse_live_streams;
+
+        let prompt = event(EntryKind::HermesUser, "prompt", None, None);
+        let first = event(EntryKind::HermesStreamDelta, "hello ", None, Some("iteration-a"));
+        let second = event(EntryKind::HermesStreamDelta, "world", None, Some("iteration-b"));
+        let assistant = event(EntryKind::HermesAssistant, "duplicate", None, None);
+        let entries = vec![(10, &prompt), (11, &first), (12, &second), (13, &assistant)];
+
+        let collapsed = collapse_live_streams(&entries);
+        assert_eq!(
+            collapsed.text_by_first_index.get(&11).map(String::as_str),
+            Some("hello world")
+        );
+        assert!(collapsed.replaced_assistant_indices.contains(&13));
+    }
+
+
         let mut started = event(EntryKind::HermesStreamStart, "start", Some("session"), Some("turn"));
         started.iteration = Some(0);
         let mut ended = event(EntryKind::HermesStreamEnd, "finished", Some("session"), Some("turn"));
