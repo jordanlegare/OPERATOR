@@ -108,9 +108,7 @@ pub fn build_threads(entries: &[Entry]) -> Vec<ConversationThread> {
                     active_streams.remove(&stream_key);
                 }
                 EntryKind::HermesAssistant => {
-                    if let Some(turn_id) = entry.turn_id.as_ref() {
-                        active_streams.retain(|(active_turn, _)| active_turn != turn_id);
-                    }
+                    active_streams.remove(&stream_key);
                 }
                 _ => {}
             }
@@ -199,6 +197,16 @@ mod tests {
         assert_eq!(threads.len(), 2);
         assert_eq!(threads[0].entries, vec![0, 1, 2, 3]);
         assert_eq!(threads[1].entries, vec![4, 5]);
+    }
+
+    #[test]
+    fn completing_one_iteration_does_not_close_another_iteration_in_the_same_turn() {
+        let mut started = event(EntryKind::HermesStreamStart, "start", Some("session"), Some("turn"));
+        started.iteration = Some(0);
+        let mut ended = event(EntryKind::HermesStreamEnd, "finished", Some("session"), Some("turn"));
+        ended.iteration = Some(1);
+        let threads = build_threads(&[started, ended]);
+        assert!(threads[0].streaming);
     }
 
     #[test]
