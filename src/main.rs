@@ -138,7 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut hermes_bridge = HermesBridge::default();
     let result = run(&mut terminal, &mut app, &mut shell, &mut hermes_bridge);
     // Import any Hermes events queued before shutdown, then drain shell output.
-    if let Err(error) = hermes_bridge.drain(&mut app.journal) {
+    if let Err(error) = drain_hermes_events(&mut app, &mut hermes_bridge) {
         app.status = format!("Hermes journal import pending: {error}");
     }
     drain_shell(&mut app, &mut shell)?;
@@ -852,6 +852,20 @@ fn split_command_words(command: &str) -> Option<Vec<String>> {
     Some(words)
 }
 
+/// Import Hermes events while keeping a highlighted live-tail row attached
+/// to the newest imported record.
+fn drain_hermes_events(
+    app: &mut App,
+    hermes_bridge: &mut HermesBridge,
+) -> io::Result<usize> {
+    let was_tracking_tail = app.is_tracking_selected_tail();
+    let imported = drain_hermes_events(app, hermes_bridge)?;
+    if imported > 0 {
+        app.update_selected_tail_after_append(was_tracking_tail);
+    }
+    Ok(imported)
+}
+
 fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -860,7 +874,7 @@ fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         drain_shell(app, shell)?;
-        match hermes_bridge.drain(&mut app.journal) {
+        match drain_hermes_events(app, hermes_bridge) {
             Ok(imported) if imported > 0 => {
                 app.status = format!("Imported {imported} Hermes conversation event(s).");
             }
@@ -946,7 +960,7 @@ fn run_terminal_workspace(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
             // Import Hermes hook events while the F1 PTY is active. They are
             // appended to the same parent STREENOTE journal, not a workspace
             // or Hermes-session-specific journal.
-            match hermes_bridge.drain(&mut app.journal) {
+            match drain_hermes_events(app, hermes_bridge) {
                 Ok(imported) if imported > 0 => {
                     app.status = format!("Imported {imported} Hermes conversation event(s) from F1 workspace.");
                 }
