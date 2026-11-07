@@ -1713,6 +1713,101 @@ mod tests {
     }
 
     #[test]
+    fn main_transcript_keeps_ordinary_rows_and_only_husr_hermes_rows() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        for (kind, text) in [
+            (EntryKind::Note, "note"),
+            (EntryKind::HermesUser, "prompt"),
+            (EntryKind::HermesAssistant, "answer"),
+            (EntryKind::HermesToolCall, "tool call"),
+            (EntryKind::HermesToolResult, "tool result"),
+            (EntryKind::HermesStreamStart, "stream started"),
+            (EntryKind::HermesStreamDelta, "stream text"),
+            (EntryKind::HermesStreamEnd, "stream ended"),
+            (EntryKind::TerminalOutput, "shell output"),
+        ] {
+            app.journal
+                .append(Entry::with_kind(kind, text.to_string()))
+                .expect("append transcript record");
+        }
+
+        assert_eq!(app.visible_transcript_indices(), vec![0, 1, 8]);
+        app.feed_viewport_height = 2;
+        app.scroll_to_top();
+        assert_eq!(app.selected_row, Some(0));
+        app.move_row_selection(1);
+        assert_eq!(app.selected_row, Some(1));
+        app.move_row_selection(1);
+        assert_eq!(app.selected_row, Some(8));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn ctrl_c_target_on_husr_opens_thread_and_copies_one_complete_stream() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        let mut prompt = Entry::with_kind(EntryKind::HermesUser, "What is life?".to_string());
+        prompt.conversation_id = Some("session-1".to_string());
+        prompt.turn_id = Some("turn-1".to_string());
+        app.journal.append(prompt).expect("append user prompt");
+
+        let mut tool_call = Entry::with_kind(EntryKind::HermesToolCall, "Tool: search".to_string());
+        tool_call.conversation_id = Some("session-1".to_string());
+        tool_call.turn_id = Some("turn-1".to_string());
+        app.journal.append(tool_call).expect("append tool call");
+
+        let mut tool_result = Entry::with_kind(EntryKind::HermesToolResult, "Search result".to_string());
+        tool_result.conversation_id = Some("session-1".to_string());
+        tool_result.turn_id = Some("turn-1".to_string());
+        app.journal.append(tool_result).expect("append tool result");
+
+        let mut first_delta = Entry::with_kind(EntryKind::HermesStreamDelta, "The basic ".to_string());
+        first_delta.conversation_id = Some("session-1".to_string());
+        first_delta.turn_id = Some("turn-1".to_string());
+        first_delta.iteration = Some(0);
+        app.journal.append(first_delta).expect("append first stream delta");
+
+        let mut stream_end = Entry::with_kind(EntryKind::HermesStreamEnd, "finished".to_string());
+        stream_end.conversation_id = Some("session-1".to_string());
+        stream_end.turn_id = Some("turn-1".to_string());
+        stream_end.iteration = Some(0);
+        app.journal.append(stream_end).expect("append stream end");
+
+        let mut second_delta = Entry::with_kind(EntryKind::HermesStreamDelta, "necessities of life.".to_string());
+        second_delta.conversation_id = Some("session-1".to_string());
+        second_delta.turn_id = Some("turn-1".to_string());
+        second_delta.iteration = Some(1);
+        app.journal.append(second_delta).expect("append second stream delta");
+
+        let mut final_assistant = Entry::with_kind(
+            EntryKind::HermesAssistant,
+            "duplicate final assistant response".to_string(),
+        );
+        final_assistant.conversation_id = Some("session-1".to_string());
+        final_assistant.turn_id = Some("turn-1".to_string());
+        app.journal.append(final_assistant).expect("append final assistant response");
+
+        app.selected_row = Some(0);
+        assert!(app.open_selected_hermes_user_thread());
+        assert!(matches!(app.conversation_view, Some(ConversationView::Thread { .. })));
+
+        let copied = app.selected_conversation_text().expect("thread clipboard text");
+        assert!(copied.contains("[USER]"));
+        assert!(copied.contains("[TOOL CALL]"));
+        assert!(copied.contains("[TOOL RESULT]"));
+        assert_eq!(copied.matches("[ASSISTANT - LIVE STREAM]").count(), 1);
+        assert!(copied.contains("The basic necessities of life."));
+        assert!(!copied.contains("duplicate final assistant response"));
+        assert!(!copied.contains("[STREAM END]"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn submitted_secret_is_not_journaled_and_rearms_mask_for_next_prompt() {
         let (mut app, path) = test_app();
         app.secret_input = true;
