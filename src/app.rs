@@ -1438,6 +1438,8 @@ fn is_streamnote_command(line: &str) -> bool {
         command.as_str(),
         "/help"
             | "/view"
+            | "/threads"
+            | "/conversations"
             | "/search"
             | "/clear"
             | "/save"
