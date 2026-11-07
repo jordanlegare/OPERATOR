@@ -9,7 +9,7 @@ use ratatui::layout::Rect;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    conversations::{build_threads, is_hermes_event, ConversationThread},
+    conversations::{build_threads, collapse_live_streams, is_hermes_event, ConversationThread},
     shell::ShellSession,
     settings::Settings,
     storage::{
@@ -59,6 +59,8 @@ struct ConversationCache {
     entry_count: usize,
     total_text_bytes: usize,
     threads: Vec<ConversationThread>,
+    /// Main transcript rows: ordinary journal records plus Hermes user prompts.
+    transcript_indices: Vec<usize>,
 }
 
 impl Default for ConversationCache {
@@ -67,6 +69,7 @@ impl Default for ConversationCache {
             entry_count: usize::MAX,
             total_text_bytes: usize::MAX,
             threads: Vec::new(),
+            transcript_indices: Vec::new(),
         }
     }
 }
@@ -200,30 +203,65 @@ impl App {
 
     pub fn current_top(&self) -> usize {
         if self.follow_tail {
-            self.journal.entries.len().saturating_sub(self.feed_viewport_height)
+            self.visible_transcript_count()
+                .saturating_sub(self.feed_viewport_height)
         } else {
             self.scroll_top.min(self.max_top())
         }
     }
 
-    /// True when the highlighted row is the current tail and should advance
-    /// with incoming records while LIVE mode is active.
-    pub fn is_tracking_selected_tail(&self) -> bool {
-        self.follow_tail
-            && self.selected_row.is_some()
-            && self.selected_row == self.journal.entries.len().checked_sub(1)
+    /// Return original journal indices that are actually rendered in the main
+    /// transcript. Hermes tool, assistant, and stream events remain available
+    /// inside /threads; only HUSR prompts are shown in the main feed.
+    pub fn visible_transcript_indices(&self) -> Vec<usize> {
+        self.refresh_conversation_cache();
+        self.conversation_cache.borrow().transcript_indices.clone()
     }
 
-    /// Keep a selected live-tail row attached to the newest record after import.
+    pub fn visible_transcript_count(&self) -> usize {
+        self.refresh_conversation_cache();
+        self.conversation_cache.borrow().transcript_indices.len()
+    }
+
+    fn refresh_conversation_cache(&self) {
+        let entry_count = self.journal.entries.len();
+        let total_text_bytes = self.journal.total_text_bytes;
+        let mut cache = self.conversation_cache.borrow_mut();
+        if cache.entry_count != entry_count || cache.total_text_bytes != total_text_bytes {
+            cache.threads = build_threads(&self.journal.entries);
+            cache.transcript_indices = self
+                .journal
+                .entries
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entry)| {
+                    (!is_hermes_event(entry.kind) || entry.kind == EntryKind::HermesUser)
+                        .then_some(index)
+                })
+                .collect();
+            cache.entry_count = entry_count;
+            cache.total_text_bytes = total_text_bytes;
+        }
+    }
+
+    /// True when the highlighted row is the latest visible transcript record
+    /// and should advance with new visible records while LIVE mode is active.
+    pub fn is_tracking_selected_tail(&self) -> bool {
+        let latest = self.visible_transcript_indices().last().copied();
+        self.follow_tail && self.selected_row.is_some() && self.selected_row == latest
+    }
+
+    /// Keep a selected live-tail row attached to the newest visible record.
     pub fn update_selected_tail_after_append(&mut self, was_tracking_tail: bool) {
         if was_tracking_tail && self.follow_tail {
-            self.selected_row = self.journal.entries.len().checked_sub(1);
+            self.selected_row = self.visible_transcript_indices().last().copied();
             self.scroll_top = self.max_top();
         }
     }
 
     fn max_top(&self) -> usize {
-        self.journal.entries.len().saturating_sub(self.feed_viewport_height.max(1))
+        self.visible_transcript_count()
+            .saturating_sub(self.feed_viewport_height.max(1))
     }
 
     /// Move the highlighted transcript row. On the first keypress, start at
@@ -248,28 +286,32 @@ impl App {
     /// Extend a full-row transcript selection with Shift+Up/Down.
     /// The first keypress anchors at the current row (or visible edge).
     pub fn extend_row_selection(&mut self, direction: i8) {
-        let entry_count = self.journal.entries.len();
-        if entry_count == 0 {
+        let visible = self.visible_transcript_indices();
+        let visible_count = visible.len();
+        if visible_count == 0 {
             return;
         }
 
-        let top = self.current_top().min(entry_count - 1);
+        let top = self.current_top().min(visible_count - 1);
         let bottom = top
             .saturating_add(self.feed_viewport_height.max(1).saturating_sub(1))
-            .min(entry_count - 1);
-        let anchor_row = self.selection
-            .filter(|selection| selection.whole_row)
+            .min(visible_count - 1);
+        let existing = self.selection.filter(|selection| selection.whole_row);
+        let anchor_row = existing
             .map(|selection| selection.anchor.row)
-            .unwrap_or_else(|| self.selected_row.unwrap_or(if direction < 0 { bottom } else { top }));
-        let current_row = self.selection
-            .filter(|selection| selection.whole_row)
-            .map(|selection| selection.active.row)
-            .unwrap_or(anchor_row);
-        let next_row = if direction < 0 {
-            current_row.saturating_sub(1)
+            .or(self.selected_row.filter(|row| visible.contains(row)))
+            .unwrap_or(visible[if direction < 0 { bottom } else { top }]);
+        let current_row = existing.map(|selection| selection.active.row).unwrap_or(anchor_row);
+        let current_position = visible
+            .iter()
+            .position(|row| *row == current_row)
+            .unwrap_or(top);
+        let next_position = if direction < 0 {
+            current_position.saturating_sub(1)
         } else {
-            current_row.saturating_add(1).min(entry_count - 1)
+            current_position.saturating_add(1).min(visible_count - 1)
         };
+        let next_row = visible[next_position];
 
         self.selection = Some(TranscriptSelection {
             anchor: TranscriptPoint { row: anchor_row, column: 0 },
@@ -281,10 +323,10 @@ impl App {
         self.follow_tail = false;
         let viewport = self.feed_viewport_height.max(1);
         let mut new_top = self.scroll_top.min(self.max_top());
-        if next_row < new_top {
-            new_top = next_row;
-        } else if next_row >= new_top.saturating_add(viewport) {
-            new_top = next_row.saturating_add(1).saturating_sub(viewport);
+        if next_position < new_top {
+            new_top = next_position;
+        } else if next_position >= new_top.saturating_add(viewport) {
+            new_top = next_position.saturating_add(1).saturating_sub(viewport);
         }
         self.scroll_top = new_top.min(self.max_top());
         self.status = format!(
@@ -295,41 +337,46 @@ impl App {
     }
 
     pub fn move_row_selection(&mut self, direction: i8) {
-        let entry_count = self.journal.entries.len();
-        if entry_count == 0 {
+        let visible = self.visible_transcript_indices();
+        let visible_count = visible.len();
+        if visible_count == 0 {
             self.selected_row = None;
             return;
         }
 
         let viewport_height = self.feed_viewport_height.max(1);
-        let top = self.current_top().min(entry_count - 1);
+        let top = self.current_top().min(visible_count - 1);
         let bottom = top
             .saturating_add(viewport_height.saturating_sub(1))
-            .min(entry_count - 1);
-        let current = self.selected_row.unwrap_or(if direction < 0 { bottom } else { top });
-        let next = if direction < 0 {
-            current.saturating_sub(1)
+            .min(visible_count - 1);
+        let current_position = self
+            .selected_row
+            .and_then(|row| visible.iter().position(|visible_row| *visible_row == row))
+            .unwrap_or(if direction < 0 { bottom } else { top });
+        let next_position = if direction < 0 {
+            current_position.saturating_sub(1)
         } else {
-            current.saturating_add(1).min(entry_count - 1)
+            current_position.saturating_add(1).min(visible_count - 1)
         };
+        let next = visible[next_position];
 
         self.selected_row = Some(next);
         self.selection = None;
         self.selection_dragging = false;
-        self.follow_tail = next == entry_count - 1;
+        self.follow_tail = next_position == visible_count - 1;
 
         if self.follow_tail {
             self.scroll_top = self.max_top();
-            self.status = format!("LIVE · latest row {}/{} selected.", next + 1, entry_count);
+            self.status = format!("LIVE · latest row {}/{} selected.", next_position + 1, visible_count);
         } else {
             let mut next_top = top;
-            if next < next_top {
-                next_top = next;
-            } else if next >= next_top.saturating_add(viewport_height) {
-                next_top = next.saturating_add(1).saturating_sub(viewport_height);
+            if next_position < next_top {
+                next_top = next_position;
+            } else if next_position >= next_top.saturating_add(viewport_height) {
+                next_top = next_position.saturating_add(1).saturating_sub(viewport_height);
             }
             self.scroll_top = next_top.min(self.max_top());
-            self.status = format!("Row {}/{} selected.", next + 1, entry_count);
+            self.status = format!("Row {}/{} selected.", next_position + 1, visible_count);
         }
         self.recall_highlighted_command();
     }
@@ -338,19 +385,29 @@ impl App {
         let Some(row) = self.selected_row else {
             return;
         };
-        let entry_count = self.journal.entries.len();
-        if entry_count == 0 {
+        let visible = self.visible_transcript_indices();
+        if visible.is_empty() {
             self.selected_row = None;
             return;
         }
         let viewport_height = self.feed_viewport_height.max(1);
-        let last_visible = top
+        let first = top.min(visible.len() - 1);
+        let last = first
             .saturating_add(viewport_height.saturating_sub(1))
-            .min(entry_count - 1);
-        let visible_row = row.max(top).min(last_visible);
+            .min(visible.len() - 1);
+        let position = visible
+            .iter()
+            .position(|visible_row| *visible_row == row)
+            .unwrap_or(first);
+        let visible_position = position.max(first).min(last);
+        let visible_row = visible[visible_position];
         self.selected_row = Some(visible_row);
         if visible_row != row {
-            self.status = format!("Row {}/{} selected.", visible_row + 1, entry_count);
+            self.status = format!(
+                "Row {}/{} selected.",
+                visible_position + 1,
+                visible.len()
+            );
             self.recall_highlighted_command();
         }
     }
@@ -369,7 +426,7 @@ impl App {
         self.keep_selected_row_visible(next);
 
         let highlighted_latest = self.selected_row
-            == self.journal.entries.len().checked_sub(1);
+            == self.visible_transcript_indices().last().copied();
         if next >= self.max_top()
             && (self.selected_row.is_none() || highlighted_latest)
         {
@@ -381,7 +438,7 @@ impl App {
     pub fn scroll_to_top(&mut self) {
         self.scroll_top = 0;
         self.follow_tail = false;
-        self.selected_row = (!self.journal.entries.is_empty()).then_some(0);
+        self.selected_row = self.visible_transcript_indices().first().copied();
         self.recall_highlighted_command();
     }
 
@@ -395,7 +452,7 @@ impl App {
     /// when it is a command. Automatic tail-following preserves the input draft.
     pub fn select_latest_row(&mut self) {
         self.jump_to_latest();
-        self.selected_row = self.journal.entries.len().checked_sub(1);
+        self.selected_row = self.visible_transcript_indices().last().copied();
         self.recall_highlighted_command();
     }
 
@@ -464,7 +521,7 @@ impl App {
                 // containing conversation thread.
                 self.selection = None;
                 self.selected_row = Some(row);
-                self.follow_tail = row == self.journal.entries.len().saturating_sub(1);
+                self.follow_tail = self.visible_transcript_indices().last().copied() == Some(row);
                 if self.follow_tail {
                     self.scroll_top = self.max_top();
                 }
@@ -518,10 +575,9 @@ impl App {
 
         let x = x.clamp(area.x, right.saturating_sub(1));
         let y = y.clamp(area.y, bottom.saturating_sub(1));
-        let row = self.current_top().saturating_add(y.saturating_sub(area.y) as usize);
-        if row >= self.journal.entries.len() {
-            return None;
-        }
+        let visible = self.visible_transcript_indices();
+        let position = self.current_top().saturating_add(y.saturating_sub(area.y) as usize);
+        let row = *visible.get(position)?;
 
         Some(TranscriptPoint {
             row,
@@ -572,8 +628,12 @@ impl App {
             (selection.active, selection.anchor)
         };
 
+        let visible = self.visible_transcript_indices();
+        let start_position = visible.iter().position(|row| *row == start.row)?;
+        let end_position = visible.iter().position(|row| *row == end.row)?;
         let mut selected_rows = Vec::new();
-        for row in start.row..=end.row {
+        for position in start_position..=end_position {
+            let row = visible[position];
             let entry = self.journal.entries.get(row)?;
             let line = entry_transcript_text(entry, row);
             let width = UnicodeWidthStr::width(line.as_str());
@@ -865,6 +925,23 @@ impl App {
         self.open_conversation_for_entry(index)
     }
 
+    /// Ctrl+C on a selected HUSR row is a thread-open shortcut. A drag/row
+    /// selection retains its usual clipboard-copy behavior.
+    pub fn open_selected_hermes_user_thread(&mut self) -> bool {
+        if self.selection.is_some() {
+            return false;
+        }
+        let Some(index) = self.selected_row else {
+            return false;
+        };
+        if !self.journal.entries.get(index).is_some_and(|entry| {
+            entry.kind == EntryKind::HermesUser
+        }) {
+            return false;
+        }
+        self.open_conversation_for_entry(index)
+    }
+
     /// Open the conversation containing a selected Hermes event. New events
     /// are associated by session ID; legacy journal rows use a conservative
     /// prompt-to-following-events fallback grouping.
@@ -894,16 +971,7 @@ impl App {
     }
 
     pub fn conversation_threads(&self) -> Ref<'_, Vec<ConversationThread>> {
-        let entry_count = self.journal.entries.len();
-        let total_text_bytes = self.journal.total_text_bytes;
-        {
-            let mut cache = self.conversation_cache.borrow_mut();
-            if cache.entry_count != entry_count || cache.total_text_bytes != total_text_bytes {
-                cache.threads = build_threads(&self.journal.entries);
-                cache.entry_count = entry_count;
-                cache.total_text_bytes = total_text_bytes;
-            }
-        }
+        self.refresh_conversation_cache();
         Ref::map(self.conversation_cache.borrow(), |cache| &cache.threads)
     }
 
@@ -990,20 +1058,35 @@ impl App {
             .iter()
             .find(|thread| &thread.id == id)
             .map(|thread| thread.entries.clone())?;
+        let entries = indices
+            .iter()
+            .filter_map(|index| self.journal.entries.get(*index).map(|entry| (*index, entry)))
+            .collect::<Vec<_>>();
+        let collapsed = collapse_live_streams(&entries);
         let mut output = String::new();
-        for index in indices {
-            let entry = self.journal.entries.get(index)?;
-            let label = match entry.kind {
-                EntryKind::HermesUser => "USER",
-                EntryKind::HermesAssistant => "ASSISTANT",
-                EntryKind::HermesToolCall => "TOOL CALL",
-                EntryKind::HermesToolResult => "TOOL RESULT",
-                EntryKind::HermesStreamDelta => "ASSISTANT STREAM",
-                EntryKind::HermesStreamStart => "STREAM START",
-                EntryKind::HermesStreamEnd => "STREAM END",
-                _ => "HERMES",
+        for (index, entry) in entries {
+            if matches!(entry.kind, EntryKind::HermesStreamStart | EntryKind::HermesStreamEnd)
+                || collapsed.hidden_delta_indices.contains(&index)
+                || collapsed.replaced_assistant_indices.contains(&index)
+            {
+                continue;
+            }
+            let (label, text) = if let Some(stream_text) = collapsed.text_by_first_index.get(&index) {
+                ("ASSISTANT - LIVE STREAM", stream_text.as_str())
+            } else {
+                let label = match entry.kind {
+                    EntryKind::HermesUser => "USER",
+                    EntryKind::HermesAssistant => "ASSISTANT",
+                    EntryKind::HermesToolCall => "TOOL CALL",
+                    EntryKind::HermesToolResult => "TOOL RESULT",
+                    EntryKind::HermesStreamDelta => "ASSISTANT - LIVE STREAM",
+                    EntryKind::HermesStreamStart => "STREAM START",
+                    EntryKind::HermesStreamEnd => "STREAM END",
+                    _ => "HERMES",
+                };
+                (label, entry.text.as_str())
             };
-            output.push_str(&format!("[{label}] {}\n{}\n\n", entry.timestamp, entry.text));
+            output.push_str(&format!("[{label}] {}\n{text}\n\n", entry.timestamp));
         }
         Some(output)
     }
@@ -1279,8 +1362,13 @@ impl App {
 
         let needle = query.to_ascii_lowercase();
         let mut found = Vec::new();
-        for (index, entry) in self.journal.entries.iter().enumerate() {
-            if entry.text.to_ascii_lowercase().contains(needle.as_str()) {
+        let visible_indices = self.visible_transcript_indices();
+        for index in visible_indices {
+            if self.journal.entries[index]
+                .text
+                .to_ascii_lowercase()
+                .contains(needle.as_str())
+            {
                 found.push(index);
             }
         }
@@ -1290,7 +1378,12 @@ impl App {
         if let Some(&latest_match) = self.matches.last() {
             self.active_match = Some(self.matches.len() - 1);
             self.follow_tail = false;
-            self.scroll_top = latest_match
+            let visible_position = self
+                .visible_transcript_indices()
+                .iter()
+                .position(|index| *index == latest_match)
+                .unwrap_or(0);
+            self.scroll_top = visible_position
                 .saturating_sub(self.feed_viewport_height.min(8).max(1) / 2);
             self.scroll_top = self.scroll_top.min(self.max_top());
             self.status = format!(
@@ -1334,7 +1427,12 @@ impl App {
         let entry_index = self.matches[position];
         self.follow_tail = false;
         let context = self.feed_viewport_height.min(8).max(1) / 2;
-        self.scroll_top = entry_index.saturating_sub(context).min(self.max_top());
+        let visible_position = self
+            .visible_transcript_indices()
+            .iter()
+            .position(|index| *index == entry_index)
+            .unwrap_or(0);
+        self.scroll_top = visible_position.saturating_sub(context).min(self.max_top());
         self.status = format!(
             "Hit {}/{} · entry {} · n next / N previous · query: {}",
             position + 1,
@@ -1611,6 +1709,101 @@ mod tests {
 
         app.selected_row = None;
         assert!(!app.open_selected_hermes_message());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn main_transcript_keeps_ordinary_rows_and_only_husr_hermes_rows() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        for (kind, text) in [
+            (EntryKind::Note, "note"),
+            (EntryKind::HermesUser, "prompt"),
+            (EntryKind::HermesAssistant, "answer"),
+            (EntryKind::HermesToolCall, "tool call"),
+            (EntryKind::HermesToolResult, "tool result"),
+            (EntryKind::HermesStreamStart, "stream started"),
+            (EntryKind::HermesStreamDelta, "stream text"),
+            (EntryKind::HermesStreamEnd, "stream ended"),
+            (EntryKind::TerminalOutput, "shell output"),
+        ] {
+            app.journal
+                .append(Entry::with_kind(kind, text.to_string()))
+                .expect("append transcript record");
+        }
+
+        assert_eq!(app.visible_transcript_indices(), vec![0, 1, 8]);
+        app.feed_viewport_height = 2;
+        app.scroll_to_top();
+        assert_eq!(app.selected_row, Some(0));
+        app.move_row_selection(1);
+        assert_eq!(app.selected_row, Some(1));
+        app.move_row_selection(1);
+        assert_eq!(app.selected_row, Some(8));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn ctrl_c_target_on_husr_opens_thread_and_copies_one_complete_stream() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        let mut prompt = Entry::with_kind(EntryKind::HermesUser, "What is life?".to_string());
+        prompt.conversation_id = Some("session-1".to_string());
+        prompt.turn_id = Some("turn-1".to_string());
+        app.journal.append(prompt).expect("append user prompt");
+
+        let mut tool_call = Entry::with_kind(EntryKind::HermesToolCall, "Tool: search".to_string());
+        tool_call.conversation_id = Some("session-1".to_string());
+        tool_call.turn_id = Some("turn-1".to_string());
+        app.journal.append(tool_call).expect("append tool call");
+
+        let mut tool_result = Entry::with_kind(EntryKind::HermesToolResult, "Search result".to_string());
+        tool_result.conversation_id = Some("session-1".to_string());
+        tool_result.turn_id = Some("turn-1".to_string());
+        app.journal.append(tool_result).expect("append tool result");
+
+        let mut first_delta = Entry::with_kind(EntryKind::HermesStreamDelta, "The basic ".to_string());
+        first_delta.conversation_id = Some("session-1".to_string());
+        first_delta.turn_id = Some("turn-1".to_string());
+        first_delta.iteration = Some(0);
+        app.journal.append(first_delta).expect("append first stream delta");
+
+        let mut stream_end = Entry::with_kind(EntryKind::HermesStreamEnd, "finished".to_string());
+        stream_end.conversation_id = Some("session-1".to_string());
+        stream_end.turn_id = Some("turn-1".to_string());
+        stream_end.iteration = Some(0);
+        app.journal.append(stream_end).expect("append stream end");
+
+        let mut second_delta = Entry::with_kind(EntryKind::HermesStreamDelta, "necessities of life.".to_string());
+        second_delta.conversation_id = Some("session-1".to_string());
+        second_delta.turn_id = Some("turn-1".to_string());
+        second_delta.iteration = Some(1);
+        app.journal.append(second_delta).expect("append second stream delta");
+
+        let mut final_assistant = Entry::with_kind(
+            EntryKind::HermesAssistant,
+            "duplicate final assistant response".to_string(),
+        );
+        final_assistant.conversation_id = Some("session-1".to_string());
+        final_assistant.turn_id = Some("turn-1".to_string());
+        app.journal.append(final_assistant).expect("append final assistant response");
+
+        app.selected_row = Some(0);
+        assert!(app.open_selected_hermes_user_thread());
+        assert!(matches!(app.conversation_view, Some(ConversationView::Thread { .. })));
+
+        let copied = app.selected_conversation_text().expect("thread clipboard text");
+        assert!(copied.contains("[USER]"));
+        assert!(copied.contains("[TOOL CALL]"));
+        assert!(copied.contains("[TOOL RESULT]"));
+        assert_eq!(copied.matches("[ASSISTANT - LIVE STREAM]").count(), 1);
+        assert!(copied.contains("The basic necessities of life."));
+        assert!(!copied.contains("duplicate final assistant response"));
+        assert!(!copied.contains("[STREAM END]"));
+
         let _ = fs::remove_file(path);
     }
 
@@ -2063,7 +2256,7 @@ mod tests {
         app.update_selected_tail_after_append(was_tracking_tail);
 
         assert!(app.follow_tail);
-        assert_eq!(app.selected_row, Some(1));
+        assert_eq!(app.selected_row, Some(0));
         assert_eq!(app.current_top(), 0);
 
         let _ = fs::remove_file(path);

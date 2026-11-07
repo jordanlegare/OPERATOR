@@ -10,7 +10,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{App, ConversationView, InputMode},
-    conversations::ConversationThread,
+    conversations::{collapse_live_streams, ConversationThread},
     storage::{entry_display_text, entry_transcript_text, format_timestamp, Entry, EntryKind},
     theme::{Theme, THEMES},
 };
@@ -170,47 +170,6 @@ fn conversation_summary_line(thread: &ConversationThread, selected: bool, theme:
 }
 
 
-fn assistant_entries_replaced_by_live_stream(entries: &[(usize, &Entry)]) -> std::collections::HashSet<usize> {
-    // Keep an effective turn key as we walk the thread. Explicit turn IDs are
-    // authoritative; when a hook omits one, inherit the key from the prompt
-    // (or the preceding event in that turn).
-    let mut current_turn = None::<String>;
-    let mut stream_turns = std::collections::HashSet::<String>::new();
-    let mut assistant_turns = Vec::<(usize, String)>::new();
-
-    for (index, entry) in entries {
-        if entry.kind == EntryKind::HermesUser {
-            current_turn = Some(
-                entry
-                    .turn_id
-                    .clone()
-                    .unwrap_or_else(|| format!("implicit-turn-{index}")),
-            );
-        } else if let Some(turn_id) = entry.turn_id.as_ref() {
-            current_turn = Some(turn_id.clone());
-        }
-
-        let turn_key = current_turn
-            .clone()
-            .unwrap_or_else(|| "orphan-turn".to_string());
-
-        match entry.kind {
-            EntryKind::HermesStreamDelta => {
-                stream_turns.insert(turn_key);
-            }
-            EntryKind::HermesAssistant => {
-                assistant_turns.push((*index, turn_key));
-            }
-            _ => {}
-        }
-    }
-
-    assistant_turns
-        .into_iter()
-        .filter_map(|(index, turn)| stream_turns.contains(&turn).then_some(index))
-        .collect()
-}
-
 fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: Theme) {
     let (entry_indices, turn_count, tool_call_count, streaming) = {
         let threads = app.conversation_threads();
@@ -222,10 +181,11 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
     let entries = entry_indices.iter()
         .filter_map(|index| app.journal.entries.get(*index).map(|entry| (*index, entry)))
         .collect::<Vec<_>>();
-    // Prefer streamed text over the duplicate final assistant event. Some
-    // Hermes hook variants omit turn metadata on post_llm_call, so this helper
-    // also falls back to the current prompt boundary.
-    let replaced_assistant_entries = assistant_entries_replaced_by_live_stream(&entries);
+    // Collapse every stream delta for a prompt into one continuous text block,
+    // including deltas from separate tool/model iterations. A captured stream
+    // replaces the duplicate final assistant event for that same prompt.
+    let collapsed_streams = collapse_live_streams(&entries);
+    let replaced_assistant_entries = &collapsed_streams.replaced_assistant_indices;
 
     let mut lines = Vec::new();
     let mut previous_turn: Option<String> = None;
@@ -233,7 +193,9 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
         if matches!(entry.kind, EntryKind::HermesStreamStart | EntryKind::HermesStreamEnd) {
             continue;
         }
-        if replaced_assistant_entries.contains(&index) {
+        if replaced_assistant_entries.contains(&index)
+            || collapsed_streams.hidden_delta_indices.contains(&index)
+        {
             continue;
         }
         if entry.turn_id.is_some() && previous_turn != entry.turn_id {
@@ -243,19 +205,26 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
             previous_turn = entry.turn_id.clone();
         }
 
-        let (label, color) = match entry.kind {
-            EntryKind::HermesUser => ("USER", theme.info),
-            EntryKind::HermesAssistant => ("ASSISTANT", theme.success),
-            EntryKind::HermesToolCall => ("TOOL CALL", theme.warning),
-            EntryKind::HermesToolResult => ("TOOL RESULT", theme.accent),
-            EntryKind::HermesStreamDelta => ("ASSISTANT - LIVE STREAM", theme.primary),
-            _ => ("HERMES", theme.muted),
+        let (label, color, body) = if let Some(stream_text) =
+            collapsed_streams.text_by_first_index.get(&index)
+        {
+            ("ASSISTANT - LIVE STREAM", theme.primary, stream_text.as_str())
+        } else {
+            let (label, color) = match entry.kind {
+                EntryKind::HermesUser => ("USER", theme.info),
+                EntryKind::HermesAssistant => ("ASSISTANT", theme.success),
+                EntryKind::HermesToolCall => ("TOOL CALL", theme.warning),
+                EntryKind::HermesToolResult => ("TOOL RESULT", theme.accent),
+                EntryKind::HermesStreamDelta => ("ASSISTANT - LIVE STREAM", theme.primary),
+                _ => ("HERMES", theme.muted),
+            };
+            (label, color, entry.text.as_str())
         };
         lines.push(Line::from(vec![
             Span::styled(format!("{label}  "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
             Span::styled(format!("{}  ·  row {}", format_timestamp(&entry.timestamp), index + 1), Style::default().fg(theme.muted)),
         ]));
-        for body_line in entry.text.lines() {
+        for body_line in body.lines() {
             lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(body_line.to_string(), Style::default().fg(theme.text)),
@@ -366,7 +335,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
 fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     let title = format!(
         " TRANSCRIPT  ·  {} RECORDS  ·  {}  ·  SEARCHABLE ",
-        app.journal.entries.len(),
+        app.visible_transcript_count(),
         if app.wrap_transcript { "WORD WRAP" } else { "UNWRAPPED" }
     );
     let block = Block::default()
@@ -383,13 +352,16 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     frame.render_widget(block, area);
 
     let top = app.current_top();
-    let visible: Vec<Line> = app
-        .journal
-        .entries
+    let visible_indices = app.visible_transcript_indices();
+    let visible: Vec<Line> = visible_indices
         .iter()
-        .enumerate()
         .skip(top)
-        .map(|(index, entry)| entry_line(entry, index, app, theme))
+        .filter_map(|index| {
+            app.journal
+                .entries
+                .get(*index)
+                .map(|entry| entry_line(entry, *index, app, theme))
+        })
         .collect();
 
     let lines = if visible.is_empty() {
@@ -406,10 +378,15 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
 
     let paragraph = Paragraph::new(lines);
     if app.wrap_transcript {
-        let visual_rows: usize = app.journal.entries.iter().skip(top).map(|entry| {
-            let width = UnicodeWidthStr::width(entry_transcript_text(entry, 0).as_str());
-            width.max(1).div_ceil(inner.width.max(1) as usize)
-        }).sum();
+        let visual_rows: usize = visible_indices
+            .iter()
+            .skip(top)
+            .filter_map(|index| app.journal.entries.get(*index))
+            .map(|entry| {
+                let width = UnicodeWidthStr::width(entry_transcript_text(entry, 0).as_str());
+                width.max(1).div_ceil(inner.width.max(1) as usize)
+            })
+            .sum();
         let vertical_scroll = if app.follow_tail {
             visual_rows.saturating_sub(inner.height as usize)
         } else {
@@ -763,7 +740,7 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         Span::styled("F12 ", Style::default().fg(theme.primary)),
         Span::styled("banner  ", Style::default().fg(theme.muted)),
         Span::styled("Ctrl+C ", Style::default().fg(theme.primary)),
-        Span::styled("copy  ", Style::default().fg(theme.muted)),
+        Span::styled("thread/copy  ", Style::default().fg(theme.muted)),
         Span::styled("Ctrl+Q ", Style::default().fg(theme.primary)),
         Span::styled("quit", Style::default().fg(theme.muted)),
     ]);
@@ -793,13 +770,13 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         ]),
         Line::from(vec![
             Span::styled("SEARCH    ", Style::default().fg(theme.success).add_modifier(Modifier::BOLD)),
-            Span::raw("/search words searches notes, commands, and terminal output across the full journal."),
+            Span::raw("/search words searches visible transcript rows, including Hermes user prompts."),
         ]),
         Line::from(""),
         Line::from(vec![Span::styled("LOCAL COMMANDS", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD))]),
-        Line::from(vec![Span::styled("/search WORDS", Style::default().fg(theme.warning)), Span::raw("  Search the entire journal and jump to the latest hit with context.")]),
+        Line::from(vec![Span::styled("/search WORDS", Style::default().fg(theme.warning)), Span::raw("  Search visible transcript rows and jump to the latest hit.")]),
         Line::from(vec![Span::styled("/view", Style::default().fg(theme.warning)), Span::raw("           Open the full Markdown body of a selected Hermes event.")]),
-        Line::from(vec![Span::styled("/threads", Style::default().fg(theme.warning)), Span::raw("        Browse Hermes conversations; Enter expands a complete live thread.")]),
+        Line::from(vec![Span::styled("/threads", Style::default().fg(theme.warning)), Span::raw("        Browse conversations; Enter or Ctrl+C expands the selected thread.")]),
         Line::from(vec![Span::styled("n / N", Style::default().fg(theme.warning)), Span::raw("          Next / previous search result when input is empty.")]),
         Line::from(vec![Span::styled("/mode [shell|notes]", Style::default().fg(theme.warning)), Span::raw("  Switch input mode; no argument toggles.")]),
         Line::from(vec![Span::styled("/note TEXT", Style::default().fg(theme.warning)), Span::raw("      Save a note without leaving terminal mode; /note alone switches to Notes mode.")]),
@@ -813,13 +790,13 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         Line::from(vec![Span::styled("KEYS", Style::default().fg(theme.success).add_modifier(Modifier::BOLD))]),
         Line::from("↑/↓ select rows and load CMD entries into input · PgUp/PgDn page · Home/End select first/last row"),
         Line::from("Click a CMD row to load its command into input; drag to select text across any rows."),
-        Line::from("Ctrl+C copies a transcript selection through OSC 52; without a selection it keeps its normal behavior."),
+        Line::from("Ctrl+C copies a selection; on a highlighted HUSR row it opens the Hermes thread."),
         Line::from("Each transcript row displays the full local date, time, seconds and UTC offset."),
         Line::from("Tab completes shell commands and paths · four spaces in Notes mode"),
         Line::from(format!("F2–F10 switches high-contrast palettes (F2 = 1, F10 = 9) · active: {}", theme.name)),
         Line::from("Ctrl+W toggles transcript word wrap · Alt+←/→ horizontal pan · Ctrl+P/N history · Ctrl+S save · Ctrl+T mode"),
         Line::from("Ctrl+L / Esc clears the input line · F12 shows or hides the ASCII-art banner"),
-        Line::from("Ctrl+C sends SIGINT to the shell · Ctrl+D sends EOF · Ctrl+Q quits StreamNote"),
+        Line::from("Ctrl+C in a thread copies its full transcript; elsewhere it sends SIGINT or clears the draft."),
         Line::from(""),
         Line::from(Span::styled(
             "Transcript mode strips ANSI control sequences. Full-screen programs (vim, top, etc.) are not screen-passthrough applications.",
@@ -865,8 +842,10 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 
 #[cfg(test)]
 mod conversation_thread_stream_tests {
-    use super::assistant_entries_replaced_by_live_stream;
-    use crate::storage::{Entry, EntryKind};
+    use crate::{
+        conversations::collapse_live_streams,
+        storage::{Entry, EntryKind},
+    };
 
     fn event(kind: EntryKind, turn_id: Option<&str>, iteration: Option<u32>) -> Entry {
         let mut entry = Entry::with_kind(kind, "assistant text".to_string());
@@ -883,7 +862,7 @@ mod conversation_thread_stream_tests {
         let entries = vec![(1, &prompt), (2, &delta), (3, &assistant)];
 
         assert_eq!(
-            assistant_entries_replaced_by_live_stream(&entries),
+            collapse_live_streams(&entries).replaced_assistant_indices,
             [3].into_iter().collect()
         );
     }
@@ -896,7 +875,7 @@ mod conversation_thread_stream_tests {
         let entries = vec![(1, &prompt), (2, &delta), (3, &assistant)];
 
         assert_eq!(
-            assistant_entries_replaced_by_live_stream(&entries),
+            collapse_live_streams(&entries).replaced_assistant_indices,
             [3].into_iter().collect()
         );
     }
@@ -917,7 +896,7 @@ mod conversation_thread_stream_tests {
         ];
 
         assert_eq!(
-            assistant_entries_replaced_by_live_stream(&entries),
+            collapse_live_streams(&entries).replaced_assistant_indices,
             [3].into_iter().collect()
         );
     }
@@ -930,7 +909,7 @@ mod conversation_thread_stream_tests {
         let entries = vec![(10, &prompt), (11, &delta), (12, &assistant)];
 
         assert_eq!(
-            assistant_entries_replaced_by_live_stream(&entries),
+            collapse_live_streams(&entries).replaced_assistant_indices,
             [12].into_iter().collect()
         );
     }
@@ -941,6 +920,6 @@ mod conversation_thread_stream_tests {
         let assistant = event(EntryKind::HermesAssistant, Some("turn-1"), None);
         let entries = vec![(1, &prompt), (2, &assistant)];
 
-        assert!(assistant_entries_replaced_by_live_stream(&entries).is_empty());
+        assert!(collapse_live_streams(&entries).replaced_assistant_indices.is_empty());
     }
 }
