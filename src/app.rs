@@ -1381,19 +1381,11 @@ impl App {
 
         self.search_query = Some(query.to_string());
         self.matches = found;
-        if let Some(&latest_match) = self.matches.last() {
-            self.active_match = Some(self.matches.len() - 1);
-            self.follow_tail = false;
-            let visible_position = self
-                .visible_transcript_indices()
-                .iter()
-                .position(|index| *index == latest_match)
-                .unwrap_or(0);
-            self.scroll_top = visible_position
-                .saturating_sub(self.feed_viewport_height.min(8).max(1) / 2);
-            self.scroll_top = self.scroll_top.min(self.max_top());
+        if !self.matches.is_empty() {
+            let latest_position = self.matches.len() - 1;
+            self.activate_match(latest_position);
             self.status = format!(
-                "Found {} hit(s) for {:?}. Showing latest hit with nearby context; n/N navigate.",
+                "Found {} hit(s) for {:?}. Latest hit selected; n/N navigate.",
                 self.matches.len(),
                 query
             );
@@ -1431,7 +1423,15 @@ impl App {
     fn activate_match(&mut self, position: usize) {
         self.active_match = Some(position);
         let entry_index = self.matches[position];
+
+        // Search navigation is also transcript-row navigation: keep the
+        // keyboard selection aligned with the active hit so row actions
+        // (such as opening a Hermes thread) operate on the highlighted match.
+        self.selected_row = Some(entry_index);
+        self.selection = None;
+        self.selection_dragging = false;
         self.follow_tail = false;
+
         let context = self.feed_viewport_height.min(8).max(1) / 2;
         let visible_position = self
             .visible_transcript_indices()
