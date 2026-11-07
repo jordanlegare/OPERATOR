@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 #[cfg(unix)]
-use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+use std::os::{fd::AsRawFd, unix::fs::{OpenOptionsExt, PermissionsExt}};
 
 use clap::Parser;
 use crossterm::{
@@ -1374,7 +1374,7 @@ fn read_system_clipboard() -> Result<String, String> {
         {
             Ok(output) if output.status.success() => {
                 let text = String::from_utf8_lossy(&output.stdout)
-                    .trim_end_matches(|ch| ch == '\\r' || ch == '\\n')
+                    .trim_end_matches(|ch| ch == '\r' || ch == '\n')
                     .to_string();
                 return Ok(text);
             }
