@@ -766,9 +766,15 @@ fn wrap_access_notice(
     let mut wrapped = Vec::new();
 
     for row in rows {
-        // Multi-span rows are the per-cell camouflage mosaic. Keep their
-        // individual foreground/background colours intact and never word-wrap.
-        if row.spans.len() > 1 {
+        // Multi-span rows are the per-cell camouflage mosaic. Framed masthead
+        // rows (including single-span horizontal borders and centered labels)
+        // must also retain their exact width and spacing.
+        let is_framed = row.spans.iter().any(|span| {
+            span.content.chars().any(|character| {
+                matches!(character, '║' | '╔' | '╗' | '╚' | '╝' | '╟' | '╢')
+            })
+        });
+        if row.spans.len() > 1 || is_framed {
             wrapped.push(row);
             continue;
         }
@@ -2328,7 +2334,7 @@ mod theme_shortcut_tests {
 
 #[cfg(test)]
 mod access_splash_tests {
-    use super::{restricted_access_splash, Color};
+    use super::{restricted_access_splash, wrap_access_notice, Color};
     use unicode_width::UnicodeWidthStr;
 
     fn line_text(line: &ratatui::text::Line<'static>) -> String {
@@ -2364,6 +2370,11 @@ mod access_splash_tests {
         assert!(colors.len() >= 4, "camouflage should fill the artwork with several field colours");
         assert!(rows.iter().any(|line| line.spans.iter().any(|span| span.style.fg == Some(olive))));
         assert!(rows.iter().any(|line| line.spans.iter().any(|span| span.style.fg == Some(khaki))));
+
+        // All parts of the frame, including centered labels, stay aligned.
+        assert!(rows.iter().all(|line| UnicodeWidthStr::width(line_text(line).as_str()) == 76));
+        let wrapped = wrap_access_notice(rows, 76);
+        assert!(wrapped.iter().all(|line| UnicodeWidthStr::width(line_text(line).as_str()) == 76));
     }
 
     #[test]
