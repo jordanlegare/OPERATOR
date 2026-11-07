@@ -74,12 +74,12 @@ The default input mode is **TERMINAL**.
 - Every row displays its full local date and time, including seconds and the UTC offset.
 - Click a `CMD` transcript row to select it and load its command into the editable input line; clicking notes or output rows does not change the input. Drag selection still works across any transcript rows.
 - Left-click and drag to select text across rows without changing the current input draft.
-- Ctrl+C copies a selected transcript range through OSC 52; without a selection it retains its normal shell-interrupt / draft-clear behavior.
+- Ctrl+C copies an explicit transcript selection through OSC 52. With a keyboard-highlighted HUSR row and no active selection, Ctrl+C opens that prompt's Hermes thread; Ctrl+C in the expanded thread copies the full thread with all live deltas joined into one uninterrupted assistant message.
 - Up/Down moves a highlighted row through the transcript and keeps it visible; highlighting a `CMD` row automatically loads that command into the editable input line. Holding either key repeats row navigation.
 - `Alt+Left` / `Alt+Right` horizontally pan the feed.
 - Unbounded in-memory `Vec<Entry>` with no application-level cache eviction.
 - JSON Lines persistence; non-secret commands, notes, useful terminal output records, and system events are appended to the journal. Empty terminal-output rows and standard shell-prompt rows are filtered both when loading older journals and when appending new output; existing journal files are not rewritten.
-- `/search <terms>` searches all cached notes, commands, terminal output, and imported Hermes messages case-insensitively and jumps to the latest match with surrounding context.
+- `/search <terms>` searches the records visible in the main transcript case-insensitively. Hermes assistant, tool, and stream events are inspected in `/threads`.
 - `n` / `N` navigate search hits.
 - Command/input history, Bash-powered Tab completion for commands and filesystem paths, nine high-contrast color palettes, export, stats, path display, and save/retry.
 - Older journal entries without a `kind` field remain compatible and load as `note` entries.
@@ -163,7 +163,7 @@ Rebuild and restart STREENOTE so its Rust-created PTYs receive the inbox variabl
 - Tool-call and tool-result records share the tool's `tool_call_id` for correlation; pre/post event IDs remain distinct for retry deduplication.
 - Tool argument and result previews are capped at 48 KiB each. Common secret-bearing object keys and common inline token/password assignments are redacted on a best-effort basis; this is not a complete secret filter.
 - Interrupted or unsuccessful turns can have a prompt entry without a final-answer entry. A tool call that never reaches its post-hook can likewise have a call entry without a result entry.
-- Full Markdown is retained in JSONL. `/threads` opens a conversation index; select one and press Enter to expand the complete thread. Pressing Enter or clicking any HUSR/HAI/HCAL/HRES row opens its containing conversation. The viewer follows new stream deltas automatically while it is open. `/view` remains available for the selected event's individual body, and `/search` searches complete message content.
+- Full Markdown is retained in JSONL. The main transcript shows HUSR prompts but hides HAI, HCAL, HRES, and stream-event rows. Press Enter or Ctrl+C on a highlighted HUSR row to open its complete conversation; `/threads` opens the conversation index (Enter or Ctrl+C expands the selected thread). The expanded view includes user prompts, tool calls/results, and one uninterrupted `ASSISTANT - LIVE STREAM` block per streamed turn. Stream deltas across iterations are concatenated and the duplicate final assistant event is suppressed. The viewer follows new stream deltas automatically while it is open. `/view` remains available for an individual event's full body.
 - Hermes events use stable event IDs for retry deduplication. Those IDs are internal metadata, not journal partitions or visible session labels.
 
 Events are staged in `~/.local/share/streenote/hermes-inbox/ready` (or under `$XDG_DATA_HOME/streenote/hermes-inbox/ready`) with private directory/file permissions. STREENOTE imports them through its in-memory journal and normal append/retry path. Malformed or oversized events are moved to the inbox's `failed` directory.
@@ -277,9 +277,10 @@ The palettes are built into StreamNote and require no external theme package or 
 | Left-click a `CMD` row | Select the complete command row and load its command into the input line |
 | Left-click a `NOTE`, `OUT`, or `SYS` row | No action; the input line is left unchanged |
 | Left-click + drag | Select text across one or more transcript rows |
-| `Ctrl+C` with a selection | Copy selected transcript text via OSC 52 |
-| `Shift+↑` / `Shift+↓`, then `Ctrl+C` | Select and copy multiple complete transcript rows via OSC 52 |
-| `Ctrl+C` without a selection | Send SIGINT to shell (TERMINAL) or clear the draft (NOTES) |
+| `Ctrl+C` with a text/row selection | Copy selected transcript text via OSC 52 |
+| `Ctrl+C` on a highlighted HUSR row | Open that prompt's expanded Hermes thread |
+| `Ctrl+C` in the expanded thread | Copy the full thread with each streamed assistant turn joined into one continuous message |
+| `Ctrl+C` without a selection or HUSR row | Send SIGINT to shell (TERMINAL) or clear the draft (NOTES) |
 | `Shift` + mouse wheel | Faster vertical scroll |
 | `Alt+Left` / `Alt+Right` | Pan feed horizontally |
 | `Ctrl+W` | Toggle transcript word wrap on/off |
