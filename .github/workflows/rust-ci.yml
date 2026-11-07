@@ -60,3 +60,5 @@ jobs:
           PY
       - name: Test journal storage compatibility
         run: cargo test storage::terminal_output_filter_tests
+      - name: Test Restricted Access splash layouts
+        run: cargo test access_splash_tests
