@@ -147,6 +147,7 @@ pub fn collapse_live_streams(entries: &[(usize, &Entry)]) -> CollapsedLiveStream
     let mut current_turn = None::<String>;
     let mut streams = HashMap::<String, (usize, String, Vec<usize>)>::new();
     let mut assistant_entries = Vec::<(usize, String)>::new();
+    let mut tool_turns = HashSet::<String>::new();
 
     for (index, entry) in entries {
         if entry.kind == EntryKind::HermesUser {
@@ -175,18 +176,33 @@ pub fn collapse_live_streams(entries: &[(usize, &Entry)]) -> CollapsedLiveStream
             EntryKind::HermesAssistant => {
                 assistant_entries.push((*index, turn_key));
             }
+            EntryKind::HermesToolCall | EntryKind::HermesToolResult => {
+                // If a tool was involved in this turn, its streamed assistant
+                // deltas are intermediate output. Keep the final assistant
+                // message instead of presenting those deltas as a reply.
+                tool_turns.insert(turn_key);
+            }
             _ => {}
         }
     }
 
-    let streamed_turns = streams.keys().cloned().collect::<HashSet<_>>();
+    let streamed_turns = streams
+        .keys()
+        .filter(|turn| !tool_turns.contains(*turn))
+        .cloned()
+        .collect::<HashSet<_>>();
     let mut collapsed = CollapsedLiveStreams::default();
 
-    for (_, (first_index, text, indices)) in streams {
-        collapsed.text_by_first_index.insert(first_index, text);
-        collapsed.hidden_delta_indices.extend(
-            indices.into_iter().filter(|index| *index != first_index),
-        );
+    for (turn, (first_index, text, indices)) in streams {
+        if tool_turns.contains(&turn) {
+            // Tool-using turns show only their final assistant message.
+            collapsed.hidden_delta_indices.extend(indices);
+        } else {
+            collapsed.text_by_first_index.insert(first_index, text);
+            collapsed.hidden_delta_indices.extend(
+                indices.into_iter().filter(|index| *index != first_index),
+            );
+        }
     }
 
     collapsed.replaced_assistant_indices.extend(
@@ -304,6 +320,50 @@ mod tests {
         );
         assert!(collapsed.hidden_delta_indices.contains(&3));
         assert!(collapsed.replaced_assistant_indices.contains(&4));
+    }
+
+    #[test]
+    fn tool_using_turn_discards_stream_deltas_and_keeps_final_assistant_message() {
+        use super::collapse_live_streams;
+
+        let prompt = event(EntryKind::HermesUser, "run a tool", Some("session"), Some("turn-1"));
+        let first_delta = event(EntryKind::HermesStreamDelta, "I will inspect ", Some("session"), Some("turn-1"));
+        let tool_call = event(EntryKind::HermesToolCall, "Tool: terminal", Some("session"), Some("turn-1"));
+        let tool_result = event(EntryKind::HermesToolResult, "command output", Some("session"), Some("turn-1"));
+        let second_delta = event(EntryKind::HermesStreamDelta, "the result now.", Some("session"), Some("turn-1"));
+        let assistant = event(EntryKind::HermesAssistant, "Here is the completed answer.", Some("session"), Some("turn-1"));
+        let entries = vec![
+            (0, &prompt),
+            (1, &first_delta),
+            (2, &tool_call),
+            (3, &tool_result),
+            (4, &second_delta),
+            (5, &assistant),
+        ];
+
+        let collapsed = collapse_live_streams(&entries);
+        assert!(collapsed.text_by_first_index.is_empty());
+        assert_eq!(
+            collapsed.hidden_delta_indices,
+            [1, 4].into_iter().collect()
+        );
+        assert!(collapsed.replaced_assistant_indices.is_empty());
+    }
+
+    #[test]
+    fn legacy_tool_using_turn_discards_stream_deltas_at_prompt_boundary() {
+        use super::collapse_live_streams;
+
+        let prompt = event(EntryKind::HermesUser, "run a tool", None, None);
+        let delta = event(EntryKind::HermesStreamDelta, "intermediate output", None, None);
+        let tool_call = event(EntryKind::HermesToolCall, "Tool: terminal", None, None);
+        let assistant = event(EntryKind::HermesAssistant, "final answer", None, None);
+        let entries = vec![(10, &prompt), (11, &delta), (12, &tool_call), (13, &assistant)];
+
+        let collapsed = collapse_live_streams(&entries);
+        assert!(collapsed.text_by_first_index.is_empty());
+        assert!(collapsed.hidden_delta_indices.contains(&11));
+        assert!(collapsed.replaced_assistant_indices.is_empty());
     }
 
     #[test]
