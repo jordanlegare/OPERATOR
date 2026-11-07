@@ -368,9 +368,35 @@ pub fn format_timestamp(timestamp: &str) -> String {
         .unwrap_or_else(|_| timestamp.to_string())
 }
 
+/// Decode a terminal tool-call payload into a useful one-line transcript preview.
+fn terminal_tool_command_preview(text: &str) -> Option<String> {
+    let tool_name = text.lines().next()?.strip_prefix("Tool:")?.trim();
+    if tool_name != "terminal" {
+        return None;
+    }
+
+    let (_, arguments) = text.split_once("Arguments:")?;
+    let arguments: serde_json::Value = serde_json::from_str(arguments.trim()).ok()?;
+    let command = arguments.get("command")?.as_str()?;
+    if command.trim().is_empty() {
+        return None;
+    }
+
+    // Transcript rows are one line tall. Keep the complete decoded command
+    // visible on that line; the normal horizontal-scroll controls handle long commands.
+    Some(format!("terminal› {}", sanitize_single_line(command)))
+}
+
 /// Compact single-row preview. Full Hermes Markdown remains available in the
-/// journal and in the message viewer.
+/// journal and in the message viewer. Terminal tool calls show their decoded
+/// command rather than the generic multi-line payload placeholder.
 pub fn entry_display_text(entry: &Entry) -> String {
+    if entry.kind == EntryKind::HermesToolCall {
+        if let Some(command) = terminal_tool_command_preview(&entry.text) {
+            return command;
+        }
+    }
+
     if matches!(
         entry.kind,
         EntryKind::HermesUser
@@ -576,6 +602,34 @@ mod hermes_tool_entry_tests {
         let text = "Tool: terminal\nArguments:\n{\n  \"command\": \"pwd\"\n}";
         assert_eq!(sanitize_entry_text(EntryKind::HermesToolCall, text), text);
         let entry = Entry::with_kind(EntryKind::HermesToolCall, text.to_string());
-        assert_eq!(entry_display_text(&entry), "Tool: terminal  ↳ [full message]");
+        assert_eq!(entry_display_text(&entry), "terminal› pwd");
+    }
+
+    #[test]
+    fn terminal_tool_preview_decodes_the_complete_json_command() {
+        let text = r#"Tool: terminal
+Call ID: call_el4tbrqb
+Arguments:
+{
+  "command": "curl -sL \"https://www.icc-cpi.int/about/otp/proprio-motu-investigations 2>/dev/null | grep -i \"proprio\" | head -20",
+  "timeout": 60
+}"#;
+        let entry = Entry::with_kind(EntryKind::HermesToolCall, text.to_string());
+
+        assert_eq!(
+            entry_display_text(&entry),
+            r#"terminal› curl -sL "https://www.icc-cpi.int/about/otp/proprio-motu-investigations 2>/dev/null | grep -i "proprio" | head -20"#
+        );
+    }
+
+    #[test]
+    fn non_terminal_tool_calls_keep_the_generic_preview() {
+        let text = "Tool: browser\nArguments:\n{\n  \"url\": \"https://example.com\"\n}";
+        let entry = Entry::with_kind(EntryKind::HermesToolCall, text.to_string());
+
+        assert_eq!(
+            entry_display_text(&entry),
+            "Tool: browser  ↳ [full message]"
+        );
     }
 }
