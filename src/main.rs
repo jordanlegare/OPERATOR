@@ -172,15 +172,20 @@ fn show_access_disclaimer(
             let area = frame.area();
             let popup = area;
 
-            let olive = Color::Rgb(38, 48, 31);
-            let warning = Color::Rgb(255, 190, 70);
-            let critical = Color::Rgb(255, 90, 70);
-            let normal = Color::Rgb(225, 229, 210);
+            // A dark BBS palette: cyan/blue framing, magenta accents,
+            // amber operator warnings, and hot-pink critical text.
+            let background = Color::Rgb(5, 10, 28);
+            let accent = Color::Rgb(40, 235, 255);
+            let blue = Color::Rgb(85, 145, 255);
+            let magenta = Color::Rgb(245, 90, 225);
+            let warning = Color::Rgb(255, 205, 80);
+            let critical = Color::Rgb(255, 75, 125);
+            let normal = Color::Rgb(205, 225, 245);
 
             let base_block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(warning).add_modifier(Modifier::BOLD))
-                .style(Style::default().fg(normal).bg(olive));
+                .border_style(Style::default().fg(accent).add_modifier(Modifier::BOLD))
+                .style(Style::default().fg(normal).bg(background));
             let inner = base_block.inner(popup);
             let available_text_rows = inner.height.saturating_sub(1);
 
@@ -189,7 +194,15 @@ fn show_access_disclaimer(
                 Vec::new()
             } else {
                 paginate_access_notice(
-                    access_notice_policy(critical, warning, normal),
+                    access_notice_policy(
+                        critical,
+                        warning,
+                        normal,
+                        accent,
+                        blue,
+                        magenta,
+                        inner.width,
+                    ),
                     inner.width,
                     usize::from(available_text_rows),
                 )
@@ -216,7 +229,7 @@ fn show_access_disclaimer(
             };
             let block = base_block.title(Span::styled(
                 title,
-                Style::default().fg(warning).add_modifier(Modifier::BOLD),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ));
 
             frame.render_widget(Clear, popup);
@@ -242,7 +255,7 @@ fn show_access_disclaimer(
                 frame.render_widget(
                     Paragraph::new(message)
                         .alignment(Alignment::Center)
-                        .style(Style::default().fg(normal).bg(olive)),
+                        .style(Style::default().fg(normal).bg(background)),
                     Rect::new(inner.x, top, inner.width, height),
                 );
                 return;
@@ -261,7 +274,7 @@ fn show_access_disclaimer(
             frame.render_widget(
                 Paragraph::new(current_page.clone())
                     .alignment(Alignment::Center)
-                    .style(Style::default().fg(normal).bg(olive)),
+                    .style(Style::default().fg(normal).bg(background)),
                 text_area,
             );
 
@@ -279,7 +292,7 @@ fn show_access_disclaimer(
                     .style(
                         Style::default()
                             .fg(warning)
-                            .bg(olive)
+                            .bg(background)
                             .add_modifier(Modifier::BOLD),
                     ),
                 Rect::new(inner.x, footer_y, inner.width, 1),
@@ -320,6 +333,10 @@ fn access_notice_policy(
     critical: Color,
     warning: Color,
     normal: Color,
+    accent: Color,
+    blue: Color,
+    magenta: Color,
+    width: u16,
 ) -> Vec<(String, Style)> {
     let critical_style = Style::default()
         .fg(critical)
@@ -329,20 +346,8 @@ fn access_notice_policy(
         .add_modifier(Modifier::BOLD);
     let body_style = Style::default().fg(normal).add_modifier(Modifier::BOLD);
 
-    let mut rows: Vec<(String, Style)> = Vec::new();
-
-    for line in large_notice_word("RESTRICTED") {
-        rows.push((line, critical_style));
-    }
+    let mut rows = restricted_access_splash(width, critical, warning, accent, blue, magenta);
     rows.push((String::new(), body_style));
-    for line in large_notice_word("ACCESS") {
-        rows.push((line, critical_style));
-    }
-    rows.push((String::new(), body_style));
-    rows.push(("AUTHORIZED PERSONNEL ONLY".to_string(), warning_style));
-    rows.push(("CONTROLLED SYSTEM // READ ALL OPERATOR TERMS".to_string(), warning_style));
-    rows.push((String::new(), body_style));
-    rows.push(("".to_string(), body_style));
 
     let policy_rows: Vec<(&str, Style)> = vec![
         ("", body_style),
@@ -510,6 +515,98 @@ fn access_notice_policy(
             .map(|(text, style)| (text.to_string(), style)),
     );
     rows
+}
+
+/// Build a BBS-style restricted-access masthead using Ratatui styles rather
+/// than emitting raw escape sequences into the terminal. This keeps colour
+/// handling deterministic inside the alternate-screen TUI.
+fn restricted_access_splash(
+    width: u16,
+    critical: Color,
+    warning: Color,
+    accent: Color,
+    blue: Color,
+    magenta: Color,
+) -> Vec<(String, Style)> {
+    let frame_width = usize::from(width).clamp(24, 76);
+    let accent_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
+    let blue_style = Style::default().fg(blue).add_modifier(Modifier::BOLD);
+    let magenta_style = Style::default().fg(magenta).add_modifier(Modifier::BOLD);
+    let warning_style = Style::default().fg(warning).add_modifier(Modifier::BOLD);
+    let critical_style = Style::default().fg(critical).add_modifier(Modifier::BOLD);
+
+    let header = if frame_width >= 52 {
+        "S T R E E N O T E  //  B B S  N O D E  0 0"
+    } else {
+        "STREENOTE // NODE 00"
+    };
+    let mut rows = vec![
+        (bbs_rule(frame_width, '╔', '╗'), accent_style),
+        (centered_bbs_line(header, frame_width), blue_style),
+        (bbs_rule(frame_width, '╠', '╣'), magenta_style),
+    ];
+
+    // The bitmap masthead fits comfortably on standard SSH terminal widths.
+    // On narrow terminals, use a compact two-line title rather than wrapping
+    // the art into unreadable fragments.
+    if frame_width >= 66 {
+        rows.push((
+            centered_bbs_line("SECURE ACCESS GATEWAY  ·  CONNECTION ESTABLISHED", frame_width),
+            accent_style,
+        ));
+        for (index, line) in large_notice_word("RESTRICTED").into_iter().enumerate() {
+            let color = match index % 4 {
+                0 => accent_style,
+                1 => blue_style,
+                2 => magenta_style,
+                _ => critical_style,
+            };
+            rows.push((format!("║  {line}  ║"), color));
+        }
+        for (index, line) in large_notice_word("ACCESS").into_iter().enumerate() {
+            let color = match index % 3 {
+                0 => warning_style,
+                1 => critical_style,
+                _ => magenta_style,
+            };
+            rows.push((format!("║  {line}  ║"), color));
+        }
+    } else {
+        rows.push((
+            centered_bbs_line("RESTRICTED ACCESS", frame_width),
+            critical_style,
+        ));
+    }
+
+    let authorization = if frame_width >= 30 {
+        "AUTHORIZED PERSONNEL ONLY"
+    } else {
+        "AUTHORIZED ONLY"
+    };
+    rows.push((centered_bbs_line(authorization, frame_width), warning_style));
+    if frame_width >= 52 {
+        rows.push((
+            centered_bbs_line("SESSION MONITORED  //  READ OPERATOR TERMS", frame_width),
+            magenta_style,
+        ));
+    }
+    rows.push((bbs_rule(frame_width, '╚', '╝'), accent_style));
+    rows
+}
+
+fn bbs_rule(width: usize, left: char, right: char) -> String {
+    let width = width.max(2);
+    format!("{left}{}{right}", "═".repeat(width - 2))
+}
+
+fn centered_bbs_line(text: &str, width: usize) -> String {
+    let width = width.max(2);
+    let interior = width - 2;
+    let text_width = UnicodeWidthStr::width(text);
+    let padding = interior.saturating_sub(text_width);
+    let left = padding / 2;
+    let right = padding.saturating_sub(left);
+    format!("║{}{}{}║", " ".repeat(left), text, " ".repeat(right))
 }
 
 /// Render a word in a 5x7 block-letter bitmap. This gives the terminal
@@ -2099,5 +2196,47 @@ mod theme_shortcut_tests {
                 None
             );
         }
+    }
+}
+
+
+#[cfg(test)]
+mod access_splash_tests {
+    use super::{restricted_access_splash, Color};
+    use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn wide_terminal_gets_multicolour_block_letter_bbs_splash() {
+        let accent = Color::Rgb(40, 235, 255);
+        let blue = Color::Rgb(85, 145, 255);
+        let magenta = Color::Rgb(245, 90, 225);
+        let warning = Color::Rgb(255, 205, 80);
+        let critical = Color::Rgb(255, 75, 125);
+        let rows = restricted_access_splash(
+            80, critical, warning, accent, blue, magenta,
+        );
+
+        assert!(rows.iter().any(|(line, _)| line.contains("S T R E E N O T E")));
+        assert!(rows.iter().any(|(line, _)| line.contains('█')));
+        assert!(rows.iter().any(|(line, _)| line.contains("AUTHORIZED PERSONNEL ONLY")));
+        for color in [accent, blue, magenta, warning, critical] {
+            assert!(rows.iter().any(|(_, style)| style.fg == Some(color)));
+        }
+    }
+
+    #[test]
+    fn narrow_terminal_gets_compact_splash_without_wrapped_art() {
+        let rows = restricted_access_splash(
+            24,
+            Color::Red,
+            Color::Yellow,
+            Color::Cyan,
+            Color::Blue,
+            Color::Magenta,
+        );
+
+        assert!(!rows.iter().any(|(line, _)| line.contains('█')));
+        assert!(rows.iter().any(|(line, _)| line.contains("RESTRICTED ACCESS")));
+        assert!(rows.iter().all(|(line, _)| UnicodeWidthStr::width(line.as_str()) <= 24));
     }
 }
