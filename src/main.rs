@@ -362,7 +362,6 @@ fn access_notice_policy(
 
     let mut rows = restricted_access_splash(
         width,
-        critical,
         warning,
         accent,
         animation_phase,
@@ -542,7 +541,6 @@ fn access_notice_policy(
 /// redundant connection headline is placed above the warning artwork.
 fn restricted_access_splash(
     width: u16,
-    critical: Color,
     warning: Color,
     accent: Color,
     animation_phase: usize,
@@ -564,8 +562,8 @@ fn restricted_access_splash(
     ))];
 
     if frame_width >= 66 {
-        // The artwork fills the frame edge-to-edge. Letter pixels stay bright
-        // red; the camo pattern fills every cell behind and around each letter.
+        // The artwork fills the frame edge-to-edge. Letter pixels flash red,
+        // orange, and yellow; the camo pattern fills every surrounding cell.
         let canvas_width = frame_width.saturating_sub(6);
         let mut art_row = 0usize;
 
@@ -586,7 +584,7 @@ fn restricted_access_splash(
             canvas_width,
             art_row,
             29,
-            critical,
+            letter_color,
             accent,
             animation_phase,
         ));
@@ -606,7 +604,7 @@ fn restricted_access_splash(
     } else {
         rows.push(Line::from(Span::styled(
             centered_bbs_line("RESTRICTED ACCESS", frame_width),
-            Style::default().fg(critical).add_modifier(Modifier::BOLD),
+            Style::default().fg(letter_color).add_modifier(Modifier::BOLD),
         )));
     }
 
@@ -639,7 +637,7 @@ fn restricted_access_splash(
 /// Repeating warning-light cycle: strong red, short orange flash,
 /// strong yellow, then another short orange flash before returning to red.
 fn restricted_access_flash_color(phase: usize) -> Color {
-    const RED: Color = Color::Rgb(255, 0, 0);
+    const RED: Color = Color::Rgb(255, 24, 24);
     const ORANGE: Color = Color::Rgb(255, 96, 0);
     const YELLOW: Color = Color::Rgb(255, 255, 0);
 
@@ -2396,7 +2394,7 @@ mod access_splash_tests {
         let red = Color::Rgb(255, 24, 24);
         let olive = Color::Rgb(112, 128, 72);
         let khaki = Color::Rgb(198, 177, 119);
-        let rows = restricted_access_splash(80, red, khaki, olive, 0, 0);
+        let rows = restricted_access_splash(80, khaki, olive, 0, 0);
 
         assert!(!rows.iter().any(|line| line_text(line).contains("BBS NODE")));
         assert!(!rows.iter().any(|line| line_text(line).contains("SECURE ACCESS GATEWAY")));
@@ -2433,7 +2431,7 @@ mod access_splash_tests {
         let khaki = Color::Rgb(198, 177, 119);
         let olive = Color::Rgb(112, 128, 72);
         let first = restricted_access_splash(80, red, khaki, olive, 0, 0);
-        let later = restricted_access_splash(80, red, khaki, olive, 4, 0);
+        let later = restricted_access_splash(80, khaki, olive, 4, 0);
 
         let letter_mask = |rows: &[ratatui::text::Line<'static>]| {
             rows.iter()
@@ -2475,11 +2473,26 @@ mod access_splash_tests {
     }
 
     #[test]
+    fn splash_lettering_uses_each_flash_colour() {
+        let warning = Color::Rgb(198, 177, 119);
+        let olive = Color::Rgb(112, 128, 72);
+        let red = Color::Rgb(255, 24, 24);
+        let orange = Color::Rgb(255, 96, 0);
+        let yellow = Color::Rgb(255, 255, 0);
+
+        for (phase, expected) in [(0, red), (2, orange), (3, yellow), (5, orange)] {
+            let rows = restricted_access_splash(80, warning, olive, 0, phase);
+            assert!(rows.iter().any(|line| {
+                line.spans.iter().any(|span| span.style.fg == Some(expected) && span.content.contains('█'))
+            }), "phase {phase} should render its warning colour in the large lettering");
+        }
+    }
+
+    #[test]
     fn narrow_terminal_gets_compact_bright_red_warning() {
         let red = Color::Rgb(255, 24, 24);
         let rows = restricted_access_splash(
             24,
-            red,
             Color::Rgb(198, 177, 119),
             Color::Rgb(112, 128, 72),
             0,
