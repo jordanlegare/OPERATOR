@@ -1677,6 +1677,7 @@ mod clipboard_tests {
         assert_eq!(parse_osc52_response(bel).as_deref(), Some("Hello"));
         assert_eq!(parse_osc52_response(st).as_deref(), Some("SSH to StreeNote"));
         assert!(parse_osc52_response(b"\x1b]52;p;SGVsbG8=\x07").is_none());
+        assert!(parse_osc52_response(b"\x1b]52;c;!!!\x07").is_none());
     }
 
     #[test]
