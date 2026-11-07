@@ -1010,6 +1010,28 @@ fn handle_key(
     // The full Hermes message viewer owns keyboard focus until dismissed.
     if app.message_view_index.is_some() {
         match code {
+            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                let modal_text = app
+                    .message_view_index
+                    .and_then(|index| app.journal.entries.get(index))
+                    .map(|entry| entry.text.clone());
+
+                if let Some(text) = modal_text {
+                    match copy_to_terminal_clipboard(&text) {
+                        Ok(()) => {
+                            app.status = format!(
+                                "Copied all {} characters from the Hermes modal to the clipboard.",
+                                text.chars().count()
+                            );
+                        }
+                        Err(error) => {
+                            app.status = format!("Could not copy Hermes modal content: {error}");
+                        }
+                    }
+                } else {
+                    app.status = "No Hermes modal content is available to copy.".to_string();
+                }
+            }
             KeyCode::Esc => app.close_hermes_message(),
             KeyCode::Up => app.scroll_hermes_message(-1),
             KeyCode::Down => app.scroll_hermes_message(1),
