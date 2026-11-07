@@ -7,11 +7,14 @@ mod theme;
 mod ui;
 
 use std::{
-    io::{self, stdout, Write},
-    path::PathBuf,
+    fs::{self, OpenOptions},
+    io::{self, Read, stdout, Write},
+    path::{Path, PathBuf},
     process::Command,
-    time::Duration,
+    time::{Duration, Instant},
 };
+#[cfg(unix)]
+use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
 
 use clap::Parser;
 use crossterm::{
@@ -944,9 +947,7 @@ fn run(
                 _ => {}
             },
             Event::Paste(text) => {
-                let chars = text.chars().count();
-                app.paste(&text);
-                app.status = format!("Pasted {chars} characters from terminal clipboard.");
+                paste_clipboard_text(app, &text, "terminal paste event");
             },
             Event::Resize(cols, rows) => {
                 if let Some(session) = shell.as_ref() {
@@ -1200,7 +1201,157 @@ fn drain_shell(
     Ok(())
 }
 
-/// Read text from the system clipboard using whichever common helper is installed.
+const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
+const OSC52_READ_TIMEOUT: Duration = Duration::from_millis(1800);
+
+/// Per-user, per-server clipboard cache. This makes copy/paste available to
+/// other STREENOTE sessions on the same host even when no desktop is present.
+fn server_clipboard_cache_path() -> PathBuf {
+    default_journal_path().with_file_name("clipboard.txt")
+}
+
+fn write_server_clipboard_cache(text: &str) -> io::Result<()> {
+    write_clipboard_cache_to(&server_clipboard_cache_path(), text)
+}
+
+fn write_clipboard_cache_to(path: &Path, text: &str) -> io::Result<()> {
+    if text.len() > MAX_CLIPBOARD_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("clipboard text exceeds the {} MiB server cache limit", MAX_CLIPBOARD_BYTES / (1024 * 1024)),
+        ));
+    }
+
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "clipboard cache has no parent directory")
+    })?;
+    fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+
+    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("clipboard");
+    let temporary = parent.join(format!("{file_name}.tmp.{}", std::process::id()));
+    let _ = fs::remove_file(&temporary);
+
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+
+    let mut file = options.open(&temporary)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+
+    fs::rename(&temporary, path)?;
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+fn read_server_clipboard_cache() -> io::Result<String> {
+    read_clipboard_cache_from(&server_clipboard_cache_path())
+}
+
+fn read_clipboard_cache_from(path: &Path) -> io::Result<String> {
+    let metadata = fs::metadata(path)?;
+    if metadata.len() as usize > MAX_CLIPBOARD_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "server clipboard cache exceeds the 1 MiB read limit",
+        ));
+    }
+    String::from_utf8(fs::read(path)?)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+/// Decode a terminal's OSC 52 clipboard response. Terminals commonly terminate
+/// OSC with BEL; some use ST (ESC backslash).
+fn parse_osc52_response(response: &[u8]) -> Option<String> {
+    let prefix = b"\x1b]52;c;";
+    let body = response.strip_prefix(prefix)?;
+    let encoded = body
+        .strip_suffix(b"\x07")
+        .or_else(|| body.strip_suffix(b"\x1b\\"))
+        ?;
+    let decoded = base64_decode(encoded)?;
+    if decoded.len() > MAX_CLIPBOARD_BYTES {
+        return None;
+    }
+    String::from_utf8(decoded).ok()
+}
+
+/// Ask the attached terminal for the client's clipboard using OSC 52 read.
+/// This reads /dev/tty directly while the main Crossterm event loop is paused.
+/// Clipboard reads are security-sensitive and may be denied by the terminal.
+#[cfg(unix)]
+fn read_osc52_terminal_clipboard() -> io::Result<Option<String>> {
+    let mut tty = OpenOptions::new().read(true).open("/dev/tty")?;
+
+    // Query the clipboard selection ("c"). The response is ESC ] 52 ; c ; BASE64 BEL/ST.
+    let mut output = stdout();
+    output.write_all(b"\x1b]52;c;?\x07")?;
+    output.flush()?;
+
+    let prefix = b"\x1b]52;c;";
+    let deadline = Instant::now() + OSC52_READ_TIMEOUT;
+    let mut response = Vec::with_capacity(256);
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+
+        let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+        let mut descriptor = libc::pollfd {
+            fd: tty.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+        if ready == 0 {
+            return Ok(None);
+        }
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+
+        let mut byte = [0u8; 1];
+        let count = tty.read(&mut byte)?;
+        if count == 0 {
+            return Ok(None);
+        }
+        response.push(byte[0]);
+
+        // Stop immediately if the incoming bytes are not the expected OSC 52
+        // response prefix. This prevents consuming an unrelated long sequence.
+        if response.len() <= prefix.len() && !prefix.starts_with(&response) {
+            return Ok(None);
+        }
+
+        if response.ends_with(b"\x07") || response.ends_with(b"\x1b\\") {
+            return Ok(parse_osc52_response(&response));
+        }
+        if response.len() > (MAX_CLIPBOARD_BYTES * 2) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "OSC 52 clipboard response exceeded the 1 MiB limit",
+            ));
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn read_osc52_terminal_clipboard() -> io::Result<Option<String>> {
+    Ok(None)
+}
+
+/// Read text from the server's desktop clipboard, if one is available.
 fn read_system_clipboard() -> Result<String, String> {
     let commands: &[(&str, &[&str])] = &[
         ("wl-paste", &["--no-newline"]),
@@ -1219,7 +1370,7 @@ fn read_system_clipboard() -> Result<String, String> {
         {
             Ok(output) if output.status.success() => {
                 let text = String::from_utf8_lossy(&output.stdout)
-                    .trim_end_matches(|ch| ch == '\r' || ch == '\n')
+                    .trim_end_matches(|ch| ch == '\\r' || ch == '\\n')
                     .to_string();
                 return Ok(text);
             }
@@ -1234,32 +1385,74 @@ fn read_system_clipboard() -> Result<String, String> {
     } else {
         "Clipboard readers were found but none could read the clipboard."
     };
-    Err(format!(
-        "{detail} In SSH sessions, use your terminal emulator's paste shortcut so it sends a bracketed-paste event."
-    ))
+    Err(detail.to_string())
 }
 
-/// Paste the system clipboard into the input at the current cursor position.
-fn paste_from_system_clipboard(app: &mut App) {
-    match read_system_clipboard() {
-        Ok(text) if text.is_empty() => {
-            app.status = "Clipboard is empty.".to_string();
-        }
-        Ok(text) => {
-            let chars = text.chars().count();
-            app.paste(&text);
-            app.status = format!("Pasted {chars} characters from clipboard.");
+/// Insert clipboard text at the current cursor and mirror it into this server's cache.
+fn paste_clipboard_text(app: &mut App, text: &str, source: &str) {
+    let chars = text.chars().count();
+    app.paste(text);
+    match write_server_clipboard_cache(text) {
+        Ok(()) => {
+            app.status = format!("Pasted {chars} characters from {source}; server clipboard cache synced.");
         }
         Err(error) => {
-            app.status = error;
+            app.status = format!("Pasted {chars} characters from {source}, but server cache update failed: {error}");
+        }
+    }
+}
+
+/// Paste from the client terminal first (OSC 52), then the server-local cache,
+/// and finally the server desktop clipboard tools.
+fn paste_from_system_clipboard(app: &mut App) {
+    match read_osc52_terminal_clipboard() {
+        Ok(Some(text)) => {
+            if text.is_empty() {
+                app.status = "Client terminal clipboard is empty.".to_string();
+            } else {
+                paste_clipboard_text(app, &text, "client OSC 52 clipboard");
+            }
+            return;
+        }
+        Ok(None) => {}
+        Err(_) => {}
+    }
+
+    match read_server_clipboard_cache() {
+        Ok(text) => {
+            if text.is_empty() {
+                app.status = "STREENOTE server clipboard cache is empty.".to_string();
+            } else {
+                paste_clipboard_text(app, &text, "STREENOTE server clipboard");
+            }
+            return;
+        }
+        Err(error) if error.kind() != io::ErrorKind::NotFound => {
+            app.status = format!("Could not read STREENOTE server clipboard: {error}");
+            return;
+        }
+        Err(_) => {}
+    }
+
+    match read_system_clipboard() {
+        Ok(text) if text.is_empty() => {
+            app.status = "Client OSC 52 read was unavailable and the server clipboard is empty.".to_string();
+        }
+        Ok(text) => paste_clipboard_text(app, &text, "server OS clipboard"),
+        Err(error) => {
+            app.status = format!(
+                "Could not read clipboard. Enable OSC 52 clipboard reads in your terminal, or use its paste shortcut for bracketed paste. {error}"
+            );
         }
     }
 }
 
 fn copy_to_terminal_clipboard(text: &str) -> io::Result<()> {
+    // Keep a private copy on this host for later pastes and other STREENOTE
+    // sessions, then send OSC 52 outward so the attached client clipboard updates.
+    write_server_clipboard_cache(text)?;
     let encoded = base64_encode(text.as_bytes());
     let mut output = stdout();
-    // OSC 52 is supported by many modern terminal emulators, including over SSH.
     write!(output, "\x1b]52;c;{encoded}\x07")?;
     output.flush()
 }
@@ -1288,6 +1481,43 @@ fn base64_encode(bytes: &[u8]) -> String {
         }
     }
     encoded
+}
+
+fn base64_decode(encoded: &[u8]) -> Option<Vec<u8>> {
+    fn value(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+
+    let mut decoded = Vec::with_capacity(encoded.len().saturating_mul(3) / 4);
+    let mut accumulator = 0u32;
+    let mut bits = 0u8;
+
+    for byte in encoded.iter().copied() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        if byte == b'=' {
+            break;
+        }
+        accumulator = (accumulator << 6) | u32::from(value(byte)?);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            decoded.push((accumulator >> bits) as u8);
+            accumulator &= (1u32 << bits).saturating_sub(1);
+            if decoded.len() > MAX_CLIPBOARD_BYTES {
+                return None;
+            }
+        }
+    }
+    Some(decoded)
 }
 
 fn default_journal_path() -> PathBuf {
@@ -1411,15 +1641,57 @@ mod ssh_dispatch_tests {
 
 #[cfg(test)]
 mod clipboard_tests {
-    use super::base64_encode;
+    use super::{
+        base64_decode, base64_encode, parse_osc52_response, read_clipboard_cache_from,
+        write_clipboard_cache_to, MAX_CLIPBOARD_BYTES,
+    };
+    use std::{
+        env, fs,
+        path::PathBuf,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    static NEXT_TEST_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_path() -> PathBuf {
+        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        env::temp_dir().join(format!("streenote-clipboard-{}-{id}.txt", std::process::id()))
+    }
 
     #[test]
-    fn base64_encodes_empty_ascii_and_utf8_text() {
-        assert_eq!(base64_encode(b""), "");
-        assert_eq!(base64_encode(b"f"), "Zg==");
-        assert_eq!(base64_encode(b"fo"), "Zm8=");
-        assert_eq!(base64_encode(b"foo"), "Zm9v");
-        assert_eq!(base64_encode("café".as_bytes()), "Y2Fmw6k=");
+    fn base64_encodes_and_decodes_empty_ascii_and_utf8_text() {
+        for text in ["", "f", "fo", "foo", "café", "SSH → STREENOTE"] {
+            let encoded = base64_encode(text.as_bytes());
+            assert_eq!(base64_decode(encoded.as_bytes()).unwrap(), text.as_bytes());
+        }
+    }
+
+    #[test]
+    fn parses_osc52_bel_and_st_responses() {
+        let bel = b"\\x1b]52;c;SGVsbG8=\\x07";
+        let st = b"\\x1b]52;c;U1NIIHRvIFN0cmVlTm90ZQ==\\x1b\\\\";
+        assert_eq!(parse_osc52_response(bel).as_deref(), Some("Hello"));
+        assert_eq!(parse_osc52_response(st).as_deref(), Some("SSH to StreeNote"));
+        assert!(parse_osc52_response(b"\\x1b]52;p;SGVsbG8=\\x07").is_none());
+    }
+
+    #[test]
+    fn server_clipboard_cache_round_trips_atomically() {
+        let path = test_path();
+        write_clipboard_cache_to(&path, "copied on server A").expect("write cache");
+        assert_eq!(
+            read_clipboard_cache_from(&path).expect("read cache"),
+            "copied on server A"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn server_clipboard_cache_rejects_oversized_content() {
+        let path = test_path();
+        let content = "x".repeat(MAX_CLIPBOARD_BYTES + 1);
+        assert!(write_clipboard_cache_to(&path, &content).is_err());
+        assert!(!path.exists());
     }
 }
 
