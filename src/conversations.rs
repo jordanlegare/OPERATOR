@@ -34,23 +34,51 @@ pub fn is_hermes_event(kind: EntryKind) -> bool {
 pub fn build_threads(entries: &[Entry]) -> Vec<ConversationThread> {
     let mut threads: Vec<ConversationThread> = Vec::new();
     let mut positions: HashMap<String, usize> = HashMap::new();
-    let mut legacy_active: Option<String> = None;
+    // Hooks can omit session_id or turn_id on individual event types. Keep
+    // those events attached to the most recently active conversation, and
+    // remember turn-to-thread associations when a turn-only event arrives.
+    let mut active_thread: Option<String> = None;
+    let mut turn_threads: HashMap<String, String> = HashMap::new();
 
     for (index, entry) in entries.iter().enumerate() {
         if !is_hermes_event(entry.kind) {
             continue;
         }
 
-        let key = if let Some(session_id) = entry.conversation_id.as_deref().filter(|id| !id.is_empty()) {
-            format!("session:{session_id}")
-        } else if let Some(turn_id) = entry.turn_id.as_deref().filter(|id| !id.is_empty()) {
-            format!("turn:{turn_id}")
-        } else if entry.kind == EntryKind::HermesUser {
-            let key = format!("legacy:{}", index + 1);
-            legacy_active = Some(key.clone());
+        let session_id = entry.conversation_id.as_deref().filter(|id| !id.is_empty());
+        let turn_id = entry.turn_id.as_deref().filter(|id| !id.is_empty());
+
+        let key = if let Some(session_id) = session_id {
+            let key = format!("session:{session_id}");
+            if let Some(turn_id) = turn_id {
+                turn_threads.insert(turn_id.to_string(), key.clone());
+            }
+            active_thread = Some(key.clone());
             key
+        } else if entry.kind == EntryKind::HermesUser {
+            let key = turn_id
+                .map(|turn_id| format!("turn:{turn_id}"))
+                .unwrap_or_else(|| format!("legacy:{}", index + 1));
+            if let Some(turn_id) = turn_id {
+                turn_threads.insert(turn_id.to_string(), key.clone());
+            }
+            active_thread = Some(key.clone());
+            key
+        } else if let Some(turn_id) = turn_id {
+            if let Some(key) = turn_threads.get(turn_id).cloned() {
+                active_thread = Some(key.clone());
+                key
+            } else if let Some(key) = active_thread.clone() {
+                turn_threads.insert(turn_id.to_string(), key.clone());
+                key
+            } else {
+                let key = format!("turn:{turn_id}");
+                turn_threads.insert(turn_id.to_string(), key.clone());
+                active_thread = Some(key.clone());
+                key
+            }
         } else {
-            legacy_active
+            active_thread
                 .clone()
                 .unwrap_or_else(|| format!("legacy-orphan:{}", index + 1))
         };
@@ -267,6 +295,32 @@ mod tests {
         assert_eq!(threads[0].tool_call_count, 1);
         assert_eq!(threads[1].id, "session:session-b");
         assert_eq!(thread_for_entry(&entries, 3).as_deref(), Some("session:session-a"));
+    }
+
+    #[test]
+    fn turn_only_tool_and_assistant_events_stay_with_session_prompt() {
+        let prompt = event(EntryKind::HermesUser, "check the headlines", Some("session-a"), Some("turn-1"));
+        let tool_call = event(EntryKind::HermesToolCall, "search", None, Some("turn-1"));
+        let tool_result = event(EntryKind::HermesToolResult, "results", None, Some("turn-1"));
+        let assistant = event(EntryKind::HermesAssistant, "Here is the final answer.", None, Some("turn-1"));
+
+        let threads = build_threads(&[prompt, tool_call, tool_result, assistant]);
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, "session:session-a");
+        assert_eq!(threads[0].entries, vec![0, 1, 2, 3]);
+        assert!(threads[0].title.contains("check the headlines"));
+    }
+
+    #[test]
+    fn events_without_identifiers_inherit_the_active_session_thread() {
+        let prompt = event(EntryKind::HermesUser, "check the headlines", Some("session-a"), Some("turn-1"));
+        let tool_call = event(EntryKind::HermesToolCall, "search", None, None);
+        let assistant = event(EntryKind::HermesAssistant, "Here is the final answer.", None, None);
+
+        let threads = build_threads(&[prompt, tool_call, assistant]);
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, "session:session-a");
+        assert_eq!(threads[0].entries, vec![0, 1, 2]);
     }
 
     #[test]
