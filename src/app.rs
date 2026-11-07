@@ -956,38 +956,19 @@ impl App {
 
     /// Open the full body of the selected Hermes message or tool event.
     pub fn open_hermes_message(&mut self) {
-        let is_hermes_event = |index: usize| {
-            self.journal.entries.get(index).is_some_and(|entry| {
-                matches!(
-                    entry.kind,
-                    EntryKind::HermesUser
-                        | EntryKind::HermesAssistant
-                        | EntryKind::HermesToolCall
-                        | EntryKind::HermesToolResult
-                )
-            })
-        };
         let candidate = self
             .selected_row
-            .filter(|index| is_hermes_event(*index))
+            .filter(|index| is_hermes_event_at(*index))
             .or_else(|| {
                 self.active_match
                     .and_then(|match_index| self.matches.get(match_index).copied())
-                    .filter(|index| is_hermes_event(*index))
+                    .filter(|index| is_hermes_event_at(*index))
             })
             .or_else(|| {
                 self.journal
                     .entries
                     .iter()
-                    .rposition(|entry| {
-                        matches!(
-                            entry.kind,
-                            EntryKind::HermesUser
-                                | EntryKind::HermesAssistant
-                                | EntryKind::HermesToolCall
-                                | EntryKind::HermesToolResult
-                        )
-                    })
+                    .rposition(|entry| is_hermes_event(entry.kind))
             });
 
         let Some(index) = candidate else {
@@ -1557,8 +1538,8 @@ mod tests {
             app.selected_row = Some(index);
 
             assert!(app.open_selected_hermes_message());
-            assert_eq!(app.message_view_index, Some(index));
-            app.close_hermes_message();
+            assert!(matches!(app.conversation_view, Some(ConversationView::Thread { .. })));
+            app.close_conversation_view();
         }
 
         let note_index = app.journal.entries.len();
@@ -1567,7 +1548,7 @@ mod tests {
             .expect("append note");
         app.selected_row = Some(note_index);
         assert!(!app.open_selected_hermes_message());
-        assert_eq!(app.message_view_index, None);
+        assert_eq!(app.conversation_view, None);
 
         app.selected_row = None;
         assert!(!app.open_selected_hermes_message());
