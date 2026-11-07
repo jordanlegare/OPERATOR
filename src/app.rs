@@ -1515,7 +1515,7 @@ fn looks_like_secret_prompt(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{looks_like_secret_prompt, App, InputMode};
+    use super::{looks_like_secret_prompt, App, ConversationView, InputMode};
     use crate::storage::Journal;
     use std::{
         env, fs,
