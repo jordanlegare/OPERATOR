@@ -22,3 +22,15 @@ hooks:
   post_tool_call:
     - command: "/home/jordan/.hermes/hooks/streenote-capture"
       timeout: 3
+
+  on_stream_start:
+    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+      timeout: 3
+
+  on_stream_delta:
+    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+      timeout: 3
+
+  on_stream_end:
+    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+      timeout: 3
