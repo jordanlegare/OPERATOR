@@ -2351,6 +2351,41 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+    #[test]
+    fn search_and_n_previous_navigate_select_the_matching_transcript_row() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        for text in [
+            "needle in the first note",
+            "an unrelated note",
+            "another unrelated note",
+            "needle in the latest note",
+        ] {
+            app.journal
+                .append(Entry::with_kind(EntryKind::Note, text.to_string()))
+                .expect("append search fixture");
+        }
+        app.feed_viewport_height = 2;
+
+        app.search("needle");
+        assert_eq!(app.active_match, Some(1));
+        assert_eq!(app.selected_row, Some(3));
+        assert!(app.is_active_match(3));
+
+        app.next_match();
+        assert_eq!(app.active_match, Some(0));
+        assert_eq!(app.selected_row, Some(0));
+        assert!(app.is_active_match(0));
+
+        app.previous_match();
+        assert_eq!(app.active_match, Some(1));
+        assert_eq!(app.selected_row, Some(3));
+        assert!(app.is_active_match(3));
+
+        let _ = fs::remove_file(path);
+    }
+
 }
 
 
