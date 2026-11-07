@@ -359,7 +359,7 @@ fn access_notice_policy(
     );
     rows.push(Line::from(Span::styled("", body_style)));
 
-    let policy_rows: Vec<(&str, Style)> = vec![    let policy_rows: Vec<(&str, Style)> = vec![
+    let policy_rows: Vec<(&str, Style)> = vec![
         ("", body_style),
         ("1. AUTHORIZATION, IDENTITY, AND SCOPE", warning_style),
         ("Access is permitted only to an individual who has received express authorization", body_style),
@@ -2374,11 +2374,22 @@ mod access_splash_tests {
         let first = restricted_access_splash(80, red, khaki, olive, 0);
         let later = restricted_access_splash(80, red, khaki, olive, 4);
 
-        let first_text: Vec<_> = first.iter().filter(|line| line.spans.iter().any(|span| span.content.contains('█')))
-            .map(line_text).collect();
-        let later_text: Vec<_> = later.iter().filter(|line| line.spans.iter().any(|span| span.content.contains('█')))
-            .map(line_text).collect();
-        assert_eq!(first_text, later_text, "red letter silhouettes remain stationary");
+        let letter_mask = |rows: &[ratatui::text::Line<'static>]| {
+            rows.iter()
+                .filter(|line| line.spans.iter().any(|span| span.content.contains('█')))
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, span)| {
+                            (span.style.fg == Some(red) && span.content.contains('█'))
+                                .then_some(index)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(letter_mask(&first), letter_mask(&later), "red letter silhouettes remain stationary");
 
         let first_backgrounds: Vec<_> = first.iter().filter(|line| line.spans.iter().any(|span| span.content.contains('█')))
             .flat_map(|line| line.spans.iter().filter_map(|span| span.style.bg)).collect();
