@@ -337,7 +337,7 @@ fn access_notice_policy(
     blue: Color,
     magenta: Color,
     width: u16,
-) -> Vec<(String, Style)> {
+) -> Vec<Line<'static>> {
     let critical_style = Style::default()
         .fg(critical)
         .add_modifier(Modifier::BOLD);
@@ -347,7 +347,7 @@ fn access_notice_policy(
     let body_style = Style::default().fg(normal).add_modifier(Modifier::BOLD);
 
     let mut rows = restricted_access_splash(width, critical, warning, accent, blue, magenta);
-    rows.push((String::new(), body_style));
+    rows.push(Line::from(Span::styled("", body_style)));
 
     let policy_rows: Vec<(&str, Style)> = vec![
         ("", body_style),
@@ -512,7 +512,7 @@ fn access_notice_policy(
     rows.extend(
         policy_rows
             .into_iter()
-            .map(|(text, style)| (text.to_string(), style)),
+            .map(|(text, style)| Line::from(Span::styled(text, style))),
     );
     rows
 }
@@ -522,18 +522,17 @@ fn access_notice_policy(
 /// handling deterministic inside the alternate-screen TUI.
 fn restricted_access_splash(
     width: u16,
-    critical: Color,
+    _critical: Color,
     warning: Color,
     accent: Color,
     blue: Color,
     magenta: Color,
-) -> Vec<(String, Style)> {
+) -> Vec<Line<'static>> {
     let frame_width = usize::from(width).clamp(24, 76);
     let accent_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
     let blue_style = Style::default().fg(blue).add_modifier(Modifier::BOLD);
     let magenta_style = Style::default().fg(magenta).add_modifier(Modifier::BOLD);
     let warning_style = Style::default().fg(warning).add_modifier(Modifier::BOLD);
-    let critical_style = Style::default().fg(critical).add_modifier(Modifier::BOLD);
 
     let header = if frame_width >= 52 {
         "S T R E E N O T E  //  B B S  N O D E  0 0"
@@ -541,41 +540,47 @@ fn restricted_access_splash(
         "STREENOTE // NODE 00"
     };
     let mut rows = vec![
-        (bbs_rule(frame_width, '╔', '╗'), accent_style),
-        (centered_bbs_line(header, frame_width), blue_style),
-        (bbs_rule(frame_width, '╠', '╣'), magenta_style),
+        Line::from(Span::styled(bbs_rule(frame_width, '╔', '╗'), accent_style)),
+        Line::from(Span::styled(centered_bbs_line(header, frame_width), blue_style)),
+        Line::from(Span::styled(bbs_rule(frame_width, '╠', '╣'), magenta_style)),
     ];
 
-    // The bitmap masthead fits comfortably on standard SSH terminal widths.
-    // On narrow terminals, use a compact two-line title rather than wrapping
-    // the art into unreadable fragments.
     if frame_width >= 66 {
-        rows.push((
+        rows.push(Line::from(Span::styled(
             centered_bbs_line("SECURE ACCESS GATEWAY  ·  CONNECTION ESTABLISHED", frame_width),
             accent_style,
-        ));
-        for (index, line) in large_notice_word("RESTRICTED").into_iter().enumerate() {
-            let color = match index % 4 {
-                0 => accent_style,
-                1 => blue_style,
-                2 => magenta_style,
-                _ => critical_style,
-            };
-            rows.push((format!("║  {line}  ║"), color));
+        )));
+
+        // Each glyph pixel and each negative-space cell receives its own
+        // foreground/background pair, creating a full-width camouflage mosaic.
+        let canvas_width = frame_width.saturating_sub(4);
+        let mut art_row = 0usize;
+        for glyph_row in large_notice_word("RESTRICTED") {
+            rows.push(camouflage_art_line(
+                &glyph_row,
+                canvas_width,
+                art_row,
+                17,
+                accent,
+            ));
+            art_row += 1;
         }
-        for (index, line) in large_notice_word("ACCESS").into_iter().enumerate() {
-            let color = match index % 3 {
-                0 => warning_style,
-                1 => critical_style,
-                _ => magenta_style,
-            };
-            rows.push((format!("║  {line}  ║"), color));
+        art_row += 1;
+        for glyph_row in large_notice_word("ACCESS") {
+            rows.push(camouflage_art_line(
+                &glyph_row,
+                canvas_width,
+                art_row,
+                41,
+                accent,
+            ));
+            art_row += 1;
         }
     } else {
-        rows.push((
+        rows.push(Line::from(Span::styled(
             centered_bbs_line("RESTRICTED ACCESS", frame_width),
-            critical_style,
-        ));
+            warning_style,
+        )));
     }
 
     let authorization = if frame_width >= 30 {
@@ -583,15 +588,112 @@ fn restricted_access_splash(
     } else {
         "AUTHORIZED ONLY"
     };
-    rows.push((centered_bbs_line(authorization, frame_width), warning_style));
+    rows.push(Line::from(Span::styled(
+        centered_bbs_line(authorization, frame_width),
+        warning_style,
+    )));
     if frame_width >= 52 {
-        rows.push((
+        rows.push(Line::from(Span::styled(
             centered_bbs_line("SESSION MONITORED  //  READ OPERATOR TERMS", frame_width),
             magenta_style,
+        )));
+    }
+    rows.push(Line::from(Span::styled(
+        bbs_rule(frame_width, '╚', '╝'),
+        accent_style,
+    )));
+    rows
+}
+
+/// Fill the entire RESTRICTED / ACCESS art canvas with an irregular woodland
+/// camouflage pattern. Letter pixels use lighter field colours; the surrounding
+/// negative space remains textured with darker olive, green, and earth tones.
+fn camouflage_art_line(
+    glyph_row: &str,
+    canvas_width: usize,
+    y: usize,
+    seed: usize,
+    border_color: Color,
+) -> Line<'static> {
+    let dark_palette = [
+        Color::Rgb(31, 43, 29),   // deep field green
+        Color::Rgb(48, 59, 34),   // olive
+        Color::Rgb(64, 57, 37),   // earth brown
+        Color::Rgb(41, 52, 36),   // woodland green
+        Color::Rgb(72, 61, 41),   // muted soil
+        Color::Rgb(37, 42, 31),   // shadow
+    ];
+    let mid_palette = [
+        Color::Rgb(76, 91, 49),
+        Color::Rgb(91, 104, 57),
+        Color::Rgb(111, 99, 66),
+        Color::Rgb(66, 83, 52),
+        Color::Rgb(120, 104, 70),
+        Color::Rgb(83, 88, 58),
+    ];
+    let letter_palette = [
+        Color::Rgb(151, 161, 91), // muted olive
+        Color::Rgb(130, 148, 78), // field green
+        Color::Rgb(176, 155, 106), // khaki
+        Color::Rgb(111, 133, 79), // moss
+        Color::Rgb(160, 139, 91), // tan
+        Color::Rgb(135, 151, 102), // sage
+    ];
+
+    let glyph: Vec<char> = glyph_row.chars().collect();
+    let left_pad = canvas_width.saturating_sub(glyph.len()) / 2;
+    let mut spans = Vec::with_capacity(canvas_width + 2);
+    let border_style = Style::default()
+        .fg(border_color)
+        .bg(dark_palette[0])
+        .add_modifier(Modifier::BOLD);
+    spans.push(Span::styled("║  ".to_string(), border_style));
+
+    for x in 0..canvas_width {
+        let glyph_x = x as isize - left_pad as isize;
+        let is_letter = glyph_x >= 0
+            && glyph.get(glyph_x as usize).is_some_and(|character| *character == '█');
+
+        let background_index = camouflage_index(x, y, seed, dark_palette.len());
+        let background = dark_palette[background_index];
+
+        let (character, foreground) = if is_letter {
+            let index = camouflage_index(x + 3, y + 5, seed.wrapping_add(1), letter_palette.len());
+            ('█', letter_palette[index])
+        } else {
+            let index = camouflage_index(x + 7, y + 2, seed.wrapping_add(2), mid_palette.len());
+            let texture = [' ', '░', ' ', '▒', '·', ' ', '▓'];
+            (texture[index % texture.len()], mid_palette[index])
+        };
+
+        spans.push(Span::styled(
+            character.to_string(),
+            Style::default()
+                .fg(foreground)
+                .bg(background)
+                .add_modifier(Modifier::BOLD),
         ));
     }
-    rows.push((bbs_rule(frame_width, '╚', '╝'), accent_style));
-    rows
+
+    spans.push(Span::styled("  ║".to_string(), border_style));
+    Line::from(spans)
+}
+
+/// Deterministic low-frequency noise creates irregular camouflage patches
+/// while remaining stable across redraws and independent of terminal colour mode.
+fn camouflage_index(x: usize, y: usize, seed: usize, palette_len: usize) -> usize {
+    let shifted_x = x.saturating_add((y.wrapping_mul(7).wrapping_add(seed)) % 5);
+    let shifted_y = y.saturating_add((x.wrapping_mul(3).wrapping_add(seed)) % 3);
+    let region_x = shifted_x / 4;
+    let region_y = shifted_y / 2;
+
+    let mut noise = region_x.wrapping_mul(0x9E37_79B1)
+        ^ region_y.wrapping_mul(0x85EB_CA77)
+        ^ seed.wrapping_mul(0xC2B2_AE3D);
+    noise ^= noise >> 16;
+    noise = noise.wrapping_mul(0x7FEB_352D);
+    noise ^= noise >> 15;
+    noise % palette_len.max(1)
 }
 
 fn bbs_rule(width: usize, left: char, right: char) -> String {
@@ -641,29 +743,37 @@ fn large_notice_word(word: &str) -> Vec<String> {
 
 /// Wraps policy paragraphs to terminal width without discarding any wording.
 fn wrap_access_notice(
-    rows: Vec<(String, Style)>,
+    rows: Vec<Line<'static>>,
     width: u16,
 ) -> Vec<Line<'static>> {
     let max_width = usize::from(width.max(1));
     let mut wrapped = Vec::new();
 
-    for (row, style) in rows {
-        if row.trim().is_empty() {
-            wrapped.push(Line::from(""));
-            wrapped.push(Line::from(""));
+    for row in rows {
+        // Multi-span rows are the per-cell camouflage mosaic. Keep their
+        // individual foreground/background colours intact and never word-wrap.
+        if row.spans.len() > 1 {
+            wrapped.push(row);
             continue;
         }
 
-        // Preserve literal spaces in the pixel-art masthead; they form the glyphs.
-        if row.contains('█') {
-            wrapped.push(Line::from(Span::styled(row, style)));
+        let Some(span) = row.spans.first() else {
+            wrapped.push(Line::from(""));
+            continue;
+        };
+        let row_text = span.content.to_string();
+        let style = span.style;
+
+        if row_text.trim().is_empty() {
+            wrapped.push(Line::from(""));
+            wrapped.push(Line::from(""));
             continue;
         }
 
         let mut current = String::new();
         let mut current_width = 0usize;
 
-        for word in row.split_whitespace() {
+        for word in row_text.split_whitespace() {
             let word_width = UnicodeWidthStr::width(word);
             let separator_width = usize::from(!current.is_empty());
 
@@ -708,7 +818,7 @@ fn wrap_access_notice(
 
 /// Splits wrapped policy lines into pages sized to the current modal viewport.
 fn paginate_access_notice(
-    rows: Vec<(String, Style)>,
+    rows: Vec<Line<'static>>,
     width: u16,
     page_height: usize,
 ) -> Vec<Vec<Line<'static>>> {
@@ -2205,23 +2315,54 @@ mod access_splash_tests {
     use super::{restricted_access_splash, Color};
     use unicode_width::UnicodeWidthStr;
 
+    fn line_text(line: &ratatui::text::Line<'static>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
+
     #[test]
-    fn wide_terminal_gets_multicolour_block_letter_bbs_splash() {
+    fn wide_terminal_gets_full_multicolour_camouflage_letter_art() {
         let accent = Color::Rgb(40, 235, 255);
         let blue = Color::Rgb(85, 145, 255);
         let magenta = Color::Rgb(245, 90, 225);
         let warning = Color::Rgb(255, 205, 80);
-        let critical = Color::Rgb(255, 75, 125);
         let rows = restricted_access_splash(
-            80, critical, warning, accent, blue, magenta,
+            80,
+            Color::Red,
+            warning,
+            accent,
+            blue,
+            magenta,
         );
 
-        assert!(rows.iter().any(|(line, _)| line.contains("S T R E E N O T E")));
-        assert!(rows.iter().any(|(line, _)| line.contains('█')));
-        assert!(rows.iter().any(|(line, _)| line.contains("AUTHORIZED PERSONNEL ONLY")));
-        for color in [accent, blue, magenta, warning, critical] {
-            assert!(rows.iter().any(|(_, style)| style.fg == Some(color)));
+        assert!(rows.iter().any(|line| line_text(line).contains("S T R E E N O T E")));
+        assert!(rows.iter().any(|line| line_text(line).contains('█')));
+        assert!(rows.iter().any(|line| line_text(line).contains("AUTHORIZED PERSONNEL ONLY")));
+
+        let art_rows: Vec<_> = rows
+            .iter()
+            .filter(|line| line_text(line).contains('█'))
+            .collect();
+        assert_eq!(art_rows.len(), 14, "both words should retain all seven bitmap rows");
+
+        // Every cell of every art row has a background fill, including spaces
+        // around the letter pixels, and the lettering uses multiple camo colours.
+        for row in &art_rows {
+            assert!(row.spans.iter().all(|span| span.style.bg.is_some()));
+            assert!(row.spans.iter().any(|span| span.content.contains('█')));
         }
+
+        let foregrounds: std::collections::HashSet<_> = art_rows
+            .iter()
+            .flat_map(|row| row.spans.iter().filter_map(|span| span.style.fg))
+            .collect();
+        assert!(foregrounds.len() >= 5, "camouflage should use multiple earth tones");
+        assert!(art_rows
+            .iter()
+            .flat_map(|row| row.spans.iter())
+            .any(|span| span.style.bg == Some(Color::Rgb(31, 43, 29))));
     }
 
     #[test]
@@ -2235,8 +2376,8 @@ mod access_splash_tests {
             Color::Magenta,
         );
 
-        assert!(!rows.iter().any(|(line, _)| line.contains('█')));
-        assert!(rows.iter().any(|(line, _)| line.contains("RESTRICTED ACCESS")));
-        assert!(rows.iter().all(|(line, _)| UnicodeWidthStr::width(line.as_str()) <= 24));
+        assert!(!rows.iter().any(|line| line_text(line).contains('█')));
+        assert!(rows.iter().any(|line| line_text(line).contains("RESTRICTED ACCESS")));
+        assert!(rows.iter().all(|line| UnicodeWidthStr::width(line_text(line).as_str()) <= 24));
     }
 }
