@@ -181,9 +181,8 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
     let entries = entry_indices.iter()
         .filter_map(|index| app.journal.entries.get(*index).map(|entry| (*index, entry)))
         .collect::<Vec<_>>();
-    // Collapse every stream delta for a prompt into one continuous text block,
-    // including deltas from separate tool/model iterations. A captured stream
-    // replaces the duplicate final assistant event for that same prompt.
+    // Collapse stream deltas for turns without tool calls. For tool-using
+    // turns, hide intermediate deltas and keep the final assistant message.
     let collapsed_streams = collapse_live_streams(&entries);
     let replaced_assistant_entries = &collapsed_streams.replaced_assistant_indices;
 
