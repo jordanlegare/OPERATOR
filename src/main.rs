@@ -1332,7 +1332,8 @@ fn handle_key(
                 KeyCode::PageDown => app.move_conversation_selection(8),
                 KeyCode::Home => app.conversation_list_selected = 0,
                 KeyCode::End => {
-                    app.conversation_list_selected = app.conversation_threads().len().saturating_sub(1);
+                    let last = app.conversation_threads().len().saturating_sub(1);
+                    app.conversation_list_selected = last;
                 }
                 KeyCode::Enter => app.open_selected_conversation(),
                 _ => {}
