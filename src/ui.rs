@@ -125,7 +125,7 @@ fn draw_conversation_list(frame: &mut Frame, app: &App, theme: Theme) {
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.primary))
+        .border_style(Style::default().fg(Color::LightYellow))
         .title(Span::styled(
             format!(" HERMES CONVERSATIONS · {} THREAD(S) · ENTER EXPANDS · ESC CLOSES ", threads.len()),
             Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
@@ -242,7 +242,7 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.primary))
+        .border_style(Style::default().fg(Color::LightYellow))
         .title(Span::styled(
             format!(" HERMES THREAD {short_id} · {turn_count} TURN(S) · {tool_call_count} TOOL(S) · {state} "),
             Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
