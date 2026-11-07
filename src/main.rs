@@ -556,7 +556,7 @@ fn restricted_access_splash(
         let canvas_width = frame_width.saturating_sub(6);
         let mut art_row = 0usize;
 
-        for glyph_row in large_notice_word("RESTRICTED") {
+        for glyph_row in compact_notice_word("RESTRICTED") {
             rows.push(camouflage_art_line(
                 &glyph_row,
                 canvas_width,
@@ -568,7 +568,7 @@ fn restricted_access_splash(
             ));
             art_row += 1;
         }
-        for glyph_row in large_notice_word("ACCESS") {
+        for glyph_row in compact_notice_word("ACCESS") {
             rows.push(camouflage_art_line(
                 &glyph_row,
                 canvas_width,
@@ -725,6 +725,17 @@ fn centered_bbs_line(text: &str, width: usize) -> String {
     let left = padding / 2;
     let right = padding.saturating_sub(left);
     format!("║{}{}{}║", " ".repeat(left), text, " ".repeat(right))
+}
+
+/// Reduce the bitmap to five deliberate horizontal bands so both words,
+/// the authorization line, and the complete frame fit together on a typical
+/// 20-row SSH terminal window.
+fn compact_notice_word(word: &str) -> Vec<String> {
+    large_notice_word(word)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, row)| matches!(index, 0 | 1 | 3 | 5 | 6).then_some(row))
+        .collect()
 }
 
 /// Render a word in a 5x7 block-letter bitmap. This gives the terminal
@@ -2355,7 +2366,7 @@ mod access_splash_tests {
         let art_rows: Vec<_> = rows.iter().filter(|line| {
             line.spans.iter().any(|span| span.style.fg == Some(red) && span.content.contains('█'))
         }).collect();
-        assert_eq!(art_rows.len(), 14);
+        assert_eq!(art_rows.len(), 10, "five bitmap bands per word");
         for row in &art_rows {
             assert!(row.spans.iter().all(|span| span.style.bg.is_some()));
             assert_eq!(UnicodeWidthStr::width(line_text(row).as_str()), 76);
