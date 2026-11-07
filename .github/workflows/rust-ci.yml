@@ -22,6 +22,7 @@ jobs:
         run: |
           cargo test conversations::tests
           cargo test hermes_stream_delta_tests
+          cargo test hermes_bridge::tool_event_tests
       - name: Smoke-test Hermes shell hook
         run: |
           python3 -m py_compile contrib/hermes/streenote-capture.py
@@ -30,11 +31,11 @@ jobs:
             | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
           printf '%s' '{"hook_event_name":"post_llm_call","session_id":"ci-session","extra":{"turn_id":"ci-turn","assistant_response":"captured answer"}}' \
             | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
-          printf '%s' '{"hook_event_name":"on_stream_start","session_id":"ci-session","extra":{"turn_id":"ci-turn","iteration":0}}' \\
+          printf '%s' '{"hook_event_name":"on_stream_start","session_id":"ci-session","extra":{"turn_id":"ci-turn","iteration":0}}' \
             | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
-          printf '%s' '{"hook_event_name":"on_stream_delta","session_id":"ci-session","extra":{"turn_id":"ci-turn","iteration":0,"kind":"text","delta":" "}}' \\
+          printf '%s' '{"hook_event_name":"on_stream_delta","session_id":"ci-session","extra":{"turn_id":"ci-turn","iteration":0,"kind":"text","delta":" "}}' \
             | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
-          printf '%s' '{"hook_event_name":"on_stream_end","session_id":"ci-session","extra":{"turn_id":"ci-turn","iteration":0,"finished":true}}' \\
+          printf '%s' '{"hook_event_name":"on_stream_end","session_id":"ci-session","extra":{"turn_id":"ci-turn","iteration":0,"finished":true}}' \
             | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
           python3 - "$inbox" <<'PY'
           import json
