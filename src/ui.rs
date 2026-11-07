@@ -554,8 +554,6 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         Span::styled("complete  ", Style::default().fg(theme.muted)),
         Span::styled("Ctrl+W ", Style::default().fg(theme.primary)),
         Span::styled(if app.wrap_transcript { "wrap on  " } else { "wrap off  " }, Style::default().fg(theme.muted)),
-        Span::styled("Ctrl+L ", Style::default().fg(theme.primary)),
-        Span::styled("clear input  ", Style::default().fg(theme.muted)),
         Span::styled("Ctrl+P/N ", Style::default().fg(theme.primary)),
         Span::styled("history  ", Style::default().fg(theme.muted)),
         Span::styled("/search ", Style::default().fg(theme.primary)),
