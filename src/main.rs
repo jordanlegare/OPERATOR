@@ -917,6 +917,15 @@ fn run(
                 }
             }
             Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::Down(MouseButton::Right)
+                    if app.message_view_index.is_none()
+                        && mouse.column >= app.input_area.x
+                        && mouse.column < app.input_area.x.saturating_add(app.input_area.width)
+                        && mouse.row >= app.input_area.y
+                        && mouse.row < app.input_area.y.saturating_add(app.input_area.height) =>
+                {
+                    paste_from_system_clipboard(app);
+                }
                 MouseEventKind::Down(MouseButton::Left) => {
                     app.begin_transcript_selection(mouse.column, mouse.row);
                 }
@@ -934,7 +943,11 @@ fn run(
                 }
                 _ => {}
             },
-            Event::Paste(text) => app.paste(&text),
+            Event::Paste(text) => {
+                let chars = text.chars().count();
+                app.paste(&text);
+                app.status = format!("Pasted {chars} characters from terminal clipboard.");
+            },
             Event::Resize(cols, rows) => {
                 if let Some(session) = shell.as_ref() {
                     let shell_rows = rows.saturating_sub(12).max(8);
@@ -1107,6 +1120,7 @@ fn handle_key(
                     app.status = "Sent Ctrl+D (end-of-input) to the Debian shell.".to_string();
                 }
             }
+            KeyCode::Char('v') => paste_from_system_clipboard(app),
             KeyCode::Char('s') => app.save(),
             KeyCode::Char('p') => app.history_previous(),
             KeyCode::Char('n') => app.history_next(),
@@ -1184,6 +1198,62 @@ fn drain_shell(
         app.record_system(format!("Debian shell exited with status {exit_code}. Switched to Notes mode."));
     }
     Ok(())
+}
+
+/// Read text from the system clipboard using whichever common helper is installed.
+fn read_system_clipboard() -> Result<String, String> {
+    let commands: &[(&str, &[&str])] = &[
+        ("wl-paste", &["--no-newline"]),
+        ("xclip", &["-selection", "clipboard", "-out"]),
+        ("xsel", &["--clipboard", "--output"]),
+        ("pbpaste", &[]),
+        ("powershell.exe", &["-NoProfile", "-Command", "Get-Clipboard"]),
+    ];
+    let mut failures = Vec::new();
+
+    for (program, args) in commands {
+        match Command::new(program)
+            .args(*args)
+            .stdin(std::process::Stdio::null())
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                let text = String::from_utf8_lossy(&output.stdout)
+                    .trim_end_matches(|ch| ch == '\r' || ch == '\n')
+                    .to_string();
+                return Ok(text);
+            }
+            Ok(output) => failures.push(format!("{program} exited with {}", output.status)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => failures.push(format!("{program}: {error}")),
+        }
+    }
+
+    let detail = if failures.is_empty() {
+        "No clipboard reader is installed (tried wl-paste, xclip, xsel, pbpaste, powershell.exe)."
+    } else {
+        "Clipboard readers were found but none could read the clipboard."
+    };
+    Err(format!(
+        "{detail} In SSH sessions, use your terminal emulator's paste shortcut so it sends a bracketed-paste event."
+    ))
+}
+
+/// Paste the system clipboard into the input at the current cursor position.
+fn paste_from_system_clipboard(app: &mut App) {
+    match read_system_clipboard() {
+        Ok(text) if text.is_empty() => {
+            app.status = "Clipboard is empty.".to_string();
+        }
+        Ok(text) => {
+            let chars = text.chars().count();
+            app.paste(&text);
+            app.status = format!("Pasted {chars} characters from clipboard.");
+        }
+        Err(error) => {
+            app.status = error;
+        }
+    }
 }
 
 fn copy_to_terminal_clipboard(text: &str) -> io::Result<()> {

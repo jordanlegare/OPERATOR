@@ -61,6 +61,8 @@ pub struct App {
     pub feed_viewport_height: usize,
     /// Inner transcript viewport in terminal screen coordinates.
     pub feed_area: Rect,
+    /// Input panel bounds; right-clicking here pastes clipboard contents.
+    pub input_area: Rect,
     selection: Option<TranscriptSelection>,
     selection_dragging: bool,
     pub follow_tail: bool,
@@ -128,6 +130,7 @@ impl App {
             selected_row: None,
             feed_viewport_height: 1,
             feed_area: Rect::default(),
+            input_area: Rect::default(),
             selection: None,
             selection_dragging: false,
             follow_tail: true,
@@ -566,7 +569,10 @@ impl App {
     }
 
     pub fn paste(&mut self, value: &str) {
-        let clean = sanitize_single_line(value);
+        // Treat CRLF as one line break before flattening clipboard text into
+        // the single-line command/note input.
+        let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
+        let clean = sanitize_single_line(&normalized);
         self.input.insert_str(self.cursor, &clean);
         self.cursor += clean.len();
         self.history_position = None;
@@ -1462,6 +1468,20 @@ mod tests {
         assert!(app.input.is_empty());
         assert!(app.history.is_empty());
         assert!(app.journal.entries.is_empty());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn paste_inserts_at_cursor_and_flattens_multiline_clipboard_text() {
+        let (mut app, path) = test_app();
+        app.input = "abef".to_string();
+        app.cursor = 2;
+
+        app.paste("cd\nGH\r\n");
+
+        assert_eq!(app.input, "abcd GH ");
+        assert_eq!(app.cursor, "abcd GH ".len());
+
         let _ = fs::remove_file(path);
     }
 
