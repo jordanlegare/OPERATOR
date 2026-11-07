@@ -182,9 +182,16 @@ def main() -> int:
             error = event_value(payload, extra, "error")
             text = "finished" if finished else "interrupted"
             if error:
-                text += f"\\nError: {redact_inline(str(error))}"
+                text += f"\nError: {redact_inline(str(error))}"
 
-        if not isinstance(text, str) or not text.strip():
+        if not isinstance(text, str):
+            return 0
+        # Whitespace-only text deltas are meaningful token boundaries; retain
+        # them so separately streamed words do not get concatenated together.
+        if event_name == "on_stream_delta":
+            if not text:
+                return 0
+        elif not text.strip():
             return 0
 
         encoded_text = text.encode("utf-8")
