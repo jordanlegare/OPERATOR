@@ -132,7 +132,8 @@ pub fn build_threads(entries: &[Entry]) -> Vec<ConversationThread> {
 
 /// A thread can receive several stream-delta events for one assistant turn,
 /// including across tool iterations. Collapse them into one uninterrupted
-/// transcript block and hide the duplicate final assistant event for that turn.
+/// transcript block unless a tool is used in the turn. Tool-using turns discard
+/// their intermediate stream deltas and retain the final assistant event.
 #[derive(Debug, Default)]
 pub struct CollapsedLiveStreams {
     /// Combined text keyed by the first journal index for each streamed turn.
