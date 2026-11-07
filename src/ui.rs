@@ -233,7 +233,7 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
     }
 
     let state = if streaming { "STREAMING" } else { "CAPTURED" };
-    let id_label = thread.id.strip_prefix("session:").unwrap_or(&thread.id);
+    let id_label = id.strip_prefix("session:").unwrap_or(id);
     let short_id = id_label.chars().take(12).collect::<String>();
     let popup = centered_rect(94, 90, frame.area());
     frame.render_widget(Clear, popup);
