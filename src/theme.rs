@@ -36,7 +36,7 @@ pub const THEMES: [Theme; 9] = [
         accent: Color::Rgb(205, 164, 224),
         selected_row: Color::Rgb(39, 65, 81),
         search_fg: Color::Rgb(10, 24, 31),
-        search_bg: Color::Rgb(245, 211, 110),
+        search_bg: Color::Rgb(91, 211, 215),
     },
     Theme {
         name: "Carbon Amber",
@@ -52,7 +52,7 @@ pub const THEMES: [Theme; 9] = [
         accent: Color::Rgb(224, 154, 174),
         selected_row: Color::Rgb(58, 58, 56),
         search_fg: Color::Rgb(28, 24, 16),
-        search_bg: Color::Rgb(246, 211, 124),
+        search_bg: Color::Rgb(241, 187, 101),
     },
     Theme {
         name: "Dracula Contrast",
@@ -68,7 +68,7 @@ pub const THEMES: [Theme; 9] = [
         accent: Color::Rgb(229, 158, 195),
         selected_row: Color::Rgb(64, 56, 79),
         search_fg: Color::Rgb(22, 18, 29),
-        search_bg: Color::Rgb(240, 211, 130),
+        search_bg: Color::Rgb(193, 167, 235),
     },
     Theme {
         name: "Solarized Light",
@@ -84,7 +84,7 @@ pub const THEMES: [Theme; 9] = [
         accent: Color::Rgb(132, 53, 104),
         selected_row: Color::Rgb(212, 224, 219),
         search_fg: Color::Rgb(255, 255, 255),
-        search_bg: Color::Rgb(94, 74, 22),
+        search_bg: Color::Rgb(0, 90, 115),
     },
     Theme {
         name: "Paper High Contrast",
@@ -100,7 +100,7 @@ pub const THEMES: [Theme; 9] = [
         accent: Color::Rgb(135, 45, 100),
         selected_row: Color::Rgb(213, 229, 247),
         search_fg: Color::Rgb(255, 255, 255),
-        search_bg: Color::Rgb(117, 73, 0),
+        search_bg: Color::Rgb(20, 76, 142),
     },
     Theme {
         name: "Forest Signal",
@@ -116,7 +116,7 @@ pub const THEMES: [Theme; 9] = [
         accent: Color::Rgb(211, 170, 211),
         selected_row: Color::Rgb(39, 68, 51),
         search_fg: Color::Rgb(17, 29, 19),
-        search_bg: Color::Rgb(218, 233, 158),
+        search_bg: Color::Rgb(131, 213, 166),
     },
     Theme {
         name: "Violet Pulse",
@@ -132,7 +132,7 @@ pub const THEMES: [Theme; 9] = [
         accent: Color::Rgb(231, 164, 204),
         selected_row: Color::Rgb(72, 53, 87),
         search_fg: Color::Rgb(28, 20, 35),
-        search_bg: Color::Rgb(242, 218, 145),
+        search_bg: Color::Rgb(206, 174, 235),
     },
     Theme {
         name: "Arctic Blue",
@@ -148,7 +148,7 @@ pub const THEMES: [Theme; 9] = [
         accent: Color::Rgb(211, 174, 210),
         selected_row: Color::Rgb(39, 67, 87),
         search_fg: Color::Rgb(14, 29, 39),
-        search_bg: Color::Rgb(236, 210, 125),
+        search_bg: Color::Rgb(120, 206, 223),
     },
     Theme {
         name: "Monochrome Max",
@@ -164,7 +164,7 @@ pub const THEMES: [Theme; 9] = [
         accent: Color::Rgb(218, 183, 216),
         selected_row: Color::Rgb(57, 57, 61),
         search_fg: Color::Rgb(15, 15, 16),
-        search_bg: Color::Rgb(242, 242, 238),
+        search_bg: Color::Rgb(212, 219, 226),
     },
 ];
 
@@ -235,6 +235,17 @@ mod tests {
                     theme.name
                 );
             }
+        }
+    }
+
+    #[test]
+    fn search_highlight_color_follows_each_theme_primary_color() {
+        for theme in THEMES {
+            assert_eq!(
+                theme.search_bg, theme.primary,
+                "{} search highlight should use its palette's primary color",
+                theme.name
+            );
         }
     }
 
