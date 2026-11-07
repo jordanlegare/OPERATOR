@@ -92,7 +92,7 @@ fn draw_hermes_message(
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.primary))
+        .border_style(Style::default().fg(Color::LightYellow))
         .title(Span::styled(
             title,
             Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
