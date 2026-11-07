@@ -171,7 +171,7 @@ fn conversation_summary_line(thread: &ConversationThread, selected: bool, theme:
 
 fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: Theme) {
     let threads = app.conversation_threads();
-    let Some(thread) = threads.iter().find(|thread| thread.id == id) else {
+    let Some(thread) = threads.iter().find(|thread| thread.id.as_str() == id) else {
         return;
     };
     let entries = thread.entries.iter()
