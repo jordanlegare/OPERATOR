@@ -170,10 +170,6 @@ fn conversation_summary_line(thread: &ConversationThread, selected: bool, theme:
 }
 
 
-fn assistant_entries_replaced_by_live_stream(entries: &[(usize, &Entry)]) -> std::collections::HashSet<usize> {
-    collapse_live_streams(entries).replaced_assistant_indices
-}
-
 fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: Theme) {
     let (entry_indices, turn_count, tool_call_count, streaming) = {
         let threads = app.conversation_threads();
@@ -846,8 +842,10 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 
 #[cfg(test)]
 mod conversation_thread_stream_tests {
-    use super::assistant_entries_replaced_by_live_stream;
-    use crate::storage::{Entry, EntryKind};
+    use crate::{
+        conversations::collapse_live_streams,
+        storage::{Entry, EntryKind},
+    };
 
     fn event(kind: EntryKind, turn_id: Option<&str>, iteration: Option<u32>) -> Entry {
         let mut entry = Entry::with_kind(kind, "assistant text".to_string());
@@ -864,7 +862,7 @@ mod conversation_thread_stream_tests {
         let entries = vec![(1, &prompt), (2, &delta), (3, &assistant)];
 
         assert_eq!(
-            assistant_entries_replaced_by_live_stream(&entries),
+            collapse_live_streams(&entries).replaced_assistant_indices,
             [3].into_iter().collect()
         );
     }
@@ -877,7 +875,7 @@ mod conversation_thread_stream_tests {
         let entries = vec![(1, &prompt), (2, &delta), (3, &assistant)];
 
         assert_eq!(
-            assistant_entries_replaced_by_live_stream(&entries),
+            collapse_live_streams(&entries).replaced_assistant_indices,
             [3].into_iter().collect()
         );
     }
@@ -898,7 +896,7 @@ mod conversation_thread_stream_tests {
         ];
 
         assert_eq!(
-            assistant_entries_replaced_by_live_stream(&entries),
+            collapse_live_streams(&entries).replaced_assistant_indices,
             [3].into_iter().collect()
         );
     }
@@ -911,7 +909,7 @@ mod conversation_thread_stream_tests {
         let entries = vec![(10, &prompt), (11, &delta), (12, &assistant)];
 
         assert_eq!(
-            assistant_entries_replaced_by_live_stream(&entries),
+            collapse_live_streams(&entries).replaced_assistant_indices,
             [12].into_iter().collect()
         );
     }
@@ -922,6 +920,6 @@ mod conversation_thread_stream_tests {
         let assistant = event(EntryKind::HermesAssistant, Some("turn-1"), None);
         let entries = vec![(1, &prompt), (2, &assistant)];
 
-        assert!(assistant_entries_replaced_by_live_stream(&entries).is_empty());
+        assert!(collapse_live_streams(&entries).replaced_assistant_indices.is_empty());
     }
 }
