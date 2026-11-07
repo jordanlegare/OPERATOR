@@ -19,6 +19,8 @@ For tmux, STREENOTE's OSC 52 writes from inside a pane need clipboard writes fro
 set -s set-clipboard on
 ```
 
+**Security note:** this permits applications running inside tmux panes to set the client clipboard. Use it only in sessions where you trust the programs you run.
+
 On **tmux 3.7c or newer**, enable client clipboard reads as well:
 
 ```tmux
