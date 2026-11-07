@@ -648,8 +648,8 @@ fn restricted_access_flash_color(phase: usize) -> Color {
     }
 }
 
-/// Fill the full art canvas with woodland camouflage. The bitmap letters are
-/// bright red and remain readable against the dark olive/brown cell backgrounds.
+/// Fill the full art canvas with woodland camouflage. The flashing bitmap
+/// letters remain readable against the dark olive/brown cell backgrounds.
 fn camouflage_art_line(
     glyph_row: &str,
     canvas_width: usize,
@@ -2430,7 +2430,7 @@ mod access_splash_tests {
         let red = Color::Rgb(255, 24, 24);
         let khaki = Color::Rgb(198, 177, 119);
         let olive = Color::Rgb(112, 128, 72);
-        let first = restricted_access_splash(80, red, khaki, olive, 0, 0);
+        let first = restricted_access_splash(80, khaki, olive, 0, 0);
         let later = restricted_access_splash(80, khaki, olive, 4, 0);
 
         let letter_mask = |rows: &[ratatui::text::Line<'static>]| {
