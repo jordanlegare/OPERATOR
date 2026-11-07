@@ -2192,3 +2192,45 @@ mod theme_shortcut_tests {
         }
     }
 }
+
+
+#[cfg(test)]
+mod access_splash_tests {
+    use super::{restricted_access_splash, Color};
+    use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn wide_terminal_gets_multicolour_block_letter_bbs_splash() {
+        let accent = Color::Rgb(40, 235, 255);
+        let blue = Color::Rgb(85, 145, 255);
+        let magenta = Color::Rgb(245, 90, 225);
+        let warning = Color::Rgb(255, 205, 80);
+        let critical = Color::Rgb(255, 75, 125);
+        let rows = restricted_access_splash(
+            80, critical, warning, accent, blue, magenta,
+        );
+
+        assert!(rows.iter().any(|(line, _)| line.contains("STREENOTE")));
+        assert!(rows.iter().any(|(line, _)| line.contains('█')));
+        assert!(rows.iter().any(|(line, _)| line.contains("AUTHORIZED PERSONNEL ONLY")));
+        for color in [accent, blue, magenta, warning, critical] {
+            assert!(rows.iter().any(|(_, style)| style.fg == Some(color)));
+        }
+    }
+
+    #[test]
+    fn narrow_terminal_gets_compact_splash_without_wrapped_art() {
+        let rows = restricted_access_splash(
+            24,
+            Color::Red,
+            Color::Yellow,
+            Color::Cyan,
+            Color::Blue,
+            Color::Magenta,
+        );
+
+        assert!(!rows.iter().any(|(line, _)| line.contains('█')));
+        assert!(rows.iter().any(|(line, _)| line.contains("RESTRICTED ACCESS")));
+        assert!(rows.iter().all(|(line, _)| UnicodeWidthStr::width(line.as_str()) <= 24));
+    }
+}
