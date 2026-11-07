@@ -554,6 +554,8 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         Span::styled("complete  ", Style::default().fg(theme.muted)),
         Span::styled("Ctrl+W ", Style::default().fg(theme.primary)),
         Span::styled(if app.wrap_transcript { "wrap on  " } else { "wrap off  " }, Style::default().fg(theme.muted)),
+        Span::styled("Ctrl+L ", Style::default().fg(theme.primary)),
+        Span::styled("clear input  ", Style::default().fg(theme.muted)),
         Span::styled("Ctrl+P/N ", Style::default().fg(theme.primary)),
         Span::styled("history  ", Style::default().fg(theme.muted)),
         Span::styled("/search ", Style::default().fg(theme.primary)),
@@ -619,7 +621,7 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         Line::from("Tab completes shell commands and paths · four spaces in Notes mode"),
         Line::from(format!("F2–F10 switches high-contrast palettes (F2 = 1, F10 = 9) · active: {}", theme.name)),
         Line::from("Ctrl+W toggles transcript word wrap · Alt+←/→ horizontal pan · Ctrl+P/N history · Ctrl+S save · Ctrl+T mode"),
-        Line::from("Esc clears the input line · F12 shows or hides the ASCII-art banner"),
+        Line::from("Ctrl+L / Esc clears the input line · F12 shows or hides the ASCII-art banner"),
         Line::from("Ctrl+C sends SIGINT to the shell · Ctrl+D sends EOF · Ctrl+Q quits StreamNote"),
         Line::from(""),
         Line::from(Span::styled(
