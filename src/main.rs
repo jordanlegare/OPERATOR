@@ -859,7 +859,7 @@ fn drain_hermes_events(
     hermes_bridge: &mut HermesBridge,
 ) -> io::Result<usize> {
     let was_tracking_tail = app.is_tracking_selected_tail();
-    let imported = drain_hermes_events(app, hermes_bridge)?;
+    let imported = hermes_bridge.drain(&mut app.journal)?;
     if imported > 0 {
         app.update_selected_tail_after_append(was_tracking_tail);
     }
