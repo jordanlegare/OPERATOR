@@ -169,6 +169,30 @@ fn conversation_summary_line(thread: &ConversationThread, selected: bool, theme:
     ])
 }
 
+
+fn live_stream_iterations(
+    entries: &[(usize, &Entry)],
+) -> std::collections::HashSet<(String, Option<u32>)> {
+    entries
+        .iter()
+        .filter_map(|(_, entry)| {
+            (entry.kind == EntryKind::HermesStreamDelta)
+                .then(|| entry.turn_id.clone().map(|turn| (turn, entry.iteration)))
+                .flatten()
+        })
+        .collect()
+}
+
+fn assistant_has_live_stream_replacement(
+    entry: &Entry,
+    live_stream_iterations: &std::collections::HashSet<(String, Option<u32>)>,
+) -> bool {
+    entry.kind == EntryKind::HermesAssistant
+        && entry.turn_id.as_ref().is_some_and(|turn| {
+            live_stream_iterations.contains(&(turn.clone(), entry.iteration))
+        })
+}
+
 fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: Theme) {
     let (entry_indices, turn_count, tool_call_count, streaming) = {
         let threads = app.conversation_threads();
@@ -180,13 +204,9 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
     let entries = entry_indices.iter()
         .filter_map(|index| app.journal.entries.get(*index).map(|entry| (*index, entry)))
         .collect::<Vec<_>>();
-    let completed_iterations = entries.iter()
-        .filter_map(|(_, entry)| {
-            (entry.kind == EntryKind::HermesAssistant)
-                .then(|| entry.turn_id.clone().map(|turn| (turn, entry.iteration)))
-                .flatten()
-        })
-        .collect::<std::collections::HashSet<_>>();
+    // Prefer the streamed assistant transcript when the final assistant event
+    // duplicates the same turn iteration.
+    let live_stream_iterations = live_stream_iterations(&entries);
 
     let mut lines = Vec::new();
     let mut previous_turn: Option<String> = None;
@@ -194,11 +214,7 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
         if matches!(entry.kind, EntryKind::HermesStreamStart | EntryKind::HermesStreamEnd) {
             continue;
         }
-        if entry.kind == EntryKind::HermesStreamDelta
-            && entry.turn_id.as_ref().is_some_and(|turn| {
-                completed_iterations.contains(&(turn.clone(), entry.iteration))
-            })
-        {
+        if assistant_has_live_stream_replacement(entry, &live_stream_iterations) {
             continue;
         }
         if entry.turn_id.is_some() && previous_turn != entry.turn_id {
@@ -213,7 +229,7 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
             EntryKind::HermesAssistant => ("ASSISTANT", theme.success),
             EntryKind::HermesToolCall => ("TOOL CALL", theme.warning),
             EntryKind::HermesToolResult => ("TOOL RESULT", theme.accent),
-            EntryKind::HermesStreamDelta => ("ASSISTANT · LIVE STREAM", theme.primary),
+            EntryKind::HermesStreamDelta => ("ASSISTANT - LIVE STREAM", theme.primary),
             _ => ("HERMES", theme.muted),
         };
         lines.push(Line::from(vec![
@@ -826,4 +842,46 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(vertical[1])[1]
+}
+
+#[cfg(test)]
+mod conversation_thread_stream_tests {
+    use super::{assistant_has_live_stream_replacement, live_stream_iterations};
+    use crate::storage::{Entry, EntryKind};
+
+    fn event(kind: EntryKind, turn_id: &str, iteration: u32) -> Entry {
+        let mut entry = Entry::with_kind(kind, "assistant text".to_string());
+        entry.turn_id = Some(turn_id.to_string());
+        entry.iteration = Some(iteration);
+        entry
+    }
+
+    #[test]
+    fn live_stream_replaces_the_matching_final_assistant_entry() {
+        let assistant = event(EntryKind::HermesAssistant, "turn-1", 0);
+        let delta = event(EntryKind::HermesStreamDelta, "turn-1", 0);
+        let entries = vec![(1, &assistant), (2, &delta)];
+        let live_iterations = live_stream_iterations(&entries);
+
+        assert!(assistant_has_live_stream_replacement(&assistant, &live_iterations));
+    }
+
+    #[test]
+    fn live_stream_does_not_replace_assistant_entry_from_another_iteration() {
+        let assistant = event(EntryKind::HermesAssistant, "turn-1", 1);
+        let delta = event(EntryKind::HermesStreamDelta, "turn-1", 0);
+        let entries = vec![(1, &assistant), (2, &delta)];
+        let live_iterations = live_stream_iterations(&entries);
+
+        assert!(!assistant_has_live_stream_replacement(&assistant, &live_iterations));
+    }
+
+    #[test]
+    fn assistant_entry_remains_visible_when_no_live_stream_was_captured() {
+        let assistant = event(EntryKind::HermesAssistant, "turn-1", 0);
+        let entries = vec![(1, &assistant)];
+        let live_iterations = live_stream_iterations(&entries);
+
+        assert!(!assistant_has_live_stream_replacement(&assistant, &live_iterations));
+    }
 }
