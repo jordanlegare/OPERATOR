@@ -270,12 +270,19 @@ mod tests {
 
     #[test]
     fn completing_one_iteration_does_not_close_another_iteration_in_the_same_turn() {
+        let mut started = event(EntryKind::HermesStreamStart, "start", Some("session"), Some("turn"));
+        started.iteration = Some(0);
+        let mut ended = event(EntryKind::HermesStreamEnd, "finished", Some("session"), Some("turn"));
+        ended.iteration = Some(1);
+        let threads = build_threads(&[started, ended]);
+        assert!(threads[0].streaming);
+    }
+
     #[test]
     fn stream_deltas_across_iterations_become_one_uninterrupted_message() {
         use super::collapse_live_streams;
 
-        let mut prompt = event(EntryKind::HermesUser, "prompt", Some("session"), Some("turn-1"));
-        prompt.timestamp = "prompt-time".to_string();
+        let prompt = event(EntryKind::HermesUser, "prompt", Some("session"), Some("turn-1"));
         let mut first = event(EntryKind::HermesStreamDelta, "The basic ", Some("session"), Some("turn-1"));
         first.iteration = Some(0);
         let end = event(EntryKind::HermesStreamEnd, "finished", Some("session"), Some("turn-1"));
@@ -304,8 +311,10 @@ mod tests {
         use super::collapse_live_streams;
 
         let prompt = event(EntryKind::HermesUser, "prompt", None, None);
-        let first = event(EntryKind::HermesStreamDelta, "hello ", None, Some("iteration-a"));
-        let second = event(EntryKind::HermesStreamDelta, "world", None, Some("iteration-b"));
+        let mut first = event(EntryKind::HermesStreamDelta, "hello ", None, None);
+        first.iteration = Some(0);
+        let mut second = event(EntryKind::HermesStreamDelta, "world", None, None);
+        second.iteration = Some(1);
         let assistant = event(EntryKind::HermesAssistant, "duplicate", None, None);
         let entries = vec![(10, &prompt), (11, &first), (12, &second), (13, &assistant)];
 
@@ -315,15 +324,6 @@ mod tests {
             Some("hello world")
         );
         assert!(collapsed.replaced_assistant_indices.contains(&13));
-    }
-
-
-        let mut started = event(EntryKind::HermesStreamStart, "start", Some("session"), Some("turn"));
-        started.iteration = Some(0);
-        let mut ended = event(EntryKind::HermesStreamEnd, "finished", Some("session"), Some("turn"));
-        ended.iteration = Some(1);
-        let threads = build_threads(&[started, ended]);
-        assert!(threads[0].streaming);
     }
 
     #[test]
