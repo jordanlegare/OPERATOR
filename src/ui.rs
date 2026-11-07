@@ -249,6 +249,9 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
         ))
         .style(Style::default().bg(theme.panel));
     let inner = block.inner(popup);
+    // Paint the expanded-thread modal block itself. Without rendering it,
+    // the underlying transcript border remains visible around the popup.
+    frame.render_widget(block, popup);
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
