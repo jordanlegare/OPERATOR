@@ -177,8 +177,12 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
     let entries = thread.entries.iter()
         .filter_map(|index| app.journal.entries.get(*index).map(|entry| (*index, entry)))
         .collect::<Vec<_>>();
-    let completed_turns = entries.iter()
-        .filter_map(|(_, entry)| (entry.kind == EntryKind::HermesAssistant).then(|| entry.turn_id.clone()).flatten())
+    let completed_iterations = entries.iter()
+        .filter_map(|(_, entry)| {
+            (entry.kind == EntryKind::HermesAssistant)
+                .then(|| entry.turn_id.clone().map(|turn| (turn, entry.iteration)))
+                .flatten()
+        })
         .collect::<std::collections::HashSet<_>>();
 
     let mut lines = Vec::new();
@@ -188,7 +192,9 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
             continue;
         }
         if entry.kind == EntryKind::HermesStreamDelta
-            && entry.turn_id.as_ref().is_some_and(|turn| completed_turns.contains(turn))
+            && entry.turn_id.as_ref().is_some_and(|turn| {
+                completed_iterations.contains(&(turn.clone(), entry.iteration))
+            })
         {
             continue;
         }
