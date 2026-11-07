@@ -253,19 +253,23 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(inner);
-    app.conversation_content_height = lines.len();
+    // Count the rows after Ratatui wraps long tool arguments/results to the
+    // actual modal width. Counting only the original Line objects underestimates
+    // content height and makes long threads impossible to scroll to the end.
+    let paragraph = Paragraph::new(lines)
+        .style(Style::default().fg(theme.text).bg(theme.panel))
+        .wrap(Wrap { trim: false });
+    app.conversation_content_height = paragraph.line_count(sections[0].width.max(1));
     app.conversation_viewport_height = sections[0].height.max(1) as usize;
-    let max_scroll = lines.len().saturating_sub(app.conversation_viewport_height);
+    let max_scroll = app.conversation_content_height
+        .saturating_sub(app.conversation_viewport_height);
     let scroll = if app.conversation_follow_tail {
         max_scroll
     } else {
         app.conversation_scroll.min(max_scroll)
     };
     frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().fg(theme.text).bg(theme.panel))
-            .wrap(Wrap { trim: false })
-            .scroll((scroll.min(u16::MAX as usize) as u16, 0)),
+        paragraph.scroll((scroll.min(u16::MAX as usize) as u16, 0)),
         sections[0],
     );
     frame.render_widget(
