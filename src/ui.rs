@@ -170,11 +170,14 @@ fn conversation_summary_line(thread: &ConversationThread, selected: bool, theme:
 }
 
 fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: Theme) {
-    let threads = app.conversation_threads();
-    let Some(thread) = threads.iter().find(|thread| thread.id.as_str() == id) else {
-        return;
+    let (entry_indices, turn_count, tool_call_count, streaming) = {
+        let threads = app.conversation_threads();
+        let Some(thread) = threads.iter().find(|thread| thread.id.as_str() == id) else {
+            return;
+        };
+        (thread.entries.clone(), thread.turn_count, thread.tool_call_count, thread.streaming)
     };
-    let entries = thread.entries.iter()
+    let entries = entry_indices.iter()
         .filter_map(|index| app.journal.entries.get(*index).map(|entry| (*index, entry)))
         .collect::<Vec<_>>();
     let completed_iterations = entries.iter()
@@ -229,7 +232,7 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
         lines.push(Line::from(""));
     }
 
-    let state = if thread.streaming { "STREAMING" } else { "CAPTURED" };
+    let state = if streaming { "STREAMING" } else { "CAPTURED" };
     let id_label = thread.id.strip_prefix("session:").unwrap_or(&thread.id);
     let short_id = id_label.chars().take(12).collect::<String>();
     let popup = centered_rect(94, 90, frame.area());
@@ -238,7 +241,7 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.primary))
         .title(Span::styled(
-            format!(" HERMES THREAD {short_id} · {} TURN(S) · {} TOOL(S) · {state} ", thread.turn_count, thread.tool_call_count),
+            format!(" HERMES THREAD {short_id} · {turn_count} TURN(S) · {tool_call_count} TOOL(S) · {state} "),
             Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
         ))
         .style(Style::default().bg(theme.panel));
