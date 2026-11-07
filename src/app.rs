@@ -438,8 +438,8 @@ impl App {
             });
 
             if is_hermes_event {
-                // A stationary click on a Hermes transcript row is the mouse
-                // equivalent of selecting that row and executing /view.
+                // A stationary click on a Hermes transcript row opens its
+                // containing conversation thread.
                 self.selection = None;
                 self.selected_row = Some(row);
                 self.follow_tail = row == self.journal.entries.len().saturating_sub(1);
@@ -893,6 +893,17 @@ impl App {
         } else {
             self.conversation_list_selected.saturating_add(direction as usize).min(count - 1)
         };
+    }
+
+    pub fn collapse_conversation_thread(&mut self) {
+        let Some(ConversationView::Thread { id }) = self.conversation_view.as_ref() else {
+            return;
+        };
+        if let Some(index) = self.conversation_threads().iter().position(|thread| &thread.id == id) {
+            self.conversation_list_selected = index;
+            self.conversation_view = Some(ConversationView::List);
+        }
+        self.conversation_scroll = 0;
     }
 
     pub fn close_conversation_view(&mut self) {
