@@ -949,13 +949,16 @@ impl App {
                 EntryKind::HermesStreamEnd => "STREAM END",
                 _ => "HERMES",
             };
-            output.push_str(&format!("[{label}] {}\\n{}\\n\\n", entry.timestamp, entry.text));
+            output.push_str(&format!("[{label}] {}\n{}\n\n", entry.timestamp, entry.text));
         }
         Some(output)
     }
 
     /// Open the full body of the selected Hermes message or tool event.
     pub fn open_hermes_message(&mut self) {
+        let is_hermes_event_at = |index: usize| {
+            self.journal.entries.get(index).is_some_and(|entry| is_hermes_event(entry.kind))
+        };
         let candidate = self
             .selected_row
             .filter(|index| is_hermes_event_at(*index))
