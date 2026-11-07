@@ -912,6 +912,12 @@ impl App {
     /// Returns true when a modal was opened. Used by Enter so ordinary input
     /// submission remains unchanged when no Hermes row is selected.
     pub fn open_selected_hermes_message(&mut self) -> bool {
+        // A non-empty input draft takes priority over transcript navigation.
+        // Returning false lets the existing Enter handler submit it normally.
+        if !self.input.trim().is_empty() {
+            return false;
+        }
+
         let Some(index) = self.selected_row else {
             return false;
         };
@@ -1803,6 +1809,41 @@ mod tests {
         assert!(copied.contains("The basic necessities of life."));
         assert!(!copied.contains("duplicate final assistant response"));
         assert!(!copied.contains("[STREAM END]"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn non_empty_input_on_husr_row_submits_instead_of_opening_thread() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        app.journal
+            .append(Entry::with_kind(EntryKind::HermesUser, "previous prompt".to_string()))
+            .expect("append user prompt");
+        app.selected_row = Some(0);
+        app.input = "ls -la".to_string();
+        app.cursor = app.input.len();
+
+        assert!(!app.open_selected_hermes_message());
+        assert_eq!(app.conversation_view, None);
+        assert_eq!(app.input, "ls -la");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn empty_input_on_husr_row_opens_active_conversation() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        app.journal
+            .append(Entry::with_kind(EntryKind::HermesUser, "previous prompt".to_string()))
+            .expect("append user prompt");
+        app.selected_row = Some(0);
+
+        assert!(app.open_selected_hermes_message());
+        assert!(matches!(app.conversation_view, Some(ConversationView::Thread { .. })));
 
         let _ = fs::remove_file(path);
     }
