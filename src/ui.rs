@@ -360,10 +360,10 @@ fn entry_line(entry: &Entry, index: usize, app: &App, theme: Theme) -> Line<'sta
                 spans.push(Span::styled(
                     display_text[start..end].to_string(),
                     Style::default()
+                        .patch(row_style)
                         .fg(theme.search_fg)
                         .bg(theme.search_bg)
-                        .add_modifier(Modifier::BOLD)
-                        .patch(row_style),
+                        .add_modifier(Modifier::BOLD),
                 ));
                 spans.push(Span::styled(
                     display_text[end..].to_string(),
