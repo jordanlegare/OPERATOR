@@ -165,14 +165,22 @@ fn show_access_disclaimer(
     let mut page_index = 0usize;
     let mut animation_phase = 0usize;
     let mut last_animation_step = Instant::now();
+    let mut letter_flash_phase = 0usize;
+    let mut last_letter_flash_step = Instant::now();
 
     loop {
-        // Drift the camouflage slowly; do not blink or animate the warning text.
+        // Drift the camouflage slowly while the warning lettering runs its
+        // own red/orange/yellow signal cycle.
         if last_animation_step.elapsed() >= Duration::from_millis(420) {
             animation_phase = animation_phase.wrapping_add(1);
             last_animation_step = Instant::now();
         }
+        if last_letter_flash_step.elapsed() >= Duration::from_millis(180) {
+            letter_flash_phase = (letter_flash_phase + 1) % 6;
+            last_letter_flash_step = Instant::now();
+        }
         let current_animation_phase = animation_phase;
+        let current_letter_flash_phase = letter_flash_phase;
 
         let mut page_count = 1usize;
         let mut can_continue = false;
@@ -207,6 +215,7 @@ fn show_access_disclaimer(
                         accent,
                         inner.width,
                         current_animation_phase,
+                        current_letter_flash_phase,
                     ),
                     inner.width,
                     usize::from(available_text_rows),
@@ -341,6 +350,7 @@ fn access_notice_policy(
     accent: Color,
     width: u16,
     animation_phase: usize,
+    letter_flash_phase: usize,
 ) -> Vec<Line<'static>> {
     let critical_style = Style::default()
         .fg(critical)
@@ -352,10 +362,10 @@ fn access_notice_policy(
 
     let mut rows = restricted_access_splash(
         width,
-        critical,
         warning,
         accent,
         animation_phase,
+        letter_flash_phase,
     );
     rows.push(Line::from(Span::styled("", body_style)));
 
@@ -531,12 +541,13 @@ fn access_notice_policy(
 /// redundant connection headline is placed above the warning artwork.
 fn restricted_access_splash(
     width: u16,
-    critical: Color,
     warning: Color,
     accent: Color,
     animation_phase: usize,
+    letter_flash_phase: usize,
 ) -> Vec<Line<'static>> {
     let frame_width = usize::from(width).clamp(24, 76);
+    let letter_color = restricted_access_flash_color(letter_flash_phase);
     let border_style = Style::default()
         .fg(accent)
         .bg(Color::Rgb(25, 34, 21))
@@ -551,8 +562,8 @@ fn restricted_access_splash(
     ))];
 
     if frame_width >= 66 {
-        // The artwork fills the frame edge-to-edge. Letter pixels stay bright
-        // red; the camo pattern fills every cell behind and around each letter.
+        // The artwork fills the frame edge-to-edge. Letter pixels flash red,
+        // orange, and yellow; the camo pattern fills every surrounding cell.
         let canvas_width = frame_width.saturating_sub(6);
         let mut art_row = 0usize;
 
@@ -562,7 +573,7 @@ fn restricted_access_splash(
                 canvas_width,
                 art_row,
                 17,
-                critical,
+                letter_color,
                 accent,
                 animation_phase,
             ));
@@ -573,7 +584,7 @@ fn restricted_access_splash(
             canvas_width,
             art_row,
             29,
-            critical,
+            letter_color,
             accent,
             animation_phase,
         ));
@@ -584,7 +595,7 @@ fn restricted_access_splash(
                 canvas_width,
                 art_row,
                 41,
-                critical,
+                letter_color,
                 accent,
                 animation_phase,
             ));
@@ -593,7 +604,7 @@ fn restricted_access_splash(
     } else {
         rows.push(Line::from(Span::styled(
             centered_bbs_line("RESTRICTED ACCESS", frame_width),
-            Style::default().fg(critical).add_modifier(Modifier::BOLD),
+            Style::default().fg(letter_color).add_modifier(Modifier::BOLD),
         )));
     }
 
@@ -623,8 +634,22 @@ fn restricted_access_splash(
     rows
 }
 
-/// Fill the full art canvas with woodland camouflage. The bitmap letters are
-/// bright red and remain readable against the dark olive/brown cell backgrounds.
+/// Repeating warning-light cycle: strong red, short orange flash,
+/// strong yellow, then another short orange flash before returning to red.
+fn restricted_access_flash_color(phase: usize) -> Color {
+    const RED: Color = Color::Rgb(255, 24, 24);
+    const ORANGE: Color = Color::Rgb(255, 96, 0);
+    const YELLOW: Color = Color::Rgb(255, 255, 0);
+
+    match phase % 6 {
+        0 | 1 => RED,
+        2 | 5 => ORANGE,
+        _ => YELLOW,
+    }
+}
+
+/// Fill the full art canvas with woodland camouflage. The flashing bitmap
+/// letters remain readable against the dark olive/brown cell backgrounds.
 fn camouflage_art_line(
     glyph_row: &str,
     canvas_width: usize,
@@ -2355,7 +2380,9 @@ mod theme_shortcut_tests {
 
 #[cfg(test)]
 mod access_splash_tests {
-    use super::{restricted_access_splash, wrap_access_notice, Color};
+    use super::{
+        restricted_access_flash_color, restricted_access_splash, wrap_access_notice, Color,
+    };
     use unicode_width::UnicodeWidthStr;
 
     fn line_text(line: &ratatui::text::Line<'static>) -> String {
@@ -2367,7 +2394,7 @@ mod access_splash_tests {
         let red = Color::Rgb(255, 24, 24);
         let olive = Color::Rgb(112, 128, 72);
         let khaki = Color::Rgb(198, 177, 119);
-        let rows = restricted_access_splash(80, red, khaki, olive, 0);
+        let rows = restricted_access_splash(80, khaki, olive, 0, 0);
 
         assert!(!rows.iter().any(|line| line_text(line).contains("BBS NODE")));
         assert!(!rows.iter().any(|line| line_text(line).contains("SECURE ACCESS GATEWAY")));
@@ -2403,8 +2430,8 @@ mod access_splash_tests {
         let red = Color::Rgb(255, 24, 24);
         let khaki = Color::Rgb(198, 177, 119);
         let olive = Color::Rgb(112, 128, 72);
-        let first = restricted_access_splash(80, red, khaki, olive, 0);
-        let later = restricted_access_splash(80, red, khaki, olive, 4);
+        let first = restricted_access_splash(80, khaki, olive, 0, 0);
+        let later = restricted_access_splash(80, khaki, olive, 4, 0);
 
         let letter_mask = |rows: &[ratatui::text::Line<'static>]| {
             rows.iter()
@@ -2431,13 +2458,44 @@ mod access_splash_tests {
     }
 
     #[test]
+    fn access_warning_flashes_red_orange_yellow_orange() {
+        let red = Color::Rgb(255, 24, 24);
+        let orange = Color::Rgb(255, 96, 0);
+        let yellow = Color::Rgb(255, 255, 0);
+
+        assert_eq!(restricted_access_flash_color(0), red);
+        assert_eq!(restricted_access_flash_color(1), red);
+        assert_eq!(restricted_access_flash_color(2), orange);
+        assert_eq!(restricted_access_flash_color(3), yellow);
+        assert_eq!(restricted_access_flash_color(4), yellow);
+        assert_eq!(restricted_access_flash_color(5), orange);
+        assert_eq!(restricted_access_flash_color(6), red);
+    }
+
+    #[test]
+    fn splash_lettering_uses_each_flash_colour() {
+        let warning = Color::Rgb(198, 177, 119);
+        let olive = Color::Rgb(112, 128, 72);
+        let red = Color::Rgb(255, 24, 24);
+        let orange = Color::Rgb(255, 96, 0);
+        let yellow = Color::Rgb(255, 255, 0);
+
+        for (phase, expected) in [(0, red), (2, orange), (3, yellow), (5, orange)] {
+            let rows = restricted_access_splash(80, warning, olive, 0, phase);
+            assert!(rows.iter().any(|line| {
+                line.spans.iter().any(|span| span.style.fg == Some(expected) && span.content.contains('█'))
+            }), "phase {phase} should render its warning colour in the large lettering");
+        }
+    }
+
+    #[test]
     fn narrow_terminal_gets_compact_bright_red_warning() {
         let red = Color::Rgb(255, 24, 24);
         let rows = restricted_access_splash(
             24,
-            red,
             Color::Rgb(198, 177, 119),
             Color::Rgb(112, 128, 72),
+            0,
             0,
         );
 
