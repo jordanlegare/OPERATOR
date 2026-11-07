@@ -1870,6 +1870,7 @@ mod tests {
         app.journal
             .append(Entry::with_kind(EntryKind::HermesUser, "prompt".to_string()))
             .expect("append initial Hermes row");
+        app.feed_viewport_height = 2;
         app.selected_row = Some(0);
         app.follow_tail = true;
 
