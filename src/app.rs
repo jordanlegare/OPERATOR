@@ -1,4 +1,5 @@
 use std::{
+    cell::{Ref, RefCell},
     io,
     path::PathBuf,
     time::{Duration, Instant},
@@ -8,7 +9,7 @@ use ratatui::layout::Rect;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    conversations::{build_threads, is_hermes_event, thread_for_entry, ConversationThread},
+    conversations::{build_threads, is_hermes_event, ConversationThread},
     shell::ShellSession,
     settings::Settings,
     storage::{
@@ -51,6 +52,23 @@ struct TranscriptSelection {
 pub enum ConversationView {
     List,
     Thread { id: String },
+}
+
+#[derive(Debug)]
+struct ConversationCache {
+    entry_count: usize,
+    total_text_bytes: usize,
+    threads: Vec<ConversationThread>,
+}
+
+impl Default for ConversationCache {
+    fn default() -> Self {
+        Self {
+            entry_count: usize::MAX,
+            total_text_bytes: usize::MAX,
+            threads: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -103,6 +121,9 @@ pub struct App {
     pub conversation_content_height: usize,
     pub conversation_viewport_height: usize,
     pub conversation_follow_tail: bool,
+    /// Derived conversation groups are cached until the journal's entry count
+    /// or byte count changes; this avoids a full-history scan on every frame.
+    conversation_cache: RefCell<ConversationCache>,
     /// Whether the ASCII-art banner is currently visible.
     pub show_banner: bool,
     /// Whether the Canadian maple-leaf watermark is displayed behind the transcript.
@@ -169,6 +190,7 @@ impl App {
             conversation_content_height: 0,
             conversation_viewport_height: 1,
             conversation_follow_tail: true,
+            conversation_cache: RefCell::new(ConversationCache::default()),
             show_banner: settings.show_banner,
             show_canada_watermark: settings.show_canada_watermark,
             scp_sftp_passthrough: settings.scp_sftp_passthrough,
@@ -847,7 +869,11 @@ impl App {
     /// are associated by session ID; legacy journal rows use a conservative
     /// prompt-to-following-events fallback grouping.
     pub fn open_conversation_for_entry(&mut self, index: usize) -> bool {
-        let Some(id) = thread_for_entry(&self.journal.entries, index) else {
+        let id = self.conversation_threads()
+            .iter()
+            .find(|thread| thread.entries.contains(&index))
+            .map(|thread| thread.id.clone());
+        let Some(id) = id else {
             return false;
         };
         self.conversation_view = Some(ConversationView::Thread { id });
@@ -857,27 +883,39 @@ impl App {
     }
 
     pub fn open_conversations(&mut self) {
-        let threads = build_threads(&self.journal.entries);
-        if threads.is_empty() {
+        let count = self.conversation_threads().len();
+        if count == 0 {
             self.status = "No Hermes conversations are present in the journal.".to_string();
             return;
         }
-        self.conversation_list_selected = threads.len().saturating_sub(1);
+        self.conversation_list_selected = count.saturating_sub(1);
         self.conversation_view = Some(ConversationView::List);
-        self.status = format!("{} Hermes conversation(s). Enter expands a thread.", threads.len());
+        self.status = format!("{count} Hermes conversation(s). Enter expands a thread.");
     }
 
-    pub fn conversation_threads(&self) -> Vec<ConversationThread> {
-        build_threads(&self.journal.entries)
+    pub fn conversation_threads(&self) -> Ref<'_, Vec<ConversationThread>> {
+        let entry_count = self.journal.entries.len();
+        let total_text_bytes = self.journal.total_text_bytes;
+        {
+            let mut cache = self.conversation_cache.borrow_mut();
+            if cache.entry_count != entry_count || cache.total_text_bytes != total_text_bytes {
+                cache.threads = build_threads(&self.journal.entries);
+                cache.entry_count = entry_count;
+                cache.total_text_bytes = total_text_bytes;
+            }
+        }
+        Ref::map(self.conversation_cache.borrow(), |cache| &cache.threads)
     }
 
     pub fn open_selected_conversation(&mut self) {
-        let threads = self.conversation_threads();
-        let Some(thread) = threads.get(self.conversation_list_selected) else {
+        let id = self.conversation_threads()
+            .get(self.conversation_list_selected)
+            .map(|thread| thread.id.clone());
+        let Some(id) = id else {
             self.conversation_view = None;
             return;
         };
-        self.conversation_view = Some(ConversationView::Thread { id: thread.id.clone() });
+        self.conversation_view = Some(ConversationView::Thread { id });
         self.conversation_scroll = 0;
         self.conversation_follow_tail = true;
     }
@@ -899,7 +937,9 @@ impl App {
         let Some(ConversationView::Thread { id }) = self.conversation_view.as_ref() else {
             return;
         };
-        if let Some(index) = self.conversation_threads().iter().position(|thread| &thread.id == id) {
+        let id = id.clone();
+        let selected = self.conversation_threads().iter().position(|thread| thread.id == id);
+        if let Some(index) = selected {
             self.conversation_list_selected = index;
             self.conversation_view = Some(ConversationView::List);
         }
@@ -946,9 +986,12 @@ impl App {
         let Some(ConversationView::Thread { id }) = self.conversation_view.as_ref() else {
             return None;
         };
-        let thread = self.conversation_threads().into_iter().find(|thread| &thread.id == id)?;
+        let indices = self.conversation_threads()
+            .iter()
+            .find(|thread| &thread.id == id)
+            .map(|thread| thread.entries.clone())?;
         let mut output = String::new();
-        for index in thread.entries {
+        for index in indices {
             let entry = self.journal.entries.get(index)?;
             let label = match entry.kind {
                 EntryKind::HermesUser => "USER",
