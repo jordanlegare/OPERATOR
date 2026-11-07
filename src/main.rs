@@ -2216,7 +2216,7 @@ mod access_splash_tests {
             80, critical, warning, accent, blue, magenta,
         );
 
-        assert!(rows.iter().any(|(line, _)| line.contains("STREENOTE")));
+        assert!(rows.iter().any(|(line, _)| line.contains("S T R E E N O T E")));
         assert!(rows.iter().any(|(line, _)| line.contains('█')));
         assert!(rows.iter().any(|(line, _)| line.contains("AUTHORIZED PERSONNEL ONLY")));
         for color in [accent, blue, magenta, warning, critical] {
