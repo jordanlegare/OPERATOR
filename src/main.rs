@@ -163,8 +163,17 @@ fn show_access_disclaimer(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut page_index = 0usize;
+    let mut animation_phase = 0usize;
+    let mut last_animation_step = Instant::now();
 
     loop {
+        // Drift the camouflage slowly; do not blink or animate the warning text.
+        if last_animation_step.elapsed() >= Duration::from_millis(420) {
+            animation_phase = animation_phase.wrapping_add(1);
+            last_animation_step = Instant::now();
+        }
+        let current_animation_phase = animation_phase;
+
         let mut page_count = 1usize;
         let mut can_continue = false;
 
@@ -172,15 +181,12 @@ fn show_access_disclaimer(
             let area = frame.area();
             let popup = area;
 
-            // A dark BBS palette: cyan/blue framing, magenta accents,
-            // amber operator warnings, and hot-pink critical text.
-            let background = Color::Rgb(5, 10, 28);
-            let accent = Color::Rgb(40, 235, 255);
-            let blue = Color::Rgb(85, 145, 255);
-            let magenta = Color::Rgb(245, 90, 225);
-            let warning = Color::Rgb(255, 205, 80);
-            let critical = Color::Rgb(255, 75, 125);
-            let normal = Color::Rgb(205, 225, 245);
+            // Woodland palette for the complete access screen.
+            let background = Color::Rgb(20, 27, 17);
+            let accent = Color::Rgb(112, 128, 72); // olive drab
+            let warning = Color::Rgb(198, 177, 119); // khaki
+            let critical = Color::Rgb(255, 24, 24); // bright warning red
+            let normal = Color::Rgb(218, 213, 187); // field canvas
 
             let base_block = Block::default()
                 .borders(Borders::ALL)
@@ -199,9 +205,8 @@ fn show_access_disclaimer(
                         warning,
                         normal,
                         accent,
-                        blue,
-                        magenta,
                         inner.width,
+                        current_animation_phase,
                     ),
                     inner.width,
                     usize::from(available_text_rows),
@@ -219,10 +224,10 @@ fn show_access_disclaimer(
             }
 
             let title = if too_small {
-                " STREENOTE // RESTRICTED SYSTEM TERMS ".to_string()
+                " RESTRICTED SYSTEM TERMS ".to_string()
             } else {
                 format!(
-                    " STREENOTE // RESTRICTED SYSTEM TERMS // PAGE {} OF {} ",
+                    " RESTRICTED SYSTEM TERMS // PAGE {} OF {} ",
                     page_index + 1,
                     page_count
                 )
@@ -334,9 +339,8 @@ fn access_notice_policy(
     warning: Color,
     normal: Color,
     accent: Color,
-    blue: Color,
-    magenta: Color,
     width: u16,
+    animation_phase: usize,
 ) -> Vec<Line<'static>> {
     let critical_style = Style::default()
         .fg(critical)
@@ -346,10 +350,16 @@ fn access_notice_policy(
         .add_modifier(Modifier::BOLD);
     let body_style = Style::default().fg(normal).add_modifier(Modifier::BOLD);
 
-    let mut rows = restricted_access_splash(width, critical, warning, accent, blue, magenta);
+    let mut rows = restricted_access_splash(
+        width,
+        critical,
+        warning,
+        accent,
+        animation_phase,
+    );
     rows.push(Line::from(Span::styled("", body_style)));
 
-    let policy_rows: Vec<(&str, Style)> = vec![
+    let policy_rows: Vec<(&str, Style)> = vec![    let policy_rows: Vec<(&str, Style)> = vec![
         ("", body_style),
         ("1. AUTHORIZATION, IDENTITY, AND SCOPE", warning_style),
         ("Access is permitted only to an individual who has received express authorization", body_style),
@@ -517,72 +527,70 @@ fn access_notice_policy(
     rows
 }
 
-/// Build a BBS-style restricted-access masthead using Ratatui styles rather
-/// than emitting raw escape sequences into the terminal. This keeps colour
-/// handling deterministic inside the alternate-screen TUI.
+/// Build a single framed Restricted Access banner. No BBS node header or
+/// redundant connection headline is placed above the warning artwork.
 fn restricted_access_splash(
     width: u16,
-    _critical: Color,
+    critical: Color,
     warning: Color,
     accent: Color,
-    blue: Color,
-    magenta: Color,
+    animation_phase: usize,
 ) -> Vec<Line<'static>> {
     let frame_width = usize::from(width).clamp(24, 76);
-    let accent_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
-    let blue_style = Style::default().fg(blue).add_modifier(Modifier::BOLD);
-    let magenta_style = Style::default().fg(magenta).add_modifier(Modifier::BOLD);
-    let warning_style = Style::default().fg(warning).add_modifier(Modifier::BOLD);
+    let border_style = Style::default()
+        .fg(accent)
+        .bg(Color::Rgb(25, 34, 21))
+        .add_modifier(Modifier::BOLD);
+    let warning_style = Style::default()
+        .fg(warning)
+        .add_modifier(Modifier::BOLD);
 
-    let header = if frame_width >= 52 {
-        "S T R E E N O T E  //  B B S  N O D E  0 0"
-    } else {
-        "STREENOTE // NODE 00"
-    };
-    let mut rows = vec![
-        Line::from(Span::styled(bbs_rule(frame_width, '╔', '╗'), accent_style)),
-        Line::from(Span::styled(centered_bbs_line(header, frame_width), blue_style)),
-        Line::from(Span::styled(bbs_rule(frame_width, '╠', '╣'), magenta_style)),
-    ];
+    let mut rows = vec![Line::from(Span::styled(
+        bbs_rule(frame_width, '╔', '╗'),
+        border_style,
+    ))];
 
     if frame_width >= 66 {
-        rows.push(Line::from(Span::styled(
-            centered_bbs_line("SECURE ACCESS GATEWAY  ·  CONNECTION ESTABLISHED", frame_width),
-            accent_style,
-        )));
-
-        // Each glyph pixel and each negative-space cell receives its own
-        // foreground/background pair, creating a full-width camouflage mosaic.
+        // The artwork fills the frame edge-to-edge. Letter pixels stay bright
+        // red; the camo pattern fills every cell behind and around each letter.
         let canvas_width = frame_width.saturating_sub(6);
         let mut art_row = 0usize;
+
         for glyph_row in large_notice_word("RESTRICTED") {
             rows.push(camouflage_art_line(
                 &glyph_row,
                 canvas_width,
                 art_row,
                 17,
+                critical,
                 accent,
+                animation_phase,
             ));
             art_row += 1;
         }
-        art_row += 1;
         for glyph_row in large_notice_word("ACCESS") {
             rows.push(camouflage_art_line(
                 &glyph_row,
                 canvas_width,
                 art_row,
                 41,
+                critical,
                 accent,
+                animation_phase,
             ));
             art_row += 1;
         }
     } else {
         rows.push(Line::from(Span::styled(
             centered_bbs_line("RESTRICTED ACCESS", frame_width),
-            warning_style,
+            Style::default().fg(critical).add_modifier(Modifier::BOLD),
         )));
     }
 
+    rows.push(Line::from(Span::styled(
+        bbs_rule(frame_width, '╟', '╢'),
+        border_style,
+    )));
     let authorization = if frame_width >= 30 {
         "AUTHORIZED PERSONNEL ONLY"
     } else {
@@ -595,49 +603,42 @@ fn restricted_access_splash(
     if frame_width >= 52 {
         rows.push(Line::from(Span::styled(
             centered_bbs_line("SESSION MONITORED  //  READ OPERATOR TERMS", frame_width),
-            magenta_style,
+            warning_style,
         )));
     }
     rows.push(Line::from(Span::styled(
         bbs_rule(frame_width, '╚', '╝'),
-        accent_style,
+        border_style,
     )));
     rows
 }
 
-/// Fill the entire RESTRICTED / ACCESS art canvas with an irregular woodland
-/// camouflage pattern. Letter pixels use lighter field colours; the surrounding
-/// negative space remains textured with darker olive, green, and earth tones.
+/// Fill the full art canvas with woodland camouflage. The bitmap letters are
+/// bright red and remain readable against the dark olive/brown cell backgrounds.
 fn camouflage_art_line(
     glyph_row: &str,
     canvas_width: usize,
     y: usize,
     seed: usize,
+    letter_color: Color,
     border_color: Color,
+    animation_phase: usize,
 ) -> Line<'static> {
     let dark_palette = [
-        Color::Rgb(31, 43, 29),   // deep field green
-        Color::Rgb(48, 59, 34),   // olive
-        Color::Rgb(64, 57, 37),   // earth brown
-        Color::Rgb(41, 52, 36),   // woodland green
-        Color::Rgb(72, 61, 41),   // muted soil
-        Color::Rgb(37, 42, 31),   // shadow
+        Color::Rgb(31, 43, 29), // deep field green
+        Color::Rgb(48, 59, 34), // olive
+        Color::Rgb(64, 57, 37), // earth brown
+        Color::Rgb(41, 52, 36), // woodland green
+        Color::Rgb(72, 61, 41), // muted soil
+        Color::Rgb(37, 42, 31), // shadow
     ];
-    let mid_palette = [
+    let texture_palette = [
         Color::Rgb(76, 91, 49),
         Color::Rgb(91, 104, 57),
         Color::Rgb(111, 99, 66),
         Color::Rgb(66, 83, 52),
         Color::Rgb(120, 104, 70),
         Color::Rgb(83, 88, 58),
-    ];
-    let letter_palette = [
-        Color::Rgb(151, 161, 91), // muted olive
-        Color::Rgb(130, 148, 78), // field green
-        Color::Rgb(176, 155, 106), // khaki
-        Color::Rgb(111, 133, 79), // moss
-        Color::Rgb(160, 139, 91), // tan
-        Color::Rgb(135, 151, 102), // sage
     ];
 
     let glyph: Vec<char> = glyph_row.chars().collect();
@@ -654,16 +655,26 @@ fn camouflage_art_line(
         let is_letter = glyph_x >= 0
             && glyph.get(glyph_x as usize).is_some_and(|character| *character == '█');
 
-        let background_index = camouflage_index(x, y, seed, dark_palette.len());
+        let drifted_x = x.saturating_add(animation_phase);
+        let background_index = camouflage_index(
+            drifted_x,
+            y,
+            seed,
+            dark_palette.len(),
+        );
         let background = dark_palette[background_index];
 
         let (character, foreground) = if is_letter {
-            let index = camouflage_index(x + 3, y + 5, seed.wrapping_add(1), letter_palette.len());
-            ('█', letter_palette[index])
+            ('█', letter_color)
         } else {
-            let index = camouflage_index(x + 7, y + 2, seed.wrapping_add(2), mid_palette.len());
+            let index = camouflage_index(
+                drifted_x.saturating_add(7),
+                y.saturating_add(2),
+                seed.wrapping_add(2),
+                texture_palette.len(),
+            );
             let texture = [' ', '░', ' ', '▒', '·', ' ', '▓'];
-            (texture[index % texture.len()], mid_palette[index])
+            (texture[index % texture.len()], texture_palette[index])
         };
 
         spans.push(Span::styled(
@@ -679,9 +690,14 @@ fn camouflage_art_line(
     Line::from(spans)
 }
 
-/// Deterministic low-frequency noise creates irregular camouflage patches
-/// while remaining stable across redraws and independent of terminal colour mode.
-fn camouflage_index(x: usize, y: usize, seed: usize, palette_len: usize) -> usize {
+/// Deterministic low-frequency noise creates irregular woodland patches.
+/// animation_phase shifts the texture gradually without blinking the lettering.
+fn camouflage_index(
+    x: usize,
+    y: usize,
+    seed: usize,
+    palette_len: usize,
+) -> usize {
     let shifted_x = x.saturating_add((y.wrapping_mul(7).wrapping_add(seed)) % 5);
     let shifted_y = y.saturating_add((x.wrapping_mul(3).wrapping_add(seed)) % 3);
     let region_x = shifted_x / 4;
@@ -2316,73 +2332,77 @@ mod access_splash_tests {
     use unicode_width::UnicodeWidthStr;
 
     fn line_text(line: &ratatui::text::Line<'static>) -> String {
-        line.spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>()
+        line.spans.iter().map(|span| span.content.as_ref()).collect()
     }
 
     #[test]
-    fn wide_terminal_gets_full_multicolour_camouflage_letter_art() {
-        let accent = Color::Rgb(40, 235, 255);
-        let blue = Color::Rgb(85, 145, 255);
-        let magenta = Color::Rgb(245, 90, 225);
-        let warning = Color::Rgb(255, 205, 80);
-        let rows = restricted_access_splash(
-            80,
-            Color::Red,
-            warning,
-            accent,
-            blue,
-            magenta,
-        );
+    fn wide_splash_has_bright_red_lettering_and_army_camouflage_only() {
+        let red = Color::Rgb(255, 24, 24);
+        let olive = Color::Rgb(112, 128, 72);
+        let khaki = Color::Rgb(198, 177, 119);
+        let rows = restricted_access_splash(80, red, khaki, olive, 0);
 
-        assert!(rows.iter().any(|line| line_text(line).contains("S T R E E N O T E")));
-        assert!(rows.iter().any(|line| line_text(line).contains('█')));
+        assert!(!rows.iter().any(|line| line_text(line).contains("BBS NODE")));
+        assert!(!rows.iter().any(|line| line_text(line).contains("SECURE ACCESS GATEWAY")));
         assert!(rows.iter().any(|line| line_text(line).contains("AUTHORIZED PERSONNEL ONLY")));
 
-        let art_rows: Vec<_> = rows
-            .iter()
-            .filter(|line| line_text(line).contains('█'))
-            .collect();
-        assert_eq!(art_rows.len(), 14, "both words should retain all seven bitmap rows");
-
-        // Every cell of every art row has a background fill, including spaces
-        // around the letter pixels, and the lettering uses multiple camo colours.
+        let art_rows: Vec<_> = rows.iter().filter(|line| {
+            line.spans.iter().any(|span| span.style.fg == Some(red) && span.content.contains('█'))
+        }).collect();
+        assert_eq!(art_rows.len(), 14);
         for row in &art_rows {
             assert!(row.spans.iter().all(|span| span.style.bg.is_some()));
-            assert!(row.spans.iter().any(|span| span.content.contains('█')));
-            assert_eq!(
-                UnicodeWidthStr::width(line_text(row).as_str()),
-                76,
-                "camouflage should fill the complete splash art width",
-            );
+            assert_eq!(UnicodeWidthStr::width(line_text(row).as_str()), 76);
+            assert!(row.spans.iter().filter(|span| span.content.contains('█'))
+                .all(|span| span.style.fg == Some(red)));
         }
 
-        let foregrounds: std::collections::HashSet<_> = art_rows
+        let colors: std::collections::HashSet<_> = art_rows
             .iter()
-            .flat_map(|row| row.spans.iter().filter_map(|span| span.style.fg))
+            .flat_map(|row| row.spans.iter().filter_map(|span| span.style.bg))
             .collect();
-        assert!(foregrounds.len() >= 5, "camouflage should use multiple earth tones");
-        assert!(art_rows
-            .iter()
-            .flat_map(|row| row.spans.iter())
-            .any(|span| span.style.bg == Some(Color::Rgb(31, 43, 29))));
+        assert!(colors.len() >= 4, "camouflage should fill the artwork with several field colours");
+        assert!(rows.iter().any(|line| line.spans.iter().any(|span| span.style.fg == Some(olive))));
+        assert!(rows.iter().any(|line| line.spans.iter().any(|span| span.style.fg == Some(khaki))));
     }
 
     #[test]
-    fn narrow_terminal_gets_compact_splash_without_wrapped_art() {
+    fn camouflage_pattern_moves_between_animation_frames_but_red_text_stays_fixed() {
+        let red = Color::Rgb(255, 24, 24);
+        let khaki = Color::Rgb(198, 177, 119);
+        let olive = Color::Rgb(112, 128, 72);
+        let first = restricted_access_splash(80, red, khaki, olive, 0);
+        let later = restricted_access_splash(80, red, khaki, olive, 4);
+
+        let first_text: Vec<_> = first.iter().filter(|line| line.spans.iter().any(|span| span.content.contains('█')))
+            .map(line_text).collect();
+        let later_text: Vec<_> = later.iter().filter(|line| line.spans.iter().any(|span| span.content.contains('█')))
+            .map(line_text).collect();
+        assert_eq!(first_text, later_text, "red letter silhouettes remain stationary");
+
+        let first_backgrounds: Vec<_> = first.iter().filter(|line| line.spans.iter().any(|span| span.content.contains('█')))
+            .flat_map(|line| line.spans.iter().filter_map(|span| span.style.bg)).collect();
+        let later_backgrounds: Vec<_> = later.iter().filter(|line| line.spans.iter().any(|span| span.content.contains('█')))
+            .flat_map(|line| line.spans.iter().filter_map(|span| span.style.bg)).collect();
+        assert_ne!(first_backgrounds, later_backgrounds, "camouflage texture should drift");
+    }
+
+    #[test]
+    fn narrow_terminal_gets_compact_bright_red_warning() {
+        let red = Color::Rgb(255, 24, 24);
         let rows = restricted_access_splash(
             24,
-            Color::Red,
-            Color::Yellow,
-            Color::Cyan,
-            Color::Blue,
-            Color::Magenta,
+            red,
+            Color::Rgb(198, 177, 119),
+            Color::Rgb(112, 128, 72),
+            0,
         );
 
         assert!(!rows.iter().any(|line| line_text(line).contains('█')));
-        assert!(rows.iter().any(|line| line_text(line).contains("RESTRICTED ACCESS")));
-        assert!(rows.iter().all(|line| UnicodeWidthStr::width(line_text(line).as_str()) <= 24));
+        assert!(rows.iter().any(|line| {
+            line_text(line).contains("RESTRICTED ACCESS")
+                && line.spans.iter().any(|span| span.style.fg == Some(red))
+        }));
+        assert!(rows.iter().all(|line| UnicodeWidthStr::width(line_text(line).as_str()) <= 76));
     }
 }
