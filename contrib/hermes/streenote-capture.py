@@ -143,6 +143,9 @@ def main() -> int:
             "post_llm_call",
             "pre_tool_call",
             "post_tool_call",
+            "on_stream_start",
+            "on_stream_delta",
+            "on_stream_end",
         )
         if event_name not in supported_events:
             return 0
@@ -160,11 +163,35 @@ def main() -> int:
         elif event_name == "pre_tool_call":
             kind = "hermes_tool_call"
             text = tool_event_text(event_name, payload, extra)
-        else:
+        elif event_name == "post_tool_call":
             kind = "hermes_tool_result"
             text = tool_event_text(event_name, payload, extra)
+        elif event_name == "on_stream_start":
+            kind = "hermes_stream_start"
+            text = "Assistant stream started."
+        elif event_name == "on_stream_delta":
+            # Capture user-visible text only. Reasoning deltas may be sensitive
+            # and are intentionally excluded from the journal.
+            if event_value(payload, extra, "kind") != "text":
+                return 0
+            kind = "hermes_stream_delta"
+            text = event_value(payload, extra, "delta")
+        else:
+            kind = "hermes_stream_end"
+            finished = bool(event_value(payload, extra, "finished"))
+            error = event_value(payload, extra, "error")
+            text = "finished" if finished else "interrupted"
+            if error:
+                text += f"\nError: {redact_inline(str(error))}"
 
-        if not isinstance(text, str) or not text.strip():
+        if not isinstance(text, str):
+            return 0
+        # Whitespace-only text deltas are meaningful token boundaries; retain
+        # them so separately streamed words do not get concatenated together.
+        if event_name == "on_stream_delta":
+            if not text:
+                return 0
+        elif not text.strip():
             return 0
 
         encoded_text = text.encode("utf-8")
@@ -176,10 +203,19 @@ def main() -> int:
             return 0
 
         session_id = event_value(payload, extra, "session_id")
+        turn_id = event_value(payload, extra, "turn_id")
+        tool_call_id = event_value(payload, extra, "tool_call_id")
+        iteration = event_value(payload, extra, "iteration")
         if event_name in ("pre_tool_call", "post_tool_call"):
-            identity_id = event_value(payload, extra, "tool_call_id")
+            identity_id = tool_call_id
+        elif event_name in ("on_stream_start", "on_stream_end"):
+            identity_id = f"{turn_id or ''}:{iteration if iteration is not None else ''}"
+        elif event_name == "on_stream_delta":
+            # One UUID per delta prevents drops when several chunks share the
+            # same turn/iteration and the hook observer retries asynchronously.
+            identity_id = None
         else:
-            identity_id = event_value(payload, extra, "turn_id")
+            identity_id = turn_id
         event_id = make_event_id(event_name, session_id, identity_id)
         event = {
             "version": 1,
@@ -187,6 +223,10 @@ def main() -> int:
             "kind": kind,
             "timestamp": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
             "text": text,
+            "conversation_id": session_id,
+            "turn_id": turn_id,
+            "tool_call_id": tool_call_id,
+            "iteration": iteration,
         }
 
         inbox = Path(inbox_value).expanduser()

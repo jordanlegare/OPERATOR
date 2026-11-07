@@ -19,6 +19,9 @@ pub enum EntryKind {
     HermesAssistant,
     HermesToolCall,
     HermesToolResult,
+    HermesStreamStart,
+    HermesStreamDelta,
+    HermesStreamEnd,
 }
 
 impl Default for EntryKind {
@@ -36,6 +39,18 @@ pub struct Entry {
     /// Stable ID for externally imported events; used only for deduplication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_id: Option<String>,
+    /// Hermes session identifier shared by every turn in one conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    /// Hermes turn identifier shared by prompt, stream, and tool events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    /// Tool-call identifier used to pair a tool invocation with its result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// Provider iteration within a turn; stream hooks may fire more than once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration: Option<u32>,
 }
 
 impl Entry {
@@ -49,6 +64,10 @@ impl Entry {
             kind,
             text: sanitize_entry_text(kind, &text),
             event_id: None,
+            conversation_id: None,
+            turn_id: None,
+            tool_call_id: None,
+            iteration: None,
         }
     }
 
@@ -59,12 +78,20 @@ impl Entry {
         text: String,
         timestamp: String,
         event_id: String,
+        conversation_id: Option<String>,
+        turn_id: Option<String>,
+        tool_call_id: Option<String>,
+        iteration: Option<u32>,
     ) -> Self {
         Self {
             timestamp,
             kind,
             text: sanitize_entry_text(kind, &text),
             event_id: Some(event_id),
+            conversation_id,
+            turn_id,
+            tool_call_id,
+            iteration,
         }
     }
 }
@@ -123,7 +150,13 @@ impl Journal {
                         continue;
                     }
                     total_text_bytes = total_text_bytes.saturating_add(entry.text.len());
-                    entries.push(entry);
+                    if let Some(previous) = entries.last_mut().filter(|previous| {
+                        can_merge_stream_delta(previous, &entry)
+                    }) {
+                        previous.text.push_str(&entry.text);
+                    } else {
+                        entries.push(entry);
+                    }
                 }
                 Err(_) => skipped_corrupt_lines += 1,
             }
@@ -162,7 +195,15 @@ impl Journal {
         }
 
         self.total_text_bytes = self.total_text_bytes.saturating_add(entry.text.len());
-        self.entries.push(entry.clone());
+        if let Some(previous) = self.entries.last_mut().filter(|previous| {
+            can_merge_stream_delta(previous, &entry)
+        }) {
+            // Keep one live assistant bubble in memory while persisting every
+            // raw delta as its own append-only event for crash recovery.
+            previous.text.push_str(&entry.text);
+        } else {
+            self.entries.push(entry.clone());
+        }
 
         // Never let a newer entry overtake an older entry whose disk append failed.
         if !self.pending.is_empty() {
@@ -354,6 +395,9 @@ pub fn entry_kind_label(kind: EntryKind) -> &'static str {
         EntryKind::HermesAssistant => "HAI",
         EntryKind::HermesToolCall => "HCAL",
         EntryKind::HermesToolResult => "HRES",
+        EntryKind::HermesStreamStart => "HSTR",
+        EntryKind::HermesStreamDelta => "HDEL",
+        EntryKind::HermesStreamEnd => "HEND",
     }
 }
 
@@ -403,6 +447,9 @@ pub fn entry_display_text(entry: &Entry) -> String {
             | EntryKind::HermesAssistant
             | EntryKind::HermesToolCall
             | EntryKind::HermesToolResult
+            | EntryKind::HermesStreamStart
+            | EntryKind::HermesStreamDelta
+            | EntryKind::HermesStreamEnd
     ) {
         let first_line = entry.text.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
         if entry.text.contains('\n') {
@@ -424,6 +471,14 @@ pub fn entry_transcript_text(entry: &Entry, index: usize) -> String {
         entry_kind_label(entry.kind),
         entry_display_text(entry)
     )
+}
+
+fn can_merge_stream_delta(previous: &Entry, next: &Entry) -> bool {
+    previous.kind == EntryKind::HermesStreamDelta
+        && next.kind == EntryKind::HermesStreamDelta
+        && previous.conversation_id == next.conversation_id
+        && previous.turn_id == next.turn_id
+        && previous.iteration == next.iteration
 }
 
 fn append_jsonl(path: &Path, entry: &Entry) -> io::Result<()> {
@@ -461,7 +516,10 @@ fn sanitize_entry_text(kind: EntryKind, input: &str) -> String {
         EntryKind::HermesUser
         | EntryKind::HermesAssistant
         | EntryKind::HermesToolCall
-        | EntryKind::HermesToolResult => sanitize_multiline(input),
+        | EntryKind::HermesToolResult
+        | EntryKind::HermesStreamStart
+        | EntryKind::HermesStreamDelta
+        | EntryKind::HermesStreamEnd => sanitize_multiline(input),
         _ => sanitize_single_line(input),
     }
 }
@@ -631,5 +689,70 @@ Arguments:
             entry_display_text(&entry),
             "Tool: browser  ↳ [full message]"
         );
+    }
+}
+
+
+#[cfg(test)]
+mod hermes_stream_delta_tests {
+    use super::{Entry, EntryKind, Journal};
+    use std::{env, fs, path::PathBuf, sync::atomic::{AtomicUsize, Ordering}};
+
+    static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn journal_path() -> PathBuf {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        env::temp_dir().join(format!("streenote-stream-{}-{id}.jsonl", std::process::id()))
+    }
+
+    fn delta(event_id: &str, text: &str) -> Entry {
+        let mut entry = Entry::with_external_event(
+            EntryKind::HermesStreamDelta,
+            text.to_string(),
+            "2026-11-07T12:00:00-05:00".to_string(),
+            event_id.to_string(),
+            Some("session-1".to_string()),
+            Some("turn-1".to_string()),
+            None,
+            Some(0),
+        );
+        entry.event_id = Some(event_id.to_string());
+        entry
+    }
+
+    #[test]
+    fn streaming_deltas_coalesce_in_memory_but_remain_separate_durable_events() {
+        let path = journal_path();
+        let mut journal = Journal::open(path.clone()).expect("open journal");
+        journal.append(delta("delta-1", "Hello ")).expect("append first delta");
+        journal.append(delta("delta-2", "from Hermes.")).expect("append second delta");
+
+        assert_eq!(journal.entries.len(), 1);
+        assert_eq!(journal.entries[0].text, "Hello from Hermes.");
+        assert_eq!(journal.total_text_bytes, "Hello from Hermes.".len());
+        drop(journal);
+
+        let durable_lines = fs::read_to_string(&path).expect("read journal");
+        assert_eq!(durable_lines.lines().count(), 2);
+        let reloaded = Journal::open(path.clone()).expect("reload journal");
+        assert_eq!(reloaded.entries.len(), 1);
+        assert_eq!(reloaded.entries[0].text, "Hello from Hermes.");
+        drop(reloaded);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn stream_deltas_from_different_iterations_are_not_coalesced() {
+        let path = journal_path();
+        let mut journal = Journal::open(path.clone()).expect("open journal");
+        let mut first = delta("delta-a", "First iteration");
+        first.iteration = Some(0);
+        let mut second = delta("delta-b", "Second iteration");
+        second.iteration = Some(1);
+        journal.append(first).expect("append first iteration");
+        journal.append(second).expect("append second iteration");
+        assert_eq!(journal.entries.len(), 2);
+        drop(journal);
+        let _ = fs::remove_file(path);
     }
 }

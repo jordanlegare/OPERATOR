@@ -30,6 +30,14 @@ struct InboxEvent {
     kind: EntryKind,
     timestamp: String,
     text: String,
+    #[serde(default)]
+    conversation_id: Option<String>,
+    #[serde(default)]
+    turn_id: Option<String>,
+    #[serde(default)]
+    tool_call_id: Option<String>,
+    #[serde(default)]
+    iteration: Option<u32>,
 }
 
 impl Default for HermesBridge {
@@ -95,6 +103,9 @@ impl HermesBridge {
                         | EntryKind::HermesAssistant
                         | EntryKind::HermesToolCall
                         | EntryKind::HermesToolResult
+                        | EntryKind::HermesStreamStart
+                        | EntryKind::HermesStreamDelta
+                        | EntryKind::HermesStreamEnd
                 )
             {
                 quarantine(&path, &failed)?;
@@ -111,6 +122,10 @@ impl HermesBridge {
                 event.text,
                 timestamp,
                 event.event_id,
+                event.conversation_id.filter(|id| !id.is_empty() && id.len() <= 256),
+                event.turn_id.filter(|id| !id.is_empty() && id.len() <= 256),
+                event.tool_call_id.filter(|id| !id.is_empty() && id.len() <= 256),
+                event.iteration,
             );
 
             // If the journal cannot flush this entry, leave the inbox file in
@@ -356,4 +371,43 @@ mod tool_event_tests {
         drop(journal);
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn imports_conversation_turn_tool_and_iteration_metadata() {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let root = env::temp_dir().join(format!(
+            "streenote-hermes-metadata-{}-{id}",
+            std::process::id()
+        ));
+        let ready = root.join("ready");
+        fs::create_dir_all(&ready).expect("create ready directory");
+        let event = serde_json::json!({
+            "version": 1,
+            "event_id": "tool-event-metadata",
+            "kind": "hermes_tool_call",
+            "timestamp": "2026-11-07T12:00:00-05:00",
+            "text": "Tool: terminal\\nCall ID: call-77\\nArguments: {}",
+            "conversation_id": "session-77",
+            "turn_id": "turn-77",
+            "tool_call_id": "call-77",
+            "iteration": 2
+        });
+        fs::write(
+            ready.join("metadata.json"),
+            serde_json::to_vec(&event).expect("serialize metadata event"),
+        ).expect("write metadata event");
+
+        let mut journal = Journal::open(root.join("journal.jsonl")).expect("open journal");
+        let mut bridge = HermesBridge::new(root.clone());
+        assert_eq!(bridge.drain(&mut journal).expect("drain inbox"), 1);
+        let entry = journal.entries.first().expect("imported tool event");
+        assert_eq!(entry.conversation_id.as_deref(), Some("session-77"));
+        assert_eq!(entry.turn_id.as_deref(), Some("turn-77"));
+        assert_eq!(entry.tool_call_id.as_deref(), Some("call-77"));
+        assert_eq!(entry.iteration, Some(2));
+
+        drop(journal);
+        let _ = fs::remove_dir_all(root);
+    }
+
 }

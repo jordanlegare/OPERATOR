@@ -1,4 +1,5 @@
 mod app;
+mod conversations;
 mod hermes_bridge;
 mod shell;
 mod settings;
@@ -36,7 +37,7 @@ use ratatui::{
     Terminal,
 };
 
-use app::{App, InputMode};
+use app::{App, ConversationView, InputMode};
 use hermes_bridge::HermesBridge;
 use shell::ShellSession;
 use storage::Journal;
@@ -922,6 +923,7 @@ fn run(
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Right)
                     if app.message_view_index.is_none()
+                        && app.conversation_view.is_none()
                         && mouse.column >= app.input_area.x
                         && mouse.column < app.input_area.x.saturating_add(app.input_area.width)
                         && mouse.row >= app.input_area.y
@@ -1317,6 +1319,55 @@ fn handle_key(
     app: &mut App,
     shell: &mut Option<ShellSession>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    // Conversation list and thread viewer own keyboard focus. The thread
+    // is rendered from the current journal on every frame, so stream deltas
+    // imported by the main loop appear without closing or reopening the modal.
+    if let Some(view) = app.conversation_view.clone() {
+        match view {
+            ConversationView::List => match code {
+                KeyCode::Esc => app.close_conversation_view(),
+                KeyCode::Up => app.move_conversation_selection(-1),
+                KeyCode::Down => app.move_conversation_selection(1),
+                KeyCode::PageUp => app.move_conversation_selection(-8),
+                KeyCode::PageDown => app.move_conversation_selection(8),
+                KeyCode::Home => app.conversation_list_selected = 0,
+                KeyCode::End => {
+                    let last = app.conversation_threads().len().saturating_sub(1);
+                    app.conversation_list_selected = last;
+                }
+                KeyCode::Enter => app.open_selected_conversation(),
+                _ => {}
+            },
+            ConversationView::Thread { .. } => match code {
+                KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(text) = app.selected_conversation_text() {
+                        if text.len() > 60_000 {
+                            app.status = "Conversation exceeds the 60 KB terminal clipboard limit.".to_string();
+                        } else {
+                            match copy_to_terminal_clipboard(&text) {
+                                Ok(()) => app.status = format!(
+                                    "Copied {} characters from the Hermes conversation to the client and server clipboards.",
+                                    text.chars().count()
+                                ),
+                                Err(error) => app.status = format!("Could not copy Hermes conversation: {error}"),
+                            }
+                        }
+                    }
+                }
+                KeyCode::Esc => app.close_conversation_view(),
+                KeyCode::Backspace => app.collapse_conversation_thread(),
+                KeyCode::Up => app.scroll_conversation_view(-1),
+                KeyCode::Down => app.scroll_conversation_view(1),
+                KeyCode::PageUp => app.scroll_conversation_view(-(app.conversation_viewport_height.max(1) as i32)),
+                KeyCode::PageDown => app.scroll_conversation_view(app.conversation_viewport_height.max(1) as i32),
+                KeyCode::Home => app.conversation_view_home(),
+                KeyCode::End => app.conversation_view_end(),
+                _ => {}
+            },
+        }
+        return Ok(false);
+    }
+
     // The full Hermes message viewer owns keyboard focus until dismissed.
     if app.message_view_index.is_some() {
         match code {

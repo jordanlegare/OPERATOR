@@ -1,4 +1,5 @@
 use std::{
+    cell::{Ref, RefCell},
     io,
     path::PathBuf,
     time::{Duration, Instant},
@@ -8,6 +9,7 @@ use ratatui::layout::Rect;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
+    conversations::{build_threads, is_hermes_event, ConversationThread},
     shell::ShellSession,
     settings::Settings,
     storage::{
@@ -44,6 +46,29 @@ struct TranscriptSelection {
     anchor: TranscriptPoint,
     active: TranscriptPoint,
     whole_row: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConversationView {
+    List,
+    Thread { id: String },
+}
+
+#[derive(Debug)]
+struct ConversationCache {
+    entry_count: usize,
+    total_text_bytes: usize,
+    threads: Vec<ConversationThread>,
+}
+
+impl Default for ConversationCache {
+    fn default() -> Self {
+        Self {
+            entry_count: usize::MAX,
+            total_text_bytes: usize::MAX,
+            threads: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -88,6 +113,17 @@ pub struct App {
     pub message_view_index: Option<usize>,
     /// Vertical scroll offset within the Hermes message viewer.
     pub message_view_scroll: u16,
+    /// Expandable Hermes conversation list/thread viewer. It is rebuilt from
+    /// the live journal every frame so incoming stream deltas appear immediately.
+    pub conversation_view: Option<ConversationView>,
+    pub conversation_list_selected: usize,
+    pub conversation_scroll: usize,
+    pub conversation_content_height: usize,
+    pub conversation_viewport_height: usize,
+    pub conversation_follow_tail: bool,
+    /// Derived conversation groups are cached until the journal's entry count
+    /// or byte count changes; this avoids a full-history scan on every frame.
+    conversation_cache: RefCell<ConversationCache>,
     /// Whether the ASCII-art banner is currently visible.
     pub show_banner: bool,
     /// Whether the Canadian maple-leaf watermark is displayed behind the transcript.
@@ -148,6 +184,13 @@ impl App {
             show_help: false,
             message_view_index: None,
             message_view_scroll: 0,
+            conversation_view: None,
+            conversation_list_selected: 0,
+            conversation_scroll: 0,
+            conversation_content_height: 0,
+            conversation_viewport_height: 1,
+            conversation_follow_tail: true,
+            conversation_cache: RefCell::new(ConversationCache::default()),
             show_banner: settings.show_banner,
             show_canada_watermark: settings.show_canada_watermark,
             scp_sftp_passthrough: settings.scp_sftp_passthrough,
@@ -413,25 +456,19 @@ impl App {
 
         if let Some(row) = clicked_row {
             let is_hermes_event = self.journal.entries.get(row).is_some_and(|entry| {
-                matches!(
-                    entry.kind,
-                    EntryKind::HermesUser
-                        | EntryKind::HermesAssistant
-                        | EntryKind::HermesToolCall
-                        | EntryKind::HermesToolResult
-                )
+                is_hermes_event(entry.kind)
             });
 
             if is_hermes_event {
-                // A stationary click on a Hermes transcript row is the mouse
-                // equivalent of selecting that row and executing /view.
+                // A stationary click on a Hermes transcript row opens its
+                // containing conversation thread.
                 self.selection = None;
                 self.selected_row = Some(row);
                 self.follow_tail = row == self.journal.entries.len().saturating_sub(1);
                 if self.follow_tail {
                     self.scroll_top = self.max_top();
                 }
-                self.open_hermes_message();
+                self.open_conversation_for_entry(row);
                 return;
             }
 
@@ -819,57 +856,176 @@ impl App {
             return false;
         };
         let is_hermes_event = self.journal.entries.get(index).is_some_and(|entry| {
-            matches!(
-                entry.kind,
-                EntryKind::HermesUser
-                    | EntryKind::HermesAssistant
-                    | EntryKind::HermesToolCall
-                    | EntryKind::HermesToolResult
-            )
+            is_hermes_event(entry.kind)
         });
         if !is_hermes_event {
             return false;
         }
 
-        self.message_view_index = Some(index);
-        self.message_view_scroll = 0;
+        self.open_conversation_for_entry(index)
+    }
+
+    /// Open the conversation containing a selected Hermes event. New events
+    /// are associated by session ID; legacy journal rows use a conservative
+    /// prompt-to-following-events fallback grouping.
+    pub fn open_conversation_for_entry(&mut self, index: usize) -> bool {
+        let id = self.conversation_threads()
+            .iter()
+            .find(|thread| thread.entries.contains(&index))
+            .map(|thread| thread.id.clone());
+        let Some(id) = id else {
+            return false;
+        };
+        self.conversation_view = Some(ConversationView::Thread { id });
+        self.conversation_scroll = 0;
+        self.conversation_follow_tail = true;
         true
+    }
+
+    pub fn open_conversations(&mut self) {
+        let count = self.conversation_threads().len();
+        if count == 0 {
+            self.status = "No Hermes conversations are present in the journal.".to_string();
+            return;
+        }
+        self.conversation_list_selected = count.saturating_sub(1);
+        self.conversation_view = Some(ConversationView::List);
+        self.status = format!("{count} Hermes conversation(s). Enter expands a thread.");
+    }
+
+    pub fn conversation_threads(&self) -> Ref<'_, Vec<ConversationThread>> {
+        let entry_count = self.journal.entries.len();
+        let total_text_bytes = self.journal.total_text_bytes;
+        {
+            let mut cache = self.conversation_cache.borrow_mut();
+            if cache.entry_count != entry_count || cache.total_text_bytes != total_text_bytes {
+                cache.threads = build_threads(&self.journal.entries);
+                cache.entry_count = entry_count;
+                cache.total_text_bytes = total_text_bytes;
+            }
+        }
+        Ref::map(self.conversation_cache.borrow(), |cache| &cache.threads)
+    }
+
+    pub fn open_selected_conversation(&mut self) {
+        let id = self.conversation_threads()
+            .get(self.conversation_list_selected)
+            .map(|thread| thread.id.clone());
+        let Some(id) = id else {
+            self.conversation_view = None;
+            return;
+        };
+        self.conversation_view = Some(ConversationView::Thread { id });
+        self.conversation_scroll = 0;
+        self.conversation_follow_tail = true;
+    }
+
+    pub fn move_conversation_selection(&mut self, direction: i32) {
+        let count = self.conversation_threads().len();
+        if count == 0 {
+            self.conversation_list_selected = 0;
+            return;
+        }
+        self.conversation_list_selected = if direction < 0 {
+            self.conversation_list_selected.saturating_sub(direction.unsigned_abs() as usize)
+        } else {
+            self.conversation_list_selected.saturating_add(direction as usize).min(count - 1)
+        };
+    }
+
+    pub fn collapse_conversation_thread(&mut self) {
+        let Some(ConversationView::Thread { id }) = self.conversation_view.as_ref() else {
+            return;
+        };
+        let id = id.clone();
+        let selected = self.conversation_threads().iter().position(|thread| thread.id == id);
+        if let Some(index) = selected {
+            self.conversation_list_selected = index;
+            self.conversation_view = Some(ConversationView::List);
+        }
+        self.conversation_scroll = 0;
+    }
+
+    pub fn close_conversation_view(&mut self) {
+        self.conversation_view = None;
+        self.conversation_scroll = 0;
+        self.conversation_follow_tail = true;
+    }
+
+    pub fn scroll_conversation_view(&mut self, amount: i32) {
+        if amount < 0 {
+            if self.conversation_follow_tail {
+                self.conversation_scroll = self.conversation_content_height
+                    .saturating_sub(self.conversation_viewport_height);
+                self.conversation_follow_tail = false;
+            }
+            self.conversation_scroll = self.conversation_scroll
+                .saturating_sub(amount.unsigned_abs() as usize);
+        } else if amount > 0 && !self.conversation_follow_tail {
+            let max_scroll = self.conversation_content_height
+                .saturating_sub(self.conversation_viewport_height);
+            self.conversation_scroll = self.conversation_scroll
+                .saturating_add(amount as usize)
+                .min(max_scroll);
+            if self.conversation_scroll >= max_scroll {
+                self.conversation_follow_tail = true;
+            }
+        }
+    }
+
+    pub fn conversation_view_home(&mut self) {
+        self.conversation_follow_tail = false;
+        self.conversation_scroll = 0;
+    }
+
+    pub fn conversation_view_end(&mut self) {
+        self.conversation_follow_tail = true;
+    }
+
+    pub fn selected_conversation_text(&self) -> Option<String> {
+        let Some(ConversationView::Thread { id }) = self.conversation_view.as_ref() else {
+            return None;
+        };
+        let indices = self.conversation_threads()
+            .iter()
+            .find(|thread| &thread.id == id)
+            .map(|thread| thread.entries.clone())?;
+        let mut output = String::new();
+        for index in indices {
+            let entry = self.journal.entries.get(index)?;
+            let label = match entry.kind {
+                EntryKind::HermesUser => "USER",
+                EntryKind::HermesAssistant => "ASSISTANT",
+                EntryKind::HermesToolCall => "TOOL CALL",
+                EntryKind::HermesToolResult => "TOOL RESULT",
+                EntryKind::HermesStreamDelta => "ASSISTANT STREAM",
+                EntryKind::HermesStreamStart => "STREAM START",
+                EntryKind::HermesStreamEnd => "STREAM END",
+                _ => "HERMES",
+            };
+            output.push_str(&format!("[{label}] {}\n{}\n\n", entry.timestamp, entry.text));
+        }
+        Some(output)
     }
 
     /// Open the full body of the selected Hermes message or tool event.
     pub fn open_hermes_message(&mut self) {
-        let is_hermes_event = |index: usize| {
-            self.journal.entries.get(index).is_some_and(|entry| {
-                matches!(
-                    entry.kind,
-                    EntryKind::HermesUser
-                        | EntryKind::HermesAssistant
-                        | EntryKind::HermesToolCall
-                        | EntryKind::HermesToolResult
-                )
-            })
+        let is_hermes_event_at = |index: usize| {
+            self.journal.entries.get(index).is_some_and(|entry| is_hermes_event(entry.kind))
         };
         let candidate = self
             .selected_row
-            .filter(|index| is_hermes_event(*index))
+            .filter(|index| is_hermes_event_at(*index))
             .or_else(|| {
                 self.active_match
                     .and_then(|match_index| self.matches.get(match_index).copied())
-                    .filter(|index| is_hermes_event(*index))
+                    .filter(|index| is_hermes_event_at(*index))
             })
             .or_else(|| {
                 self.journal
                     .entries
                     .iter()
-                    .rposition(|entry| {
-                        matches!(
-                            entry.kind,
-                            EntryKind::HermesUser
-                                | EntryKind::HermesAssistant
-                                | EntryKind::HermesToolCall
-                                | EntryKind::HermesToolResult
-                        )
-                    })
+                    .rposition(|entry| is_hermes_event(entry.kind))
             });
 
         let Some(index) = candidate else {
@@ -1014,6 +1170,7 @@ impl App {
         match command.as_str() {
             "/help" => self.show_help = true,
             "/view" => self.open_hermes_message(),
+            "/threads" | "/conversations" => self.open_conversations(),
             "/search" => {
                 if argument.is_empty() {
                     self.clear_search();
@@ -1335,6 +1492,8 @@ fn is_streamnote_command(line: &str) -> bool {
         command.as_str(),
         "/help"
             | "/view"
+            | "/threads"
+            | "/conversations"
             | "/search"
             | "/clear"
             | "/save"
@@ -1399,7 +1558,7 @@ fn looks_like_secret_prompt(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{looks_like_secret_prompt, App, InputMode};
+    use super::{looks_like_secret_prompt, App, ConversationView, InputMode};
     use crate::storage::Journal;
     use std::{
         env, fs,
@@ -1438,8 +1597,8 @@ mod tests {
             app.selected_row = Some(index);
 
             assert!(app.open_selected_hermes_message());
-            assert_eq!(app.message_view_index, Some(index));
-            app.close_hermes_message();
+            assert!(matches!(app.conversation_view, Some(ConversationView::Thread { .. })));
+            app.close_conversation_view();
         }
 
         let note_index = app.journal.entries.len();
@@ -1448,7 +1607,7 @@ mod tests {
             .expect("append note");
         app.selected_row = Some(note_index);
         assert!(!app.open_selected_hermes_message());
-        assert_eq!(app.message_view_index, None);
+        assert_eq!(app.conversation_view, None);
 
         app.selected_row = None;
         assert!(!app.open_selected_hermes_message());

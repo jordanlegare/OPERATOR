@@ -9,7 +9,8 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    app::{App, InputMode},
+    app::{App, ConversationView, InputMode},
+    conversations::ConversationThread,
     storage::{entry_display_text, entry_transcript_text, format_timestamp, Entry, EntryKind},
     theme::{Theme, THEMES},
 };
@@ -46,6 +47,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(index) = app.message_view_index {
         if let Some(entry) = app.journal.entries.get(index) {
             draw_hermes_message(frame, entry, index, app.message_view_scroll, theme);
+        }
+    }
+    if let Some(view) = app.conversation_view.clone() {
+        match view {
+            ConversationView::List => draw_conversation_list(frame, app, theme),
+            ConversationView::Thread { id } => draw_conversation_thread(frame, app, &id, theme),
         }
     }
 }
@@ -107,6 +114,159 @@ fn draw_hermes_message(
     );
     frame.render_widget(
         Paragraph::new(" ↑/↓ scroll · PgUp/PgDn page · Home/End · Ctrl+C copy · Esc close ")
+            .style(Style::default().fg(theme.muted).bg(theme.panel)),
+        sections[1],
+    );
+}
+
+fn draw_conversation_list(frame: &mut Frame, app: &App, theme: Theme) {
+    let threads = app.conversation_threads();
+    let popup = centered_rect(88, 82, frame.area());
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.primary))
+        .title(Span::styled(
+            format!(" HERMES CONVERSATIONS · {} THREAD(S) · ENTER EXPANDS · ESC CLOSES ", threads.len()),
+            Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(theme.panel));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let height = inner.height.max(1) as usize;
+    let start = app.conversation_list_selected
+        .saturating_sub(height / 2)
+        .min(threads.len().saturating_sub(height));
+    let lines = threads
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(height)
+        .map(|(index, thread)| conversation_summary_line(thread, index == app.conversation_list_selected, theme))
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().fg(theme.text).bg(theme.panel))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn conversation_summary_line(thread: &ConversationThread, selected: bool, theme: Theme) -> Line<'static> {
+    let state = if thread.streaming { "LIVE" } else { "" };
+    let id = thread.id.strip_prefix("session:").unwrap_or(&thread.id);
+    let short_id = id.chars().take(10).collect::<String>();
+    let mut style = Style::default().fg(theme.text);
+    if selected {
+        style = style.bg(theme.selected_row).add_modifier(Modifier::BOLD);
+    }
+    Line::from(vec![
+        Span::styled(if selected { " ▶ " } else { "   " }, Style::default().fg(theme.primary).patch(style)),
+        Span::styled(format!("{short_id:<10} "), Style::default().fg(theme.info).patch(style)),
+        Span::styled(format!("{:>2} turn(s) · {:>2} tool(s)  ", thread.turn_count, thread.tool_call_count), Style::default().fg(theme.muted).patch(style)),
+        Span::styled(state.to_string(), Style::default().fg(if thread.streaming { theme.success } else { theme.muted }).add_modifier(Modifier::BOLD).patch(style)),
+        Span::styled(format!("  {}", thread.title), style),
+    ])
+}
+
+fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: Theme) {
+    let (entry_indices, turn_count, tool_call_count, streaming) = {
+        let threads = app.conversation_threads();
+        let Some(thread) = threads.iter().find(|thread| thread.id.as_str() == id) else {
+            return;
+        };
+        (thread.entries.clone(), thread.turn_count, thread.tool_call_count, thread.streaming)
+    };
+    let entries = entry_indices.iter()
+        .filter_map(|index| app.journal.entries.get(*index).map(|entry| (*index, entry)))
+        .collect::<Vec<_>>();
+    let completed_iterations = entries.iter()
+        .filter_map(|(_, entry)| {
+            (entry.kind == EntryKind::HermesAssistant)
+                .then(|| entry.turn_id.clone().map(|turn| (turn, entry.iteration)))
+                .flatten()
+        })
+        .collect::<std::collections::HashSet<_>>();
+
+    let mut lines = Vec::new();
+    let mut previous_turn: Option<String> = None;
+    for (index, entry) in entries {
+        if matches!(entry.kind, EntryKind::HermesStreamStart | EntryKind::HermesStreamEnd) {
+            continue;
+        }
+        if entry.kind == EntryKind::HermesStreamDelta
+            && entry.turn_id.as_ref().is_some_and(|turn| {
+                completed_iterations.contains(&(turn.clone(), entry.iteration))
+            })
+        {
+            continue;
+        }
+        if entry.turn_id.is_some() && previous_turn != entry.turn_id {
+            if !lines.is_empty() {
+                lines.push(Line::from(Span::styled("  ─────────────────────────────────────────────────────────────", Style::default().fg(theme.border))));
+            }
+            previous_turn = entry.turn_id.clone();
+        }
+
+        let (label, color) = match entry.kind {
+            EntryKind::HermesUser => ("USER", theme.info),
+            EntryKind::HermesAssistant => ("ASSISTANT", theme.success),
+            EntryKind::HermesToolCall => ("TOOL CALL", theme.warning),
+            EntryKind::HermesToolResult => ("TOOL RESULT", theme.accent),
+            EntryKind::HermesStreamDelta => ("ASSISTANT · LIVE STREAM", theme.primary),
+            _ => ("HERMES", theme.muted),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{label}  "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{}  ·  row {}", format_timestamp(&entry.timestamp), index + 1), Style::default().fg(theme.muted)),
+        ]));
+        for body_line in entry.text.lines() {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(body_line.to_string(), Style::default().fg(theme.text)),
+            ]));
+        }
+        if entry.text.is_empty() {
+            lines.push(Line::from("  "));
+        }
+        lines.push(Line::from(""));
+    }
+
+    let state = if streaming { "STREAMING" } else { "CAPTURED" };
+    let id_label = id.strip_prefix("session:").unwrap_or(id);
+    let short_id = id_label.chars().take(12).collect::<String>();
+    let popup = centered_rect(94, 90, frame.area());
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.primary))
+        .title(Span::styled(
+            format!(" HERMES THREAD {short_id} · {turn_count} TURN(S) · {tool_call_count} TOOL(S) · {state} "),
+            Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(theme.panel));
+    let inner = block.inner(popup);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+    app.conversation_content_height = lines.len();
+    app.conversation_viewport_height = sections[0].height.max(1) as usize;
+    let max_scroll = lines.len().saturating_sub(app.conversation_viewport_height);
+    let scroll = if app.conversation_follow_tail {
+        max_scroll
+    } else {
+        app.conversation_scroll.min(max_scroll)
+    };
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().fg(theme.text).bg(theme.panel))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll.min(u16::MAX as usize) as u16, 0)),
+        sections[0],
+    );
+    frame.render_widget(
+        Paragraph::new(" ↑/↓ scroll · PgUp/PgDn page · Home/End · Ctrl+C copy thread · Esc close ")
             .style(Style::default().fg(theme.muted).bg(theme.panel)),
         sections[1],
     );
@@ -334,6 +494,9 @@ fn entry_line(entry: &Entry, index: usize, app: &App, theme: Theme) -> Line<'sta
         EntryKind::HermesAssistant => ("HAI ", theme.success),
         EntryKind::HermesToolCall => ("HCAL", theme.warning),
         EntryKind::HermesToolResult => ("HRES", theme.success),
+        EntryKind::HermesStreamStart => ("HSTR", theme.primary),
+        EntryKind::HermesStreamDelta => ("HDEL", theme.success),
+        EntryKind::HermesStreamEnd => ("HEND", theme.muted),
     };
 
     let mut spans = vec![
@@ -558,6 +721,8 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         Span::styled("history  ", Style::default().fg(theme.muted)),
         Span::styled("/search ", Style::default().fg(theme.primary)),
         Span::styled("journal  ", Style::default().fg(theme.muted)),
+        Span::styled("/threads ", Style::default().fg(theme.primary)),
+        Span::styled("Hermes  ", Style::default().fg(theme.muted)),
         Span::styled("F1 ", Style::default().fg(theme.primary)),
         Span::styled("terminal workspace  ", Style::default().fg(theme.muted)),
         Span::styled("F12 ", Style::default().fg(theme.primary)),
@@ -600,7 +765,8 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         Line::from(""),
         Line::from(vec![Span::styled("LOCAL COMMANDS", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD))]),
         Line::from(vec![Span::styled("/search WORDS", Style::default().fg(theme.warning)), Span::raw("  Search the entire journal and jump to the latest hit with context.")]),
-        Line::from(vec![Span::styled("/view", Style::default().fg(theme.warning)), Span::raw("           Open the full Markdown body of a selected Hermes message.")]),
+        Line::from(vec![Span::styled("/view", Style::default().fg(theme.warning)), Span::raw("           Open the full Markdown body of a selected Hermes event.")]),
+        Line::from(vec![Span::styled("/threads", Style::default().fg(theme.warning)), Span::raw("        Browse Hermes conversations; Enter expands a complete live thread.")]),
         Line::from(vec![Span::styled("n / N", Style::default().fg(theme.warning)), Span::raw("          Next / previous search result when input is empty.")]),
         Line::from(vec![Span::styled("/mode [shell|notes]", Style::default().fg(theme.warning)), Span::raw("  Switch input mode; no argument toggles.")]),
         Line::from(vec![Span::styled("/note TEXT", Style::default().fg(theme.warning)), Span::raw("      Save a note without leaving terminal mode; /note alone switches to Notes mode.")]),
