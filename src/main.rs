@@ -535,12 +535,14 @@ fn restricted_access_splash(
     let warning_style = Style::default().fg(warning).add_modifier(Modifier::BOLD);
     let critical_style = Style::default().fg(critical).add_modifier(Modifier::BOLD);
 
+    let header = if frame_width >= 52 {
+        "S T R E E N O T E  //  B B S  N O D E  0 0"
+    } else {
+        "STREENOTE // NODE 00"
+    };
     let mut rows = vec![
         (bbs_rule(frame_width, '╔', '╗'), accent_style),
-        (
-            centered_bbs_line("S T R E E N O T E  //  B B S  N O D E  0 0", frame_width),
-            blue_style,
-        ),
+        (centered_bbs_line(header, frame_width), blue_style),
         (bbs_rule(frame_width, '╠', '╣'), magenta_style),
     ];
 
@@ -576,14 +578,18 @@ fn restricted_access_splash(
         ));
     }
 
-    rows.push((
-        centered_bbs_line("AUTHORIZED PERSONNEL ONLY", frame_width),
-        warning_style,
-    ));
-    rows.push((
-        centered_bbs_line("SESSION MONITORED  //  READ OPERATOR TERMS", frame_width),
-        magenta_style,
-    ));
+    let authorization = if frame_width >= 30 {
+        "AUTHORIZED PERSONNEL ONLY"
+    } else {
+        "AUTHORIZED ONLY"
+    };
+    rows.push((centered_bbs_line(authorization, frame_width), warning_style));
+    if frame_width >= 52 {
+        rows.push((
+            centered_bbs_line("SESSION MONITORED  //  READ OPERATOR TERMS", frame_width),
+            magenta_style,
+        ));
+    }
     rows.push((bbs_rule(frame_width, '╚', '╝'), accent_style));
     rows
 }
