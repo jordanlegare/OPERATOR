@@ -727,8 +727,6 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         Span::styled("terminal workspace  ", Style::default().fg(theme.muted)),
         Span::styled("F12 ", Style::default().fg(theme.primary)),
         Span::styled("banner  ", Style::default().fg(theme.muted)),
-        Span::styled("drag ", Style::default().fg(theme.primary)),
-        Span::styled("select  ", Style::default().fg(theme.muted)),
         Span::styled("Ctrl+C ", Style::default().fg(theme.primary)),
         Span::styled("copy  ", Style::default().fg(theme.muted)),
         Span::styled("Ctrl+Q ", Style::default().fg(theme.primary)),
