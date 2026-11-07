@@ -776,6 +776,31 @@ impl App {
         // output arrives. The feed follows automatically only when already live.
     }
 
+    /// Open the full Hermes body only when the highlighted row is a Hermes event.
+    /// Returns true when a modal was opened. Used by Enter so ordinary input
+    /// submission remains unchanged when no Hermes row is selected.
+    pub fn open_selected_hermes_message(&mut self) -> bool {
+        let Some(index) = self.selected_row else {
+            return false;
+        };
+        let is_hermes_event = self.journal.entries.get(index).is_some_and(|entry| {
+            matches!(
+                entry.kind,
+                EntryKind::HermesUser
+                    | EntryKind::HermesAssistant
+                    | EntryKind::HermesToolCall
+                    | EntryKind::HermesToolResult
+            )
+        });
+        if !is_hermes_event {
+            return false;
+        }
+
+        self.message_view_index = Some(index);
+        self.message_view_scroll = 0;
+        true
+    }
+
     /// Open the full body of the selected Hermes message or tool event.
     pub fn open_hermes_message(&mut self) {
         let is_hermes_event = |index: usize| {
@@ -1361,6 +1386,41 @@ mod tests {
         let _ = fs::remove_file(&path);
         let journal = Journal::open(path.clone()).expect("open test journal");
         (App::new(journal, String::new()), path)
+    }
+
+    #[test]
+    fn selected_hermes_rows_open_the_full_content_viewer() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        for kind in [
+            EntryKind::HermesUser,
+            EntryKind::HermesAssistant,
+            EntryKind::HermesToolCall,
+            EntryKind::HermesToolResult,
+        ] {
+            let index = app.journal.entries.len();
+            app.journal
+                .append(Entry::with_kind(kind, "full Hermes content".to_string()))
+                .expect("append Hermes event");
+            app.selected_row = Some(index);
+
+            assert!(app.open_selected_hermes_message());
+            assert_eq!(app.message_view_index, Some(index));
+            app.close_hermes_message();
+        }
+
+        let note_index = app.journal.entries.len();
+        app.journal
+            .append(Entry::with_kind(EntryKind::Note, "ordinary note".to_string()))
+            .expect("append note");
+        app.selected_row = Some(note_index);
+        assert!(!app.open_selected_hermes_message());
+        assert_eq!(app.message_view_index, None);
+
+        app.selected_row = None;
+        assert!(!app.open_selected_hermes_message());
+        let _ = fs::remove_file(path);
     }
 
     #[test]

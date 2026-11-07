@@ -1096,7 +1096,11 @@ fn handle_key(
             }
         }
         KeyCode::F(12) => app.toggle_banner(),
-        KeyCode::Enter => app.submit(shell.as_mut()),
+        KeyCode::Enter => {
+            if !app.open_selected_hermes_message() {
+                app.submit(shell.as_mut());
+            }
+        },
         KeyCode::Tab => app.tab_complete(shell.as_ref()),
         KeyCode::Backspace => app.backspace(),
         KeyCode::Delete => app.delete(),
