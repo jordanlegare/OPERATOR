@@ -553,7 +553,7 @@ fn restricted_access_splash(
 
         // Each glyph pixel and each negative-space cell receives its own
         // foreground/background pair, creating a full-width camouflage mosaic.
-        let canvas_width = frame_width.saturating_sub(4);
+        let canvas_width = frame_width.saturating_sub(6);
         let mut art_row = 0usize;
         for glyph_row in large_notice_word("RESTRICTED") {
             rows.push(camouflage_art_line(
@@ -2352,6 +2352,11 @@ mod access_splash_tests {
         for row in &art_rows {
             assert!(row.spans.iter().all(|span| span.style.bg.is_some()));
             assert!(row.spans.iter().any(|span| span.content.contains('█')));
+            assert_eq!(
+                UnicodeWidthStr::width(line_text(row).as_str()),
+                76,
+                "camouflage should fill the complete splash art width",
+            );
         }
 
         let foregrounds: std::collections::HashSet<_> = art_rows
