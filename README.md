@@ -115,26 +115,32 @@ The wrapper explicitly supplies the inbox path when hooks run in a separate syst
 
 ```yaml
 hooks:
-  pre_llm_call:
-    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture"
-      timeout: 3
-  post_llm_call:
-    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture"
-      timeout: 3
   pre_tool_call:
-    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/streenote-capture"
       timeout: 3
+
   post_tool_call:
-    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/streenote-capture"
       timeout: 3
+
+  pre_llm_call: 
+    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+      timeout: 3
+
+  post_llm_call:
+    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+      timeout: 3
+
   on_stream_start:
-    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/streenote-capture"
       timeout: 3
+
   on_stream_delta:
-    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/streenote-capture"
       timeout: 3
+
   on_stream_end:
-    - command: "/home/jordan/.hermes/agent-hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/streenote-capture"
       timeout: 3
 ```
 
