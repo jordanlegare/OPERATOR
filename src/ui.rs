@@ -740,7 +740,7 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         Span::styled("F12 ", Style::default().fg(theme.primary)),
         Span::styled("banner  ", Style::default().fg(theme.muted)),
         Span::styled("Ctrl+C ", Style::default().fg(theme.primary)),
-        Span::styled("copy  ", Style::default().fg(theme.muted)),
+        Span::styled("thread/copy  ", Style::default().fg(theme.muted)),
         Span::styled("Ctrl+Q ", Style::default().fg(theme.primary)),
         Span::styled("quit", Style::default().fg(theme.muted)),
     ]);
@@ -770,11 +770,11 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         ]),
         Line::from(vec![
             Span::styled("SEARCH    ", Style::default().fg(theme.success).add_modifier(Modifier::BOLD)),
-            Span::raw("/search words searches notes, commands, and terminal output across the full journal."),
+            Span::raw("/search words searches visible transcript rows, including Hermes user prompts."),
         ]),
         Line::from(""),
         Line::from(vec![Span::styled("LOCAL COMMANDS", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD))]),
-        Line::from(vec![Span::styled("/search WORDS", Style::default().fg(theme.warning)), Span::raw("  Search the entire journal and jump to the latest hit with context.")]),
+        Line::from(vec![Span::styled("/search WORDS", Style::default().fg(theme.warning)), Span::raw("  Search visible transcript rows and jump to the latest hit.")]),
         Line::from(vec![Span::styled("/view", Style::default().fg(theme.warning)), Span::raw("           Open the full Markdown body of a selected Hermes event.")]),
         Line::from(vec![Span::styled("/threads", Style::default().fg(theme.warning)), Span::raw("        Browse conversations; Enter or Ctrl+C expands the selected thread.")]),
         Line::from(vec![Span::styled("n / N", Style::default().fg(theme.warning)), Span::raw("          Next / previous search result when input is empty.")]),
