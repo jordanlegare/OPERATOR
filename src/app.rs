@@ -160,6 +160,22 @@ impl App {
         }
     }
 
+    /// True when the highlighted row is the current tail and should advance
+    /// with incoming records while LIVE mode is active.
+    pub fn is_tracking_selected_tail(&self) -> bool {
+        self.follow_tail
+            && self.selected_row.is_some()
+            && self.selected_row == self.journal.entries.len().checked_sub(1)
+    }
+
+    /// Keep a selected live-tail row attached to the newest record after import.
+    pub fn update_selected_tail_after_append(&mut self, was_tracking_tail: bool) {
+        if was_tracking_tail && self.follow_tail {
+            self.selected_row = self.journal.entries.len().checked_sub(1);
+            self.scroll_top = self.max_top();
+        }
+    }
+
     fn max_top(&self) -> usize {
         self.journal.entries.len().saturating_sub(self.feed_viewport_height.max(1))
     }
@@ -254,16 +270,21 @@ impl App {
         self.selected_row = Some(next);
         self.selection = None;
         self.selection_dragging = false;
-        self.follow_tail = false;
+        self.follow_tail = next == entry_count - 1;
 
-        let mut next_top = top;
-        if next < next_top {
-            next_top = next;
-        } else if next >= next_top.saturating_add(viewport_height) {
-            next_top = next.saturating_add(1).saturating_sub(viewport_height);
+        if self.follow_tail {
+            self.scroll_top = self.max_top();
+            self.status = format!("LIVE · latest row {}/{} selected.", next + 1, entry_count);
+        } else {
+            let mut next_top = top;
+            if next < next_top {
+                next_top = next;
+            } else if next >= next_top.saturating_add(viewport_height) {
+                next_top = next.saturating_add(1).saturating_sub(viewport_height);
+            }
+            self.scroll_top = next_top.min(self.max_top());
+            self.status = format!("Row {}/{} selected.", next + 1, entry_count);
         }
-        self.scroll_top = next_top.min(self.max_top());
-        self.status = format!("Row {}/{} selected.", next + 1, entry_count);
         self.recall_highlighted_command();
     }
 
@@ -298,8 +319,17 @@ impl App {
     pub fn scroll_down(&mut self, amount: usize) {
         let next = self.current_top().saturating_add(amount).min(self.max_top());
         self.scroll_top = next;
-        self.follow_tail = self.selected_row.is_none() && next >= self.max_top();
+        self.follow_tail = false;
         self.keep_selected_row_visible(next);
+
+        let highlighted_latest = self.selected_row
+            == self.journal.entries.len().checked_sub(1);
+        if next >= self.max_top()
+            && (self.selected_row.is_none() || highlighted_latest)
+        {
+            self.follow_tail = true;
+            self.scroll_top = self.max_top();
+        }
     }
 
     pub fn scroll_to_top(&mut self) {
@@ -394,7 +424,10 @@ impl App {
                 // equivalent of selecting that row and executing /view.
                 self.selection = None;
                 self.selected_row = Some(row);
-                self.follow_tail = false;
+                self.follow_tail = row == self.journal.entries.len().saturating_sub(1);
+                if self.follow_tail {
+                    self.scroll_top = self.max_top();
+                }
                 self.open_hermes_message();
                 return;
             }
@@ -759,9 +792,7 @@ impl App {
         if entries.is_empty() {
             return;
         }
-        let selected_live_tail = self.follow_tail
-            && self.selected_row.is_some()
-            && self.selected_row == self.journal.entries.len().checked_sub(1);
+        let selected_live_tail = self.is_tracking_selected_tail();
         match self.journal.append_batch(entries) {
             Ok(()) => self.status = format!("Captured terminal output · {} records in journal.", self.journal.entries.len()),
             Err(error) => self.status = format!(
@@ -769,9 +800,7 @@ impl App {
                 self.journal.pending_count()
             ),
         }
-        if selected_live_tail {
-            self.selected_row = self.journal.entries.len().checked_sub(1);
-        }
+        self.update_selected_tail_after_append(selected_live_tail);
         // Keep the current scrollback/search position when background shell
         // output arrives. The feed follows automatically only when already live.
     }
@@ -859,17 +888,14 @@ impl App {
     }
 
     pub fn record_system(&mut self, message: String) {
-        let selected_live_tail =
-            self.follow_tail && self.selected_row == self.journal.entries.len().checked_sub(1);
+        let selected_live_tail = self.is_tracking_selected_tail();
         let entry = Entry::with_kind(EntryKind::System, sanitize_single_line(&message));
         if let Err(error) = self.journal.append(entry) {
             self.status = format!("System event retained in memory; journal write failed: {error}");
         } else {
             self.status = message;
         }
-        if selected_live_tail {
-            self.selected_row = self.journal.entries.len().checked_sub(1);
-        }
+        self.update_selected_tail_after_append(selected_live_tail);
     }
 
     fn commit_note(&mut self, text: String) {
@@ -1797,6 +1823,69 @@ mod tests {
         app.move_row_selection(1);
         assert_eq!(app.selected_row, Some(2));
         assert_eq!(app.input, "ls -lah /home");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn selecting_latest_row_enters_live_and_moving_back_exits() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        for index in 0..3 {
+            app.journal
+                .append(Entry::with_kind(EntryKind::Note, format!("row {index}")))
+                .expect("append test row");
+        }
+        app.feed_viewport_height = 2;
+        app.scroll_to_top();
+
+        app.move_row_selection(1);
+        assert_eq!(app.selected_row, Some(1));
+        assert!(!app.follow_tail);
+
+        app.move_row_selection(1);
+        assert_eq!(app.selected_row, Some(2));
+        assert!(app.follow_tail);
+
+        app.move_row_selection(-1);
+        assert_eq!(app.selected_row, Some(1));
+        assert!(!app.follow_tail);
+
+        app.move_row_selection(1);
+        assert_eq!(app.selected_row, Some(2));
+        assert!(app.follow_tail);
+
+        app.scroll_up(1);
+        assert!(!app.follow_tail);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn selected_live_tail_advances_when_external_rows_are_appended() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        app.journal
+            .append(Entry::with_kind(EntryKind::HermesUser, "prompt".to_string()))
+            .expect("append initial Hermes row");
+        app.feed_viewport_height = 2;
+        app.selected_row = Some(0);
+        app.follow_tail = true;
+
+        let was_tracking_tail = app.is_tracking_selected_tail();
+        app.journal
+            .append(Entry::with_kind(
+                EntryKind::HermesAssistant,
+                "response".to_string(),
+            ))
+            .expect("append Hermes response");
+        app.update_selected_tail_after_append(was_tracking_tail);
+
+        assert!(app.follow_tail);
+        assert_eq!(app.selected_row, Some(1));
+        assert_eq!(app.current_top(), 0);
 
         let _ = fs::remove_file(path);
     }
