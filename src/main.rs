@@ -963,50 +963,331 @@ fn run(
 
 /// Temporarily hand the real terminal to the shell PTY for full-screen programs.
 /// F1 returns to the StreeNote transcript workspace.
-fn run_terminal_workspace(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App, session: &mut ShellSession, hermes_bridge: &mut HermesBridge) -> Result<(), Box<dyn std::error::Error>> {
+fn run_terminal_workspace(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    session: &mut ShellSession,
+    hermes_bridge: &mut HermesBridge,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut out = stdout();
     let size = terminal.size()?;
     session.resize(size.width, size.height)?;
     session.set_echo(true)?;
-    execute!(out, LeaveAlternateScreen, DisableMouseCapture, crossterm::cursor::Show)?;
-    out.flush()?;
-    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        loop {
-            // Import Hermes hook events while the F1 PTY is active. They are
-            // appended to the same parent STREENOTE journal, not a workspace
-            // or Hermes-session-specific journal.
-            match drain_hermes_events(app, hermes_bridge) {
-                Ok(imported) if imported > 0 => {
-                    app.status = format!("Imported {imported} Hermes conversation event(s) from F1 workspace.");
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    app.status = format!("Hermes journal import pending: {error}");
-                }
-            }
 
-            let raw = session.drain_raw_output();
-            if !raw.is_empty() { out.write_all(&raw)?; out.flush()?; }
-            if session.check_exit()?.is_some() { break; }
-            if !event::poll(Duration::from_millis(12))? { continue; }
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat => {
-                    if key.kind == KeyEventKind::Press && key.code == KeyCode::F(1) { break; }
-                    let bytes = encode_terminal_key(key.code, key.modifiers);
-                    if !bytes.is_empty() { session.send_bytes(&bytes)?; }
-                }
-                Event::Paste(text) => session.send_bytes(text.as_bytes())?,
-                Event::Resize(cols, rows) => session.resize(cols, rows)?,
-                _ => {}
+    // Stop Crossterm's enhanced-key parser from consuming terminal replies
+    // while the child PTY owns input. The raw Unix pump below forwards every
+    // byte except the reserved F1 workspace-exit sequence.
+    execute!(
+        out,
+        PopKeyboardEnhancementFlags,
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        crossterm::cursor::Show
+    )?;
+    out.flush()?;
+
+    let result = run_terminal_workspace_loop(terminal, app, session, hermes_bridge);
+    let echo_result = session.set_echo(false);
+
+    // Restore the input modes expected by STREENOTE. A nested full-screen
+    // child may have changed bracketed-paste or mouse modes while it owned TTY.
+    execute!(
+        out,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+        ),
+        crossterm::cursor::Hide
+    )?;
+    terminal.clear()?;
+
+    if let Err(error) = echo_result {
+        return Err(Box::new(error));
+    }
+    result
+}
+
+#[cfg(unix)]
+fn run_terminal_workspace_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    session: &mut ShellSession,
+    hermes_bridge: &mut HermesBridge,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const INPUT_POLL: Duration = Duration::from_millis(12);
+    const ESCAPE_SEQUENCE_GRACE: Duration = Duration::from_millis(60);
+    const RESIZE_POLL: Duration = Duration::from_millis(200);
+
+    let mut tty = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open("/dev/tty")?;
+    let mut pending_escape = Vec::with_capacity(8);
+    let mut pending_since: Option<Instant> = None;
+    let mut last_resize_check = Instant::now();
+    let mut last_size = terminal.size()?;
+
+    loop {
+        // Keep importing Hermes hook records while the F1 PTY is active.
+        match drain_hermes_events(app, hermes_bridge) {
+            Ok(imported) if imported > 0 => {
+                app.status = format!(
+                    "Imported {imported} Hermes conversation event(s) from F1 workspace."
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                app.status = format!("Hermes journal import pending: {error}");
             }
         }
-        Ok(())
-    })();
-    let echo_result = session.set_echo(false);
-    execute!(out, EnterAlternateScreen, EnableMouseCapture, crossterm::cursor::Hide)?;
-    terminal.clear()?;
-    if let Err(error) = echo_result { return Err(Box::new(error)); }
-    result
+
+        let raw = session.drain_raw_output();
+        if !raw.is_empty() {
+            // Intentionally byte-for-byte: nested OSC 52 set/query sequences
+            // must reach the actual client terminal unchanged.
+            let mut output = stdout();
+            output.write_all(&raw)?;
+            output.flush()?;
+        }
+        if session.check_exit()?.is_some() {
+            break;
+        }
+
+        if let Some(input) = poll_terminal_input(&mut tty, INPUT_POLL)? {
+            let mut forwarded = Vec::with_capacity(input.len());
+            let leave_workspace =
+                filter_workspace_input(&mut pending_escape, &input, &mut forwarded);
+
+            if !forwarded.is_empty() {
+                session.send_bytes(&forwarded)?;
+            }
+            if leave_workspace {
+                break;
+            }
+            if pending_escape.is_empty() {
+                pending_since = None;
+            } else if pending_since.is_none() {
+                pending_since = Some(Instant::now());
+            }
+        }
+
+        // ESC can also be a standalone key (or the beginning of a sequence
+        // that is not F1). Do not hold it indefinitely.
+        if pending_since.is_some_and(|started| started.elapsed() >= ESCAPE_SEQUENCE_GRACE) {
+            let pending = std::mem::take(&mut pending_escape);
+            if !pending.is_empty() {
+                session.send_bytes(&pending)?;
+            }
+            pending_since = None;
+        }
+
+        // Crossterm used to deliver Resize events here. In raw passthrough mode
+        // poll dimensions directly so remote full-screen apps still resize.
+        if last_resize_check.elapsed() >= RESIZE_POLL {
+            let size = terminal.size()?;
+            if size != last_size {
+                session.resize(size.width, size.height)?;
+                last_size = size;
+            }
+            last_resize_check = Instant::now();
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn run_terminal_workspace_loop(
+    _terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    session: &mut ShellSession,
+    hermes_bridge: &mut HermesBridge,
+) -> Result<(), Box<dyn std::error::Error>> {
+    loop {
+        match drain_hermes_events(app, hermes_bridge) {
+            Ok(imported) if imported > 0 => {
+                app.status = format!(
+                    "Imported {imported} Hermes conversation event(s) from F1 workspace."
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                app.status = format!("Hermes journal import pending: {error}");
+            }
+        }
+
+        let raw = session.drain_raw_output();
+        if !raw.is_empty() {
+            let mut output = stdout();
+            output.write_all(&raw)?;
+            output.flush()?;
+        }
+        if session.check_exit()?.is_some() {
+            break;
+        }
+        if !event::poll(Duration::from_millis(12))? {
+            continue;
+        }
+        match event::read()? {
+            Event::Key(key)
+                if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat =>
+            {
+                if key.kind == KeyEventKind::Press && key.code == KeyCode::F(1) {
+                    break;
+                }
+                let bytes = encode_terminal_key(key.code, key.modifiers);
+                if !bytes.is_empty() {
+                    session.send_bytes(&bytes)?;
+                }
+            }
+            Event::Paste(text) => session.send_bytes(text.as_bytes())?,
+            Event::Resize(cols, rows) => session.resize(cols, rows)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Read raw input from the controlling terminal without parsing ANSI sequences.
+/// This allows OSC 52 responses from the SSH client to pass through F1 into a
+/// nested STREENOTE running on another host.
+#[cfg(unix)]
+fn poll_terminal_input(
+    tty: &mut std::fs::File,
+    timeout: Duration,
+) -> io::Result<Option<Vec<u8>>> {
+    let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    let mut descriptor = libc::pollfd {
+        fd: tty.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ready = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+    if ready == 0 {
+        return Ok(None);
+    }
+    if ready < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            return Ok(None);
+        }
+        return Err(error);
+    }
+
+    let mut buffer = vec![0u8; 8192];
+    match tty.read(&mut buffer) {
+        Ok(0) => Ok(None),
+        Ok(count) => {
+            buffer.truncate(count);
+            Ok(Some(buffer))
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Forward raw bytes except the two common unmodified F1 encodings. Other CSI,
+/// OSC (including OSC 52), mouse, and bracketed-paste sequences pass unchanged.
+fn filter_workspace_input(
+    pending: &mut Vec<u8>,
+    input: &[u8],
+    forwarded: &mut Vec<u8>,
+) -> bool {
+    const F1_SEQUENCES: [&[u8]; 2] = [b"\x1bOP", b"\x1b[11~"];
+
+    for byte in input.iter().copied() {
+        if pending.is_empty() {
+            if byte == 0x1b {
+                pending.push(byte);
+            } else {
+                forwarded.push(byte);
+            }
+            continue;
+        }
+
+        pending.push(byte);
+        if F1_SEQUENCES
+            .iter()
+            .any(|sequence| pending.as_slice() == *sequence)
+        {
+            pending.clear();
+            return true;
+        }
+
+        let is_f1_prefix = F1_SEQUENCES
+            .iter()
+            .any(|sequence| sequence.starts_with(pending.as_slice()));
+        if !is_f1_prefix {
+            forwarded.extend(pending.drain(..));
+        }
+    }
+
+    false
+}
+
+#[cfg(test)]
+mod workspace_input_tests {
+    use super::filter_workspace_input;
+
+    #[test]
+    fn forwards_osc52_replies_byte_for_byte() {
+        let mut pending = Vec::new();
+        let mut forwarded = Vec::new();
+        let response = b"\x1b]52;c;SGVsbG8=\x07";
+
+        assert!(!filter_workspace_input(&mut pending, response, &mut forwarded));
+        assert!(pending.is_empty());
+        assert_eq!(forwarded, response);
+    }
+
+    #[test]
+    fn forwards_bracketed_paste_and_other_escape_sequences() {
+        let mut pending = Vec::new();
+        let mut forwarded = Vec::new();
+        let input = b"\x1b[200~hello\x1b[201~\x1b[31m";
+
+        assert!(!filter_workspace_input(&mut pending, input, &mut forwarded));
+        assert!(pending.is_empty());
+        assert_eq!(forwarded, input);
+    }
+
+    #[test]
+    fn consumes_both_common_f1_sequences() {
+        for sequence in [b"\x1bOP".as_slice(), b"\x1b[11~".as_slice()] {
+            let mut pending = Vec::new();
+            let mut forwarded = Vec::new();
+            assert!(filter_workspace_input(&mut pending, sequence, &mut forwarded));
+            assert!(pending.is_empty());
+            assert!(forwarded.is_empty());
+        }
+    }
+
+    #[test]
+    fn recognizes_f1_split_across_terminal_reads() {
+        let mut pending = Vec::new();
+        let mut forwarded = Vec::new();
+
+        assert!(!filter_workspace_input(&mut pending, b"\x1b[11", &mut forwarded));
+        assert!(forwarded.is_empty());
+        assert!(filter_workspace_input(&mut pending, b"~", &mut forwarded));
+        assert!(pending.is_empty());
+        assert!(forwarded.is_empty());
+    }
+
+    #[test]
+    fn forwards_unknown_csi_and_ss3_sequences_without_rewriting() {
+        for sequence in [b"\x1b[A".as_slice(), b"\x1bOQ".as_slice()] {
+            let mut pending = Vec::new();
+            let mut forwarded = Vec::new();
+            assert!(!filter_workspace_input(&mut pending, sequence, &mut forwarded));
+            assert!(pending.is_empty());
+            assert_eq!(forwarded, sequence);
+        }
+    }
 }
 
 fn encode_terminal_key(code: KeyCode, modifiers: KeyModifiers) -> Vec<u8> {

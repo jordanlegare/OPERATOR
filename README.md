@@ -31,6 +31,8 @@ set -s get-clipboard request
 
 Inside tmux, verify `tmux info | grep Ms` reports the OSC 52 capability. Depending on the outer terminal and `TERM`, you may need a `terminal-features` or `terminal-overrides` entry. Clipboard reads may prompt for approval and are subject to terminal-emulator security settings. See the [tmux clipboard guide](https://github.com/tmux/tmux/wiki/Clipboard) for terminal-specific setup.
 
+**Nested SSH / F1 workspace:** the F1 workspace forwards raw terminal input bytes to its child PTY, rather than parsing and re-encoding them. That lets OSC 52 clipboard replies from the client pass through an outer STREENOTE session into a second STREENOTE instance on another SSH server. F1 itself remains reserved to return to the parent transcript.
+
 ## What's new: embedded Debian shell
 
 StreamNote starts the configured interactive shell (`$SHELL`, falling back to `/bin/bash`) in a real pseudo-terminal (PTY) when the application initializes. The PTY gives commands a TTY rather than plain stdin/stdout pipes.
