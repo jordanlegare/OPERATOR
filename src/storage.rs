@@ -611,14 +611,14 @@ mod hermes_tool_entry_tests {
 Call ID: call_el4tbrqb
 Arguments:
 {
-  "command": "curl -sL \\"https://www.icc-cpi.int/about/otp/proprio-motu-investigations 2>/dev/null | grep -i \\"proprio\\" | head -20",
+  "command": "curl -sL \"https://www.icc-cpi.int/about/otp/proprio-motu-investigations 2>/dev/null | grep -i \"proprio\" | head -20",
   "timeout": 60
 }"#;
         let entry = Entry::with_kind(EntryKind::HermesToolCall, text.to_string());
 
         assert_eq!(
             entry_display_text(&entry),
-            "terminal› curl -sL \\"https://www.icc-cpi.int/about/otp/proprio-motu-investigations 2>/dev/null | grep -i \\"proprio\\" | head -20"
+            r#"terminal› curl -sL "https://www.icc-cpi.int/about/otp/proprio-motu-investigations 2>/dev/null | grep -i "proprio" | head -20"#
         );
     }
 
