@@ -1406,7 +1406,10 @@ fn handle_key(
             KeyCode::Char('s') => app.save(),
             KeyCode::Char('p') => app.history_previous(),
             KeyCode::Char('n') => app.history_next(),
-            KeyCode::Char('l') => app.jump_to_latest(),
+            KeyCode::Char('l') => {
+                app.clear_input();
+                app.status = "Input line cleared.".to_string();
+            },
             KeyCode::Char('a') => app.cursor_to_start(),
             KeyCode::Char('e') => app.cursor_to_end(),
             KeyCode::Char('f') => app.focus_search_hint(),
