@@ -691,3 +691,68 @@ Arguments:
         );
     }
 }
+
+
+#[cfg(test)]
+mod hermes_stream_delta_tests {
+    use super::{Entry, EntryKind, Journal};
+    use std::{env, fs, path::PathBuf, sync::atomic::{AtomicUsize, Ordering}};
+
+    static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn journal_path() -> PathBuf {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        env::temp_dir().join(format!("streenote-stream-{}-{id}.jsonl", std::process::id()))
+    }
+
+    fn delta(event_id: &str, text: &str) -> Entry {
+        let mut entry = Entry::with_external_event(
+            EntryKind::HermesStreamDelta,
+            text.to_string(),
+            "2026-11-07T12:00:00-05:00".to_string(),
+            event_id.to_string(),
+            Some("session-1".to_string()),
+            Some("turn-1".to_string()),
+            None,
+            Some(0),
+        );
+        entry.event_id = Some(event_id.to_string());
+        entry
+    }
+
+    #[test]
+    fn streaming_deltas_coalesce_in_memory_but_remain_separate_durable_events() {
+        let path = journal_path();
+        let mut journal = Journal::open(path.clone()).expect("open journal");
+        journal.append(delta("delta-1", "Hello ")).expect("append first delta");
+        journal.append(delta("delta-2", "from Hermes.")).expect("append second delta");
+
+        assert_eq!(journal.entries.len(), 1);
+        assert_eq!(journal.entries[0].text, "Hello from Hermes.");
+        assert_eq!(journal.total_text_bytes, "Hello from Hermes.".len());
+        drop(journal);
+
+        let durable_lines = fs::read_to_string(&path).expect("read journal");
+        assert_eq!(durable_lines.lines().count(), 2);
+        let reloaded = Journal::open(path.clone()).expect("reload journal");
+        assert_eq!(reloaded.entries.len(), 1);
+        assert_eq!(reloaded.entries[0].text, "Hello from Hermes.");
+        drop(reloaded);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn stream_deltas_from_different_iterations_are_not_coalesced() {
+        let path = journal_path();
+        let mut journal = Journal::open(path.clone()).expect("open journal");
+        let mut first = delta("delta-a", "First iteration");
+        first.iteration = Some(0);
+        let mut second = delta("delta-b", "Second iteration");
+        second.iteration = Some(1);
+        journal.append(first).expect("append first iteration");
+        journal.append(second).expect("append second iteration");
+        assert_eq!(journal.entries.len(), 2);
+        drop(journal);
+        let _ = fs::remove_file(path);
+    }
+}
