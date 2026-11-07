@@ -30,6 +30,14 @@ struct InboxEvent {
     kind: EntryKind,
     timestamp: String,
     text: String,
+    #[serde(default)]
+    conversation_id: Option<String>,
+    #[serde(default)]
+    turn_id: Option<String>,
+    #[serde(default)]
+    tool_call_id: Option<String>,
+    #[serde(default)]
+    iteration: Option<u32>,
 }
 
 impl Default for HermesBridge {
@@ -95,6 +103,9 @@ impl HermesBridge {
                         | EntryKind::HermesAssistant
                         | EntryKind::HermesToolCall
                         | EntryKind::HermesToolResult
+                        | EntryKind::HermesStreamStart
+                        | EntryKind::HermesStreamDelta
+                        | EntryKind::HermesStreamEnd
                 )
             {
                 quarantine(&path, &failed)?;
@@ -111,6 +122,10 @@ impl HermesBridge {
                 event.text,
                 timestamp,
                 event.event_id,
+                event.conversation_id.filter(|id| !id.is_empty() && id.len() <= 256),
+                event.turn_id.filter(|id| !id.is_empty() && id.len() <= 256),
+                event.tool_call_id.filter(|id| !id.is_empty() && id.len() <= 256),
+                event.iteration,
             );
 
             // If the journal cannot flush this entry, leave the inbox file in
