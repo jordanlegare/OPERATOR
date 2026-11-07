@@ -568,6 +568,16 @@ fn restricted_access_splash(
             ));
             art_row += 1;
         }
+        rows.push(camouflage_art_line(
+            "",
+            canvas_width,
+            art_row,
+            29,
+            critical,
+            accent,
+            animation_phase,
+        ));
+        art_row += 1;
         for glyph_row in compact_notice_word("ACCESS") {
             rows.push(camouflage_art_line(
                 &glyph_row,
