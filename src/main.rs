@@ -1325,6 +1325,9 @@ fn handle_key(
     if let Some(view) = app.conversation_view.clone() {
         match view {
             ConversationView::List => match code {
+                KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    app.open_selected_conversation();
+                }
                 KeyCode::Esc => app.close_conversation_view(),
                 KeyCode::Up => app.move_conversation_selection(-1),
                 KeyCode::Down => app.move_conversation_selection(1),
@@ -1419,6 +1422,11 @@ fn handle_key(
         match code {
             KeyCode::Char('q') => return Ok(true),
             KeyCode::Char('c') => {
+                // Ctrl+C on a focused HUSR prompt opens its complete thread.
+                // An explicit drag/row selection still takes precedence and copies.
+                if app.open_selected_hermes_user_thread() {
+                    return Ok(false);
+                }
                 if let Some(selected) = app.selected_transcript_text() {
                     if selected.len() > 60_000 {
                         app.status = "Selection exceeds the 60 KB terminal clipboard limit.".to_string();
