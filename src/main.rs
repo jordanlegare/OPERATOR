@@ -2459,7 +2459,7 @@ mod access_splash_tests {
 
     #[test]
     fn access_warning_flashes_red_orange_yellow_orange() {
-        let red = Color::Rgb(255, 0, 0);
+        let red = Color::Rgb(255, 24, 24);
         let orange = Color::Rgb(255, 96, 0);
         let yellow = Color::Rgb(255, 255, 0);
 
