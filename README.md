@@ -2,6 +2,35 @@
 
 A Rust terminal workspace combining a live **Debian shell**, a persistent command/output transcript, and a fast append-only note stream. Built with **Ratatui**, **Crossterm**, and **portable-pty**.
 
+### Bidirectional clipboard over SSH
+
+STREENOTE synchronizes clipboard operations in both directions:
+
+- **Ctrl+C in STREENOTE** stores the copied text in a private per-user server cache at `~/.local/share/streenote/clipboard.txt` (mode 0600) and sends OSC 52 to update the attached client terminal clipboard.
+- **Ctrl+V / right-click in the input panel** first asks the client terminal for its clipboard using an OSC 52 read query. The text is cached on the current server and inserted at the input cursor.
+- If the terminal denies or does not support OSC 52 reads, STREENOTE falls back to the current server's clipboard cache and then server-side clipboard tools.
+- The terminal's own paste shortcut continues to work through bracketed-paste events and also refreshes the server cache.
+
+OSC 52 clipboard **reads are security-sensitive**: a terminal may prompt for permission or disable them. They are supported by only some terminal emulators; OSC 52 writes are more widely supported. Over SSH or across multiple servers, OSC 52 is the mechanism that carries copied text through the client terminal; the private file cache is local to each server.
+
+For tmux, STREENOTE's OSC 52 writes from inside a pane need clipboard writes from pane applications enabled:
+
+```tmux
+set -s set-clipboard on
+```
+
+**Security note:** this permits applications running inside tmux panes to set the client clipboard. Use it only in sessions where you trust the programs you run.
+
+On **tmux 3.7c or newer**, enable client clipboard reads as well:
+
+```tmux
+set -s get-clipboard request
+```
+
+`get-clipboard request` makes tmux ask its most recently used client for the clipboard when an application in a pane sends an OSC 52 read query. This is the setting that enables Ctrl+V/right-click to retrieve the client clipboard through tmux. Older tmux versions do not have this option; use the terminal emulator's normal paste shortcut (bracketed paste) or the per-server cache there.
+
+Inside tmux, verify `tmux info | grep Ms` reports the OSC 52 capability. Depending on the outer terminal and `TERM`, you may need a `terminal-features` or `terminal-overrides` entry. Clipboard reads may prompt for approval and are subject to terminal-emulator security settings. See the [tmux clipboard guide](https://github.com/tmux/tmux/wiki/Clipboard) for terminal-specific setup.
+
 ## What's new: embedded Debian shell
 
 StreamNote starts the configured interactive shell (`$SHELL`, falling back to `/bin/bash`) in a real pseudo-terminal (PTY) when the application initializes. The PTY gives commands a TTY rather than plain stdin/stdout pipes.
