@@ -452,12 +452,13 @@ fn apply_selection(
 }
 
 fn draw_input(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
+    app.input_area = area;
     let title = if app.secret_input {
         " HIDDEN INPUT  ·  ENTER TO SEND WITHOUT LOGGING  ·  CTRL+C TO INTERRUPT "
     } else {
         match app.input_mode {
-            InputMode::Terminal => " DEBIAN TERMINAL  ·  ENTER TO EXECUTE  ·  CTRL+T FOR NOTES ",
-            InputMode::Notes => " NOTE CAPTURE  ·  ENTER TO SAVE  ·  CTRL+T FOR TERMINAL ",
+            InputMode::Terminal => " DEBIAN TERMINAL  ·  ENTER TO EXECUTE  ·  CTRL+V / RIGHT-CLICK PASTE  ·  CTRL+T FOR NOTES ",
+            InputMode::Notes => " NOTE CAPTURE  ·  ENTER TO SAVE  ·  CTRL+V / RIGHT-CLICK PASTE  ·  CTRL+T FOR TERMINAL ",
         }
     };
     let mode_color = if app.secret_input {
