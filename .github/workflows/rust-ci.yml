@@ -18,6 +18,10 @@ jobs:
         run: cargo check --all-targets
       - name: Test Hermes inbox bridge
         run: cargo test hermes_bridge::tests
+      - name: Test Hermes conversation grouping and stream persistence
+        run: |
+          cargo test conversations::tests
+          cargo test hermes_stream_delta_tests
       - name: Smoke-test Hermes shell hook
         run: |
           python3 -m py_compile contrib/hermes/streenote-capture.py
@@ -26,6 +30,12 @@ jobs:
             | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
           printf '%s' '{"hook_event_name":"post_llm_call","session_id":"ci-session","extra":{"turn_id":"ci-turn","assistant_response":"captured answer"}}' \
             | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+          printf '%s' '{"hook_event_name":"on_stream_start","session_id":"ci-session","extra":{"turn_id":"ci-turn","iteration":0}}' \\
+            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+          printf '%s' '{"hook_event_name":"on_stream_delta","session_id":"ci-session","extra":{"turn_id":"ci-turn","iteration":0,"kind":"text","delta":" "}}' \\
+            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+          printf '%s' '{"hook_event_name":"on_stream_end","session_id":"ci-session","extra":{"turn_id":"ci-turn","iteration":0,"finished":true}}' \\
+            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
           python3 - "$inbox" <<'PY'
           import json
           import pathlib
@@ -33,10 +43,19 @@ jobs:
 
           ready = pathlib.Path(sys.argv[1]) / "ready"
           events = [json.loads(path.read_text()) for path in sorted(ready.glob("*.json"))]
-          assert [event["kind"] for event in events] == ["hermes_user", "hermes_assistant"]
-          assert events[0]["text"] == "capture smoke test"
-          assert events[1]["text"] == "captured answer"
-          assert events[0]["event_id"] != events[1]["event_id"]
+          by_kind = {event["kind"]: event for event in events}
+          assert set(by_kind) == {
+              "hermes_user", "hermes_assistant", "hermes_stream_start",
+              "hermes_stream_delta", "hermes_stream_end"
+          }
+          assert by_kind["hermes_user"]["text"] == "capture smoke test"
+          assert by_kind["hermes_assistant"]["text"] == "captured answer"
+          assert by_kind["hermes_user"]["event_id"] != by_kind["hermes_assistant"]["event_id"]
+          delta = by_kind["hermes_stream_delta"]
+          assert delta["text"] == " "
+          assert delta["conversation_id"] == "ci-session"
+          assert delta["turn_id"] == "ci-turn"
+          assert delta["iteration"] == 0
           PY
       - name: Test journal storage compatibility
         run: cargo test storage::terminal_output_filter_tests
