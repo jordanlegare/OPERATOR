@@ -10,7 +10,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     conversations::{build_threads, collapse_live_streams, is_hermes_event, ConversationThread},
-    hermes_review::{ReviewDecision, ReviewRequest, MAX_REVIEW_BYTES},
+    hermes_review::{diagnostics_summary, ReviewDecision, ReviewRequest, MAX_REVIEW_BYTES},
     shell::ShellSession,
     settings::Settings,
     storage::{
@@ -1578,8 +1578,9 @@ impl App {
             "/review" => match argument.to_ascii_lowercase().as_str() {
                 "" | "status" => {
                     self.status = format!(
-                        "Hermes response review is {}. Usage: /review on | /review off | /review status",
-                        if self.review_hermes_responses { "ON" } else { "OFF" }
+                        "Hermes review {} · {}",
+                        if self.review_hermes_responses { "ON" } else { "OFF" },
+                        diagnostics_summary()
                     );
                 }
                 "on" | "enable" | "enabled" => self.set_hermes_review_enabled(true),
