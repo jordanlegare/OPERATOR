@@ -101,6 +101,8 @@ pub fn build_threads(entries: &[Entry]) -> Vec<ConversationThread> {
         let thread = &mut threads[position];
         thread.entries.push(index);
         thread.first_entry = thread.first_entry.min(index);
+        // Prefer an actual user prompt as the thread title; context snapshots
+        // and lifecycle markers are metadata, not the conversation's subject.
         if entry.kind == EntryKind::HermesUser {
             thread.turn_count += 1;
             if thread.title.is_empty() {
@@ -110,8 +112,6 @@ pub fn build_threads(entries: &[Entry]) -> Vec<ConversationThread> {
         if entry.kind == EntryKind::HermesToolCall {
             thread.tool_call_count += 1;
         }
-        // Prefer an actual user prompt as the thread title; context snapshots
-        // and lifecycle markers are metadata, not the conversation's subject.
     }
 
     for thread in &mut threads {
