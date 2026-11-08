@@ -86,6 +86,38 @@ class HermesReviewPluginTests(unittest.TestCase):
         self.assertFalse(self.socket_path.exists())
         self.assertIsNone(self._call())
 
+    def test_required_review_fails_closed_when_socket_is_missing(self):
+        with patch.dict(os.environ, {"STREENOTE_HERMES_REVIEW_REQUIRED": "1"}):
+            with self.assertRaisesRegex(RuntimeError, "socket is missing.*withheld"):
+                self._call()
+
+    def test_required_review_fails_closed_on_listener_bypass(self):
+        worker, _, errors = self._serve({"version": 1, "decision": "bypass"})
+        with patch.dict(os.environ, {"STREENOTE_HERMES_REVIEW_REQUIRED": "true"}):
+            with self.assertRaisesRegex(RuntimeError, "returned bypass.*withheld"):
+                self._call()
+        worker.join(timeout=2)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(errors)
+
+    def test_callback_and_socket_decisions_are_logged_without_answer_content(self):
+        log_path = Path(self.temp_dir.name) / "diagnostics.jsonl"
+        with patch.dict(os.environ, {"STREENOTE_HERMES_REVIEW_LOG": str(log_path)}):
+            worker, _, errors = self._serve({"version": 1, "decision": "approve"})
+            self.assertEqual(self._call(), "The unreviewed draft.")
+            worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+            self.assertFalse(errors)
+        records = [json.loads(line) for line in log_path.read_text().splitlines()]
+        events = [record["event"] for record in records]
+        self.assertIn("CALLBACK_INVOKED", events)
+        self.assertIn("SOCKET_PATH_RESOLVED", events)
+        self.assertIn("SOCKET_CONNECT_OK", events)
+        self.assertIn("REQUEST_SENT", events)
+        self.assertIn("DECISION_RECEIVED", events)
+        self.assertIn("REVIEW_APPROVED", events)
+        self.assertNotIn("The unreviewed draft.", log_path.read_text())
+
     def test_bypass_and_approve_leave_the_original_answer_unchanged(self):
         for decision in ("bypass", "approve"):
             with self.subTest(decision=decision):
