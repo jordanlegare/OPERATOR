@@ -15,15 +15,15 @@ use std::{
         Arc,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
 
 pub const MAX_REVIEW_BYTES: usize = 8 * 1024 * 1024;
 const DECISION_TIMEOUT: Duration = Duration::from_secs(540);
-const SOCKET_READ_TIMEOUT: Duration = Duration::from_millis(500);
-const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
+const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
 pub struct ReviewRequest {
@@ -32,6 +32,7 @@ pub struct ReviewRequest {
     pub model: String,
     pub platform: String,
     pub response_text: String,
+    pub expires_at: Instant,
     pub reply: SyncSender<ReviewDecision>,
 }
 
@@ -267,7 +268,7 @@ fn handle_connection(
     enabled: &AtomicBool,
     stop: &AtomicBool,
 ) -> io::Result<()> {
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{BufRead, BufReader, Read};
 
     stream.set_read_timeout(Some(SOCKET_READ_TIMEOUT))?;
     stream.set_write_timeout(Some(SOCKET_WRITE_TIMEOUT))?;
@@ -348,6 +349,7 @@ fn handle_connection(
         model: request.model,
         platform: request.platform,
         response_text: request.response_text,
+        expires_at: Instant::now() + DECISION_TIMEOUT,
         reply,
     };
 
