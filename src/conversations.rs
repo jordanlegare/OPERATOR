@@ -464,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_stream_deltas_without_turn_ids_follow_the_prompt_boundary() {
+    fn legacy_stream_deltas_without_turn_ids_are_replaced_by_final_assistant() {
         use super::collapse_live_streams;
 
         let prompt = event(EntryKind::HermesUser, "prompt", None, None);
@@ -472,15 +472,16 @@ mod tests {
         first.iteration = Some(0);
         let mut second = event(EntryKind::HermesStreamDelta, "world", None, None);
         second.iteration = Some(1);
-        let assistant = event(EntryKind::HermesAssistant, "duplicate", None, None);
+        let assistant = event(EntryKind::HermesAssistant, "final answer", None, None);
         let entries = vec![(10, &prompt), (11, &first), (12, &second), (13, &assistant)];
 
         let collapsed = collapse_live_streams(&entries);
+        assert!(collapsed.text_by_first_index.is_empty());
         assert_eq!(
-            collapsed.text_by_first_index.get(&11).map(String::as_str),
-            Some("hello world")
+            collapsed.hidden_delta_indices,
+            [11, 12].into_iter().collect()
         );
-        assert!(collapsed.replaced_assistant_indices.contains(&13));
+        assert!(collapsed.replaced_assistant_indices.is_empty());
     }
 
     #[test]
