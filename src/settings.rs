@@ -20,6 +20,9 @@ pub struct Settings {
     /// Whether the ASCII banner is shown at startup.
     #[serde(default = "default_show_banner")]
     pub show_banner: bool,
+    /// Hold final Hermes responses for explicit operator review before delivery.
+    #[serde(default)]
+    pub review_hermes_responses: bool,
     /// Whether the Canadian maple-leaf watermark is shown behind the transcript.
     #[serde(default = "default_show_canada_watermark")]
     pub show_canada_watermark: bool,
@@ -32,6 +35,7 @@ impl Default for Settings {
             theme_index: default_theme_index(),
             wrap_transcript: false,
             show_banner: true,
+            review_hermes_responses: false,
             show_canada_watermark: true,
         }
     }
@@ -131,6 +135,7 @@ mod tests {
         assert_eq!(settings.theme_index, 1);
         assert!(!settings.wrap_transcript);
         assert!(settings.show_banner);
+        assert!(!settings.review_hermes_responses);
         assert!(settings.show_canada_watermark);
     }
 
@@ -142,6 +147,7 @@ mod tests {
                 "theme_index": 6,
                 "wrap_transcript": true,
                 "show_banner": false,
+                "review_hermes_responses": true,
                 "show_canada_watermark": false
             }"#
         ).expect("deserialize preferences");
@@ -149,6 +155,7 @@ mod tests {
         assert_eq!(settings.theme_index, 6);
         assert!(settings.wrap_transcript);
         assert!(!settings.show_banner);
+        assert!(settings.review_hermes_responses);
         assert!(!settings.show_canada_watermark);
     }
 }
