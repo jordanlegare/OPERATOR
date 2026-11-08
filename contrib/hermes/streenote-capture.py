@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-MAX_EVENT_BYTES = 2 * 1024 * 1024
+MAX_EVENT_BYTES = 8 * 1024 * 1024
 MAX_TOOL_DETAIL_BYTES = 48 * 1024
 MAX_HISTORY_BYTES = 1024 * 1024
 
@@ -391,9 +391,8 @@ def main() -> int:
             identity_id = tool_call_id
         elif event_name in ("on_stream_start", "on_stream_end"):
             identity_id = f"{turn_id or ''}:{iteration if iteration is not None else ''}"
-        elif event_name == "on_stream_delta":
-            # One UUID per delta prevents drops when several chunks share the
-            # same turn/iteration and the hook observer retries asynchronously.
+        elif event_name in ("on_stream_delta", "on_interim_message", "post_compaction"):
+            # These can occur multiple times within one turn or session.
             identity_id = None
         else:
             identity_id = turn_id
