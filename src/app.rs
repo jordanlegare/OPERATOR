@@ -1417,12 +1417,12 @@ impl App {
             return;
         }
 
-        let needle = query.to_lowercase();
+        let needle = query.to_ascii_lowercase();
         let found = self
             .searchable_entry_texts()
             .into_iter()
             .filter_map(|(index, text)| {
-                text.to_lowercase()
+                text.to_ascii_lowercase()
                     .contains(needle.as_str())
                     .then_some(index)
             })
@@ -2414,6 +2414,119 @@ mod tests {
         app.select_latest_row();
         assert_eq!(app.selected_row, Some(2));
         assert_eq!(app.input, "last command");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn search_indexes_full_hermes_message_bodies_and_opens_the_matching_thread() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        let mut prompt = Entry::with_kind(EntryKind::HermesUser, "ordinary prompt".to_string());
+        prompt.conversation_id = Some("deep-search-session".to_string());
+        prompt.turn_id = Some("turn-1".to_string());
+        app.journal.append(prompt).expect("append prompt");
+
+        let fixtures = [
+            (EntryKind::HermesAssistant, "assistant-body-needle"),
+            (EntryKind::HermesToolCall, "tool-arguments-needle"),
+            (EntryKind::HermesToolResult, "tool-result-needle"),
+            (EntryKind::HermesHistory, "prior-context-needle"),
+            (EntryKind::HermesInterim, "interim-message-needle"),
+            (EntryKind::HermesSession, "session-detail-needle"),
+        ];
+
+        for (kind, text) in fixtures {
+            let mut entry = Entry::with_kind(kind, format!("buried content: {text}"));
+            entry.conversation_id = Some("deep-search-session".to_string());
+            entry.turn_id = Some("turn-1".to_string());
+            let expected_index = app.journal.entries.len();
+            app.journal.append(entry).expect("append deep Hermes event");
+
+            app.search(text);
+            assert_eq!(app.matches, vec![expected_index], "search should find {kind:?}");
+            assert_eq!(app.active_match, Some(0));
+            assert_eq!(app.conversation_focus_entry, Some(expected_index));
+            assert!(matches!(app.conversation_view, Some(ConversationView::Thread { .. })));
+            assert!(app.is_active_match(expected_index));
+        }
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn search_matches_a_phrase_split_across_live_stream_chunks_once() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        let mut prompt = Entry::with_kind(EntryKind::HermesUser, "streaming prompt".to_string());
+        prompt.conversation_id = Some("stream-search-session".to_string());
+        prompt.turn_id = Some("stream-turn".to_string());
+        app.journal.append(prompt).expect("append stream prompt");
+
+        let mut first = Entry::with_kind(EntryKind::HermesStreamDelta, "cross-chunk-".to_string());
+        first.conversation_id = Some("stream-search-session".to_string());
+        first.turn_id = Some("stream-turn".to_string());
+        first.iteration = Some(0);
+        let first_index = app.journal.entries.len();
+        app.journal.append(first).expect("append first stream chunk");
+
+        let mut second = Entry::with_kind(EntryKind::HermesStreamDelta, "needle is present".to_string());
+        second.conversation_id = Some("stream-search-session".to_string());
+        second.turn_id = Some("stream-turn".to_string());
+        second.iteration = Some(0);
+        let second_index = app.journal.entries.len();
+        app.journal.append(second).expect("append second stream chunk");
+
+        app.search("cross-chunk-needle");
+        assert_eq!(app.matches, vec![first_index]);
+        assert!(!app.is_match(second_index));
+        assert_eq!(app.conversation_focus_entry, Some(first_index));
+        assert!(matches!(app.conversation_view, Some(ConversationView::Thread { .. })));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn search_navigation_switches_between_full_threads_and_normal_journal_rows() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        app.journal
+            .append(Entry::with_kind(EntryKind::Note, "needle in a note".to_string()))
+            .expect("append note");
+
+        let mut prompt = Entry::with_kind(EntryKind::HermesUser, "needle in a prompt".to_string());
+        prompt.conversation_id = Some("navigation-session".to_string());
+        prompt.turn_id = Some("navigation-turn".to_string());
+        app.journal.append(prompt).expect("append prompt");
+
+        let mut answer = Entry::with_kind(EntryKind::HermesAssistant, "needle in a hidden answer".to_string());
+        answer.conversation_id = Some("navigation-session".to_string());
+        answer.turn_id = Some("navigation-turn".to_string());
+        app.journal.append(answer).expect("append assistant response");
+
+        app.journal
+            .append(Entry::with_kind(EntryKind::TerminalOutput, "needle in shell output".to_string()))
+            .expect("append terminal output");
+
+        app.search("needle");
+        assert_eq!(app.matches, vec![0, 1, 2, 3]);
+        assert_eq!(app.active_match, Some(3));
+        assert_eq!(app.conversation_view, None);
+
+        app.previous_match();
+        assert_eq!(app.matches[app.active_match.unwrap()], 2);
+        assert!(matches!(app.conversation_view, Some(ConversationView::Thread { .. })));
+
+        app.previous_match();
+        assert_eq!(app.matches[app.active_match.unwrap()], 1);
+        assert!(matches!(app.conversation_view, Some(ConversationView::Thread { .. })));
+
+        app.previous_match();
+        assert_eq!(app.matches[app.active_match.unwrap()], 0);
+        assert_eq!(app.conversation_view, None);
 
         let _ = fs::remove_file(path);
     }
