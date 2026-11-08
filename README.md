@@ -213,14 +213,7 @@ install -m 700 contrib/hermes/streenote-review/__init__.py \
 hermes plugins enable streenote-review
 ```
 
-The hook can wait for an operator, so increase Hermes' plugin callback deadline in the active profile's existing `~/.hermes/config.yaml`. Merge this key into the existing `plugins:` mapping; do not create a duplicate mapping or overwrite other plugin settings:
-
-```yaml
-plugins:
-  hook_callback_timeout: 600
-```
-
-Restart the Hermes gateway/process after installing and enabling the plugin. STREENOTE's review listener and the Hermes gateway must resolve the same socket path. The default is `$XDG_DATA_HOME/streenote/review.sock`, or `$HOME/.local/share/streenote/review.sock` when `XDG_DATA_HOME` is unset. A custom path can be set with the absolute `STREENOTE_HERMES_REVIEW_SOCKET` environment variable in **both** processes. The socket directory is created with mode `0700` and the socket with mode `0600`.
+Restart the Hermes gateway/process after installing and enabling the plugin. STREENOTE's review listener and the Hermes gateway must resolve the same socket path. The default is `$XDG_DATA_HOME/streenote/review.sock`, or `$HOME/.local/share/streenote/review.sock` when `XDG_DATA_HOME` is unset. A custom path can be set with the absolute `STREENOTE_HERMES_REVIEW_SOCKET` environment variable in **both** processes. The socket directory is created with mode `0700` and the socket with mode `0600`. The transform hook waits synchronously for the operator; its own socket-side deadline is nine minutes. Hermes' `plugins.hook_callback_timeout` setting does not govern this transform hook.
 
 In STREENOTE, run:
 
@@ -237,7 +230,7 @@ Review is disabled by default and its setting is saved by STREENOTE. While a res
 
 Use the arrow keys, Home/End, Backspace/Delete, Enter for a newline, and Ctrl+V or terminal paste to edit. Escape does not dismiss or release a held answer. `/review off` returns to pass-through behavior for new final responses; an already pending review still needs an explicit decision.
 
-The STREENOTE listener waits up to nine minutes and Hermes' hook callback timeout must be at least as long. If the review is rejected, the channel fails, or the timeout expires, the plugin raises an error and Hermes withholds the draft rather than releasing it. When STREENOTE is not running and the socket does not exist, the plugin passes the response through unchanged.
+The STREENOTE listener waits up to nine minutes. If the review is rejected, the channel fails, or the timeout expires, the plugin raises an error and Hermes withholds the draft rather than releasing it. When STREENOTE is not running and the socket does not exist, the plugin passes the response through unchanged.
 
 This gate covers the **final assistant response**. Hermes commentary between tool calls is not passed through this transform and is hidden on held turns. Tool progress and reasoning are separate display surfaces and are not covered by this approval gate; adjust Hermes' `display.tool_progress` and `display.show_reasoning` settings separately if those surfaces also need to be hidden.
 
