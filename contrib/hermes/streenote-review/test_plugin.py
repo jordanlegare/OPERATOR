@@ -19,9 +19,13 @@ class HermesReviewPluginTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory(prefix="streenote-review-plugin-")
         self.socket_path = Path(self.temp_dir.name) / "review.sock"
+        self.diagnostic_path = Path(self.temp_dir.name) / "hermes-review.log"
         self.env = patch.dict(
             os.environ,
-            {"STREENOTE_HERMES_REVIEW_SOCKET": str(self.socket_path)},
+            {
+                "STREENOTE_HERMES_REVIEW_SOCKET": str(self.socket_path),
+                "STREENOTE_HERMES_REVIEW_LOG": str(self.diagnostic_path),
+            },
             clear=False,
         )
         self.env.start()
@@ -71,6 +75,23 @@ class HermesReviewPluginTests(unittest.TestCase):
             model="qwen3.5:latest",
             platform="tui",
         )
+
+    def test_register_installs_held_transform_and_logs_registration(self):
+        class Context:
+            def __init__(self):
+                self.hook = None
+
+            def register_hook(self, name, callback, **kwargs):
+                self.hook = (name, callback, kwargs)
+
+        context = Context()
+        PLUGIN.register(context)
+        self.assertIsNotNone(context.hook)
+        self.assertEqual(context.hook[0], "transform_llm_output")
+        self.assertIs(context.hook[1], PLUGIN.review_response)
+        self.assertTrue(context.hook[2]["hold_stream"])
+        records = [json.loads(line) for line in self.diagnostic_path.read_text().splitlines()]
+        self.assertEqual(records[-1]["event"], "PLUGIN_REGISTERED")
 
     def test_runtime_socket_path_is_shared_by_processes_with_different_home_values(self):
         with tempfile.TemporaryDirectory(prefix="streenote-runtime-") as runtime:
