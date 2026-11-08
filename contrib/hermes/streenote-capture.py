@@ -228,7 +228,9 @@ def write_inbox_event(inbox: Path, event: dict) -> None:
         raise
 
 
-def write_history_snapshot(inbox: Path, session_id: str, history) -> None:
+def write_history_snapshot(
+    inbox: Path, session_id: str, conversation_id: str | None, history
+) -> None:
     """Stage one stable history snapshot per Hermes session."""
     snapshot = history_snapshot_text(history)
     if not snapshot:
@@ -255,7 +257,9 @@ def write_history_snapshot(inbox: Path, session_id: str, history) -> None:
             timespec="seconds"
         ),
         "text": snapshot,
-        "conversation_id": session_id,
+        "conversation_id": conversation_id,
+        "session_id": session_id,
+        "old_session_id": None,
         "turn_id": None,
         "tool_call_id": None,
         "iteration": None,
@@ -278,19 +282,30 @@ def write_history_snapshot(inbox: Path, session_id: str, history) -> None:
 def session_event_text(event_name: str, payload: dict, extra: dict) -> str:
     labels = {
         "on_session_start": "Hermes session started.",
-        "on_session_end": "Hermes session ended.",
+        "on_session_end": "Hermes turn finalized.",
+        "on_session_finalize": "Hermes session finalized.",
+        "on_session_reset": "Hermes session reset.",
         "post_compaction": "Hermes conversation context compacted.",
     }
     lines = [labels[event_name]]
     for key in (
         "reason",
         "exit_reason",
+        "turn_exit_reason",
+        "kind",
+        "completed",
+        "failed",
+        "interrupted",
         "duration_seconds",
         "turns_completed",
         "turns_failed",
+        "before_tokens",
+        "after_tokens",
         "messages_before",
         "messages_after",
         "messages_compacted",
+        "model",
+        "platform",
     ):
         value = event_value(payload, extra, key)
         if isinstance(value, (str, int, float, bool)):
@@ -320,6 +335,8 @@ def main() -> int:
             "on_interim_message",
             "on_session_start",
             "on_session_end",
+            "on_session_finalize",
+            "on_session_reset",
             "post_compaction",
         )
         if event_name not in supported_events:
@@ -384,8 +401,14 @@ def main() -> int:
             return 0
 
         session_id = event_value(payload, extra, "session_id")
-        if not session_id:
-            session_id = event_value(payload, extra, "conversation_id")
+        conversation_id = event_value(payload, extra, "conversation_id")
+        old_session_id = event_value(payload, extra, "old_session_id")
+        if session_id is not None:
+            session_id = str(session_id)
+        if conversation_id is not None:
+            conversation_id = str(conversation_id)
+        if old_session_id is not None:
+            old_session_id = str(old_session_id)
         turn_id = event_value(payload, extra, "turn_id")
 
         if session_id is not None:
@@ -396,7 +419,12 @@ def main() -> int:
             history = event_value(payload, extra, "conversation_history")
             if history:
                 try:
-                    write_history_snapshot(Path(inbox_value).expanduser(), session_id, history)
+                    write_history_snapshot(
+                        Path(inbox_value).expanduser(),
+                        session_id,
+                        conversation_id,
+                        history,
+                    )
                 except Exception as exc:
                     # A history snapshot is supplementary. Do not lose the
                     # current prompt if snapshot storage is unavailable.
@@ -431,7 +459,9 @@ def main() -> int:
             "kind": kind,
             "timestamp": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
             "text": text,
-            "conversation_id": session_id,
+            "conversation_id": conversation_id,
+            "session_id": session_id,
+            "old_session_id": old_session_id,
             "turn_id": turn_id,
             "tool_call_id": tool_call_id,
             "iteration": iteration,
