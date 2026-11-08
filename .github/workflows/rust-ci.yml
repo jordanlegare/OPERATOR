@@ -16,6 +16,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Compile all targets
         run: cargo check --all-targets
+      - name: Test full-text journal search
+        run: cargo test app::tests::search_
       - name: Test Hermes inbox bridge
         run: cargo test hermes_bridge::tests
       - name: Test Hermes conversation grouping and stream persistence
