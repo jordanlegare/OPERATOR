@@ -45,6 +45,12 @@ pub struct Entry {
     /// Hermes session identifier shared by every turn in one conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    /// Current Hermes session identifier; may rotate after context compaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Previous session identifier when Hermes rotates a session during compaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related_session_id: Option<String>,
     /// Hermes turn identifier shared by prompt, stream, and tool events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
@@ -68,6 +74,8 @@ impl Entry {
             text: sanitize_entry_text(kind, &text),
             event_id: None,
             conversation_id: None,
+            session_id: None,
+            related_session_id: None,
             turn_id: None,
             tool_call_id: None,
             iteration: None,
@@ -82,6 +90,8 @@ impl Entry {
         timestamp: String,
         event_id: String,
         conversation_id: Option<String>,
+        session_id: Option<String>,
+        related_session_id: Option<String>,
         turn_id: Option<String>,
         tool_call_id: Option<String>,
         iteration: Option<u32>,
@@ -92,6 +102,8 @@ impl Entry {
             text: sanitize_entry_text(kind, &text),
             event_id: Some(event_id),
             conversation_id,
+            session_id,
+            related_session_id,
             turn_id,
             tool_call_id,
             iteration,
