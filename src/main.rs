@@ -31,7 +31,7 @@ use crossterm::{
 use unicode_width::UnicodeWidthStr;
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
@@ -1487,7 +1487,7 @@ fn handle_review_key(code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
             KeyCode::Char('v') => paste_review_from_system_clipboard(app),
             KeyCode::Home => app.review_cursor_document_start(),
             KeyCode::End => app.review_cursor_document_end(),
-            KeyCode::q => {
+            KeyCode::Char('q') => {
                 app.status = "A held Hermes answer must be released with F2/F3 or withheld with F4.".to_string();
             }
             _ => {}
