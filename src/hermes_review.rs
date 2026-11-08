@@ -230,8 +230,25 @@ impl Drop for HermesReviewServer {
 /// The gateway process resolves the same path independently of the PTY
 /// environment. An explicit override is available for non-standard layouts.
 pub fn default_review_socket_path() -> PathBuf {
+    // A user service and an interactive PTY can have different HOME and
+    // XDG_DATA_HOME values. /run/user/<uid> is stable across those process
+    // environments and is private to the same Unix account.
+    #[cfg(unix)]
+    let runtime_dir = {
+        use std::os::unix::fs::MetadataExt;
+        let uid = unsafe { libc::geteuid() };
+        let root = PathBuf::from(format!("/run/user/{uid}"));
+        fs::metadata(&root)
+            .ok()
+            .filter(|metadata| metadata.is_dir() && metadata.uid() == uid)
+            .map(|_| root)
+    };
+    #[cfg(not(unix))]
+    let runtime_dir: Option<PathBuf> = None;
+
     resolve_review_socket_path(
         env::var_os("STREENOTE_HERMES_REVIEW_SOCKET").map(PathBuf::from),
+        runtime_dir,
         env::var_os("XDG_DATA_HOME").map(PathBuf::from),
         env::var_os("HOME").map(PathBuf::from),
     )
@@ -239,11 +256,16 @@ pub fn default_review_socket_path() -> PathBuf {
 
 fn resolve_review_socket_path(
     explicit: Option<PathBuf>,
+    runtime_dir: Option<PathBuf>,
     xdg_data_home: Option<PathBuf>,
     home: Option<PathBuf>,
 ) -> PathBuf {
     if let Some(path) = explicit.filter(|path| path.is_absolute()) {
         return path;
+    }
+
+    if let Some(runtime_dir) = runtime_dir.filter(|path| path.is_absolute()) {
+        return runtime_dir.join("streenote").join("review.sock");
     }
 
     let data_root = xdg_data_home
@@ -447,9 +469,19 @@ mod tests {
     }
 
     #[test]
-    fn resolves_review_socket_under_the_same_xdg_data_directory_as_the_journal() {
+    fn resolves_review_socket_under_shared_runtime_directory_before_home_data() {
         assert_eq!(
             resolve_review_socket_path(
+                None,
+                Some(PathBuf::from("/run/user/1000")),
+                Some(PathBuf::from("/different/xdg")),
+                Some(PathBuf::from("/different/home")),
+            ),
+            PathBuf::from("/run/user/1000/streenote/review.sock")
+        );
+        assert_eq!(
+            resolve_review_socket_path(
+                None,
                 None,
                 Some(PathBuf::from("/xdg/data")),
                 Some(PathBuf::from("/home/test")),
@@ -460,17 +492,19 @@ mod tests {
             resolve_review_socket_path(
                 None,
                 None,
+                None,
                 Some(PathBuf::from("/home/test")),
             ),
             PathBuf::from("/home/test/.local/share/streenote/review.sock")
         );
         assert_eq!(
             resolve_review_socket_path(
-                Some(PathBuf::from("/run/user/1000/review.sock")),
+                Some(PathBuf::from("/custom/review.sock")),
+                Some(PathBuf::from("/run/user/1000")),
                 Some(PathBuf::from("/xdg/data")),
                 Some(PathBuf::from("/home/test")),
             ),
-            PathBuf::from("/run/user/1000/review.sock")
+            PathBuf::from("/custom/review.sock")
         );
     }
 

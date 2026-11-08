@@ -72,6 +72,16 @@ class HermesReviewPluginTests(unittest.TestCase):
             platform="tui",
         )
 
+    def test_runtime_socket_path_is_shared_by_processes_with_different_home_values(self):
+        with tempfile.TemporaryDirectory(prefix="streenote-runtime-") as runtime:
+            runtime_root = Path(runtime)
+            runtime_dir = runtime_root / str(os.getuid())
+            runtime_dir.mkdir()
+            resolved = PLUGIN.runtime_review_socket_path(
+                uid=os.getuid(), runtime_root=runtime_root
+            )
+            self.assertEqual(resolved, runtime_dir / "streenote" / "review.sock")
+
     def test_no_active_socket_leaves_ordinary_hermes_sessions_unchanged(self):
         self.assertFalse(self.socket_path.exists())
         self.assertIsNone(self._call())

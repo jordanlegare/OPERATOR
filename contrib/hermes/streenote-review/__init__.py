@@ -20,6 +20,19 @@ SOCKET_TIMEOUT_SECONDS = 550
 MAX_METADATA_CHARS = 1024
 
 
+def runtime_review_socket_path(uid: int | None = None, runtime_root: Path = Path("/run/user")) -> Path | None:
+    """Return a same-UID socket path despite different HOME/XDG environments."""
+    uid = os.getuid() if uid is None else uid
+    runtime_dir = runtime_root / str(uid)
+    try:
+        metadata = runtime_dir.stat()
+    except OSError:
+        return None
+    if not runtime_dir.is_dir() or metadata.st_uid != uid:
+        return None
+    return runtime_dir / "streenote" / "review.sock"
+
+
 def review_socket_path() -> Path:
     """Resolve the same per-user socket path used by the STREENOTE process."""
     explicit = os.environ.get("STREENOTE_HERMES_REVIEW_SOCKET")
@@ -27,6 +40,13 @@ def review_socket_path() -> Path:
         candidate = Path(explicit).expanduser()
         if candidate.is_absolute():
             return candidate
+
+    # The Hermes gateway and the STREENOTE PTY can have different HOME and
+    # XDG_DATA_HOME values. /run/user/<uid> is shared by processes of this
+    # Unix account and avoids that environment-dependent path mismatch.
+    runtime_path = runtime_review_socket_path()
+    if runtime_path is not None:
+        return runtime_path
 
     xdg_data_home = os.environ.get("XDG_DATA_HOME")
     if xdg_data_home and Path(xdg_data_home).is_absolute():
