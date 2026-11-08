@@ -1347,13 +1347,17 @@ impl App {
         let result = request.reply.send(ReviewDecision::Approve);
         self.review_text.clear();
         self.review_cursor = 0;
-        self.record_system(format!(
-            "Hermes response review {} · original answer released.",
-            request.request_id
-        ));
-        if result.is_err() {
-            self.status = "The Hermes review request ended before the approval could be returned.".to_string();
-        }
+        self.record_system(if result.is_ok() {
+            format!(
+                "Hermes response review {} · original answer released.",
+                request.request_id
+            )
+        } else {
+            format!(
+                "Hermes response review {} · original-answer approval arrived too late; answer was not released.",
+                request.request_id
+            )
+        });
     }
 
     pub fn approve_hermes_edited(&mut self) {
@@ -1375,13 +1379,17 @@ impl App {
         let result = request.reply.send(ReviewDecision::Replace(edited));
         self.review_text.clear();
         self.review_cursor = 0;
-        self.record_system(format!(
-            "Hermes response review {} · edited answer released.",
-            request.request_id
-        ));
-        if result.is_err() {
-            self.status = "The Hermes review request ended before the edited answer could be returned.".to_string();
-        }
+        self.record_system(if result.is_ok() {
+            format!(
+                "Hermes response review {} · edited answer released.",
+                request.request_id
+            )
+        } else {
+            format!(
+                "Hermes response review {} · edited-answer approval arrived too late; answer was not released.",
+                request.request_id
+            )
+        });
     }
 
     pub fn reject_hermes_response(&mut self) {
@@ -1391,13 +1399,17 @@ impl App {
         let result = request.reply.send(ReviewDecision::Reject);
         self.review_text.clear();
         self.review_cursor = 0;
-        self.record_system(format!(
-            "Hermes response review {} · original answer withheld.",
-            request.request_id
-        ));
-        if result.is_err() {
-            self.status = "The Hermes review request had already ended; no answer was released.".to_string();
-        }
+        self.record_system(if result.is_ok() {
+            format!(
+                "Hermes response review {} · original answer withheld.",
+                request.request_id
+            )
+        } else {
+            format!(
+                "Hermes response review {} · rejection arrived after the request had already ended; no answer was released.",
+                request.request_id
+            )
+        });
     }
 
     pub fn review_insert_text(&mut self, text: &str) {
