@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 MAX_REVIEW_BYTES = 8 * 1024 * 1024
+MAX_REPLY_WIRE_BYTES = MAX_REVIEW_BYTES + 4096
 SOCKET_TIMEOUT_SECONDS = 550
 MAX_METADATA_CHARS = 1024
 
@@ -38,7 +39,7 @@ def review_socket_path() -> Path:
 def _read_json_line(connection: socket.socket) -> dict[str, Any]:
     received = bytearray()
     while b"\n" not in received:
-        remaining = MAX_REVIEW_BYTES + 1 - len(received)
+        remaining = MAX_REPLY_WIRE_BYTES + 1 - len(received)
         if remaining <= 0:
             raise RuntimeError("STREENOTE review reply exceeded the size limit")
         chunk = connection.recv(min(65536, remaining))
@@ -49,7 +50,7 @@ def _read_json_line(connection: socket.socket) -> dict[str, Any]:
     line, _, trailing = received.partition(b"\n")
     if trailing.strip():
         raise RuntimeError("STREENOTE sent unexpected data after the review reply")
-    if len(line) > MAX_REVIEW_BYTES:
+    if len(line) > MAX_REPLY_WIRE_BYTES:
         raise RuntimeError("STREENOTE review reply exceeded the size limit")
     try:
         decoded = json.loads(line.decode("utf-8"))
