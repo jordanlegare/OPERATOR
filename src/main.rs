@@ -1168,6 +1168,7 @@ fn run(
     review_server: &mut HermesReviewServer,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
+        app.expire_hermes_review_if_needed();
         review_server.set_enabled(app.review_hermes_responses);
         if app.pending_review.is_none() {
             if let Some(request) = review_server.try_recv() {
@@ -1342,6 +1343,7 @@ fn run_terminal_workspace_loop(
     let mut last_size = terminal.size()?;
 
     loop {
+        app.expire_hermes_review_if_needed();
         review_server.set_enabled(app.review_hermes_responses);
         if app.pending_review.is_none() {
             if let Some(request) = review_server.try_recv() {
@@ -1444,6 +1446,10 @@ fn run_workspace_review_overlay(
 
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         while app.pending_review.is_some() {
+            app.expire_hermes_review_if_needed();
+            if app.pending_review.is_none() {
+                break;
+            }
             terminal.draw(|frame| ui::draw(frame, app))?;
             if !event::poll(Duration::from_millis(40))? {
                 continue;
@@ -1575,6 +1581,7 @@ fn run_terminal_workspace_loop(
     review_server: &mut HermesReviewServer,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
+        app.expire_hermes_review_if_needed();
         review_server.set_enabled(app.review_hermes_responses);
         if app.pending_review.is_none() {
             if let Some(request) = review_server.try_recv() {
