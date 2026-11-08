@@ -312,6 +312,47 @@ mod tests {
     }
 
     #[test]
+    fn imports_history_interim_and_session_lifecycle_events() {
+        let root = test_root();
+        let ready = root.join("ready");
+        let journal_path = root.join("journal.jsonl");
+        fs::create_dir_all(&ready).expect("create ready directory");
+
+        for (event_id, kind, text) in [
+            ("history-001", "hermes_history", "PRIOR CONVERSATION CONTEXT\\n[1] USER\\nEarlier prompt"),
+            ("interim-001", "hermes_interim", "Checking the previous context."),
+            ("session-001", "hermes_session", "Hermes session started."),
+        ] {
+            let event = serde_json::json!({
+                "version": 1,
+                "event_id": event_id,
+                "kind": kind,
+                "timestamp": "2026-11-08T12:00:00-05:00",
+                "text": text,
+                "conversation_id": "resumed-session"
+            });
+            fs::write(
+                ready.join(format!("{event_id}.json")),
+                serde_json::to_vec(&event).expect("serialize event"),
+            ).expect("write event");
+        }
+
+        let mut journal = Journal::open(journal_path).expect("open journal");
+        let mut bridge = HermesBridge::new(root.clone());
+        assert_eq!(bridge.drain(&mut journal).expect("drain new event kinds"), 3);
+        assert_eq!(
+            journal.entries.iter().map(|entry| entry.kind).collect::<Vec<_>>(),
+            vec![EntryKind::HermesHistory, EntryKind::HermesInterim, EntryKind::HermesSession]
+        );
+        assert!(journal.entries.iter().all(|entry| {
+            entry.conversation_id.as_deref() == Some("resumed-session")
+        }));
+
+        drop(journal);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn invalid_events_are_quarantined_instead_of_retried_forever() {
         let root = test_root();
         let ready = root.join("ready");
