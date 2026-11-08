@@ -1634,6 +1634,8 @@ fn handle_key(
                 }
                 KeyCode::Esc => app.close_conversation_view(),
                 KeyCode::Backspace => app.collapse_conversation_thread(),
+                KeyCode::Char('n') if !app.matches.is_empty() => app.next_match(),
+                KeyCode::Char('N') if !app.matches.is_empty() => app.previous_match(),
                 KeyCode::Up => app.scroll_conversation_view(-1),
                 KeyCode::Down => app.scroll_conversation_view(1),
                 KeyCode::PageUp => app.scroll_conversation_view(-(app.conversation_viewport_height.max(1) as i32)),
