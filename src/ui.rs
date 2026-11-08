@@ -181,8 +181,8 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
     let entries = entry_indices.iter()
         .filter_map(|index| app.journal.entries.get(*index).map(|entry| (*index, entry)))
         .collect::<Vec<_>>();
-    // Collapse stream deltas for turns without tool calls. For tool-using
-    // turns, hide intermediate deltas and keep the final assistant message.
+    // Keep streamed text visible during tool activity; once a final assistant
+    // event follows the latest delta and tool event, it replaces the live block.
     let collapsed_streams = collapse_live_streams(&entries);
     let replaced_assistant_entries = &collapsed_streams.replaced_assistant_indices;
 
@@ -861,33 +861,33 @@ mod conversation_thread_stream_tests {
     }
 
     #[test]
-    fn live_stream_replaces_final_assistant_when_iteration_is_omitted() {
+    fn final_assistant_replaces_live_stream_when_iteration_is_omitted() {
         let prompt = event(EntryKind::HermesUser, Some("turn-1"), None);
         let assistant = event(EntryKind::HermesAssistant, Some("turn-1"), None);
         let delta = event(EntryKind::HermesStreamDelta, Some("turn-1"), Some(0));
         let entries = vec![(1, &prompt), (2, &delta), (3, &assistant)];
 
-        assert_eq!(
-            collapse_live_streams(&entries).replaced_assistant_indices,
-            [3].into_iter().collect()
-        );
+        let collapsed = collapse_live_streams(&entries);
+        assert!(collapsed.text_by_first_index.is_empty());
+        assert_eq!(collapsed.hidden_delta_indices, [2].into_iter().collect());
+        assert!(collapsed.replaced_assistant_indices.is_empty());
     }
 
     #[test]
-    fn live_stream_replaces_final_assistant_when_post_llm_event_omits_turn_id() {
+    fn final_assistant_replaces_live_stream_when_post_llm_event_omits_turn_id() {
         let prompt = event(EntryKind::HermesUser, Some("turn-1"), None);
         let delta = event(EntryKind::HermesStreamDelta, Some("turn-1"), Some(0));
         let assistant = event(EntryKind::HermesAssistant, None, None);
         let entries = vec![(1, &prompt), (2, &delta), (3, &assistant)];
 
-        assert_eq!(
-            collapse_live_streams(&entries).replaced_assistant_indices,
-            [3].into_iter().collect()
-        );
+        let collapsed = collapse_live_streams(&entries);
+        assert!(collapsed.text_by_first_index.is_empty());
+        assert_eq!(collapsed.hidden_delta_indices, [2].into_iter().collect());
+        assert!(collapsed.replaced_assistant_indices.is_empty());
     }
 
     #[test]
-    fn prompt_boundary_keeps_a_later_unstreamed_assistant_response() {
+    fn final_assistant_remains_visible_at_the_streamed_turn_boundary() {
         let first_prompt = event(EntryKind::HermesUser, Some("turn-1"), None);
         let delta = event(EntryKind::HermesStreamDelta, Some("turn-1"), Some(0));
         let first_assistant = event(EntryKind::HermesAssistant, Some("turn-1"), None);
@@ -901,23 +901,22 @@ mod conversation_thread_stream_tests {
             (5, &second_assistant),
         ];
 
-        assert_eq!(
-            collapse_live_streams(&entries).replaced_assistant_indices,
-            [3].into_iter().collect()
-        );
+        let collapsed = collapse_live_streams(&entries);
+        assert!(collapsed.replaced_assistant_indices.is_empty());
+        assert_eq!(collapsed.hidden_delta_indices, [2].into_iter().collect());
     }
 
     #[test]
-    fn legacy_events_without_turn_ids_are_grouped_by_prompt_boundary() {
+    fn legacy_events_without_turn_ids_use_the_final_assistant_after_prompt_boundary() {
         let prompt = event(EntryKind::HermesUser, None, None);
         let delta = event(EntryKind::HermesStreamDelta, None, Some(0));
         let assistant = event(EntryKind::HermesAssistant, None, None);
         let entries = vec![(10, &prompt), (11, &delta), (12, &assistant)];
 
-        assert_eq!(
-            collapse_live_streams(&entries).replaced_assistant_indices,
-            [12].into_iter().collect()
-        );
+        let collapsed = collapse_live_streams(&entries);
+        assert!(collapsed.text_by_first_index.is_empty());
+        assert_eq!(collapsed.hidden_delta_indices, [11].into_iter().collect());
+        assert!(collapsed.replaced_assistant_indices.is_empty());
     }
 
     #[test]

@@ -158,25 +158,25 @@ pub fn build_threads(entries: &[Entry]) -> Vec<ConversationThread> {
 }
 
 
-/// A thread can receive several stream-delta events for one assistant turn,
-/// including across tool iterations. Collapse them into one uninterrupted
-/// transcript block unless a tool is used in the turn. Tool-using turns discard
-/// their intermediate stream deltas and retain the final assistant event.
+/// Collapse every streamed turn into one assistant block while it is in progress.
+/// Tool calls do not suppress streaming. Once an assistant event arrives after the
+/// latest stream delta and latest tool event, it is treated as the authoritative
+/// final answer and replaces the accumulated live block.
 #[derive(Debug, Default)]
 pub struct CollapsedLiveStreams {
-    /// Combined text keyed by the first journal index for each streamed turn.
+    /// Combined text keyed by the first journal index for each in-progress turn.
     pub text_by_first_index: HashMap<usize, String>,
-    /// Later delta entries folded into the first block.
+    /// Delta entries folded into the first live block, or hidden once finalized.
     pub hidden_delta_indices: HashSet<usize>,
-    /// Final assistant entries replaced by the captured live stream.
+    /// Intermediate assistant events replaced by the live block or final answer.
     pub replaced_assistant_indices: HashSet<usize>,
 }
 
 pub fn collapse_live_streams(entries: &[(usize, &Entry)]) -> CollapsedLiveStreams {
     let mut current_turn = None::<String>;
-    let mut streams = HashMap::<String, (usize, String, Vec<usize>)>::new();
-    let mut assistant_entries = Vec::<(usize, String)>::new();
-    let mut tool_turns = HashSet::<String>::new();
+    let mut streams = HashMap::<String, (usize, String, Vec<usize>, usize)>::new();
+    let mut assistant_entries = HashMap::<String, Vec<usize>>::new();
+    let mut last_tool_indices = HashMap::<String, usize>::new();
 
     for (index, entry) in entries {
         if entry.kind == EntryKind::HermesUser {
@@ -198,47 +198,68 @@ pub fn collapse_live_streams(entries: &[(usize, &Entry)]) -> CollapsedLiveStream
             EntryKind::HermesStreamDelta => {
                 let stream = streams
                     .entry(turn_key)
-                    .or_insert_with(|| (*index, String::new(), Vec::new()));
+                    .or_insert_with(|| (*index, String::new(), Vec::new(), *index));
                 stream.1.push_str(&entry.text);
                 stream.2.push(*index);
+                stream.3 = *index;
             }
             EntryKind::HermesAssistant => {
-                assistant_entries.push((*index, turn_key));
+                assistant_entries
+                    .entry(turn_key)
+                    .or_default()
+                    .push(*index);
             }
             EntryKind::HermesToolCall | EntryKind::HermesToolResult => {
-                // If a tool was involved in this turn, its streamed assistant
-                // deltas are intermediate output. Keep the final assistant
-                // message instead of presenting those deltas as a reply.
-                tool_turns.insert(turn_key);
+                last_tool_indices.insert(turn_key, *index);
             }
             _ => {}
         }
     }
 
-    let streamed_turns = streams
-        .keys()
-        .filter(|turn| !tool_turns.contains(*turn))
-        .cloned()
-        .collect::<HashSet<_>>();
     let mut collapsed = CollapsedLiveStreams::default();
 
-    for (turn, (first_index, text, indices)) in streams {
-        if tool_turns.contains(&turn) {
-            // Tool-using turns show only their final assistant message.
-            collapsed.hidden_delta_indices.extend(indices);
+    for (turn, (first_index, text, delta_indices, last_delta_index)) in streams {
+        // An assistant event only finalizes this stream if it follows both
+        // the latest streamed text and the latest tool activity. An assistant
+        // payload emitted before a subsequent tool call is still intermediate.
+        let last_tool_index = last_tool_indices.get(&turn).copied();
+        let final_assistant_index = assistant_entries.get(&turn).and_then(|indices| {
+            indices
+                .iter()
+                .rev()
+                .find(|assistant_index| {
+                    **assistant_index > last_delta_index
+                        && last_tool_index
+                            .map(|tool_index| **assistant_index > tool_index)
+                            .unwrap_or(true)
+                })
+                .copied()
+        });
+
+        if final_assistant_index.is_some() {
+            // The authoritative final assistant event is rendered in its own
+            // journal position; hide all delta rows to prevent duplicate text.
+            collapsed.hidden_delta_indices.extend(delta_indices);
         } else {
+            // While the turn is active, keep the accumulated text visible at
+            // its first delta row and fold subsequent chunks into that block.
             collapsed.text_by_first_index.insert(first_index, text);
             collapsed.hidden_delta_indices.extend(
-                indices.into_iter().filter(|index| *index != first_index),
+                delta_indices
+                    .into_iter()
+                    .filter(|index| *index != first_index),
+            );
+        }
+
+        if let Some(indices) = assistant_entries.get(&turn) {
+            collapsed.replaced_assistant_indices.extend(
+                indices
+                    .iter()
+                    .copied()
+                    .filter(|index| Some(*index) != final_assistant_index),
             );
         }
     }
-
-    collapsed.replaced_assistant_indices.extend(
-        assistant_entries
-            .into_iter()
-            .filter_map(|(index, turn)| streamed_turns.contains(&turn).then_some(index)),
-    );
 
     collapsed
 }
@@ -350,22 +371,24 @@ mod tests {
     }
 
     #[test]
-    fn stream_deltas_across_iterations_become_one_uninterrupted_message() {
+    fn stream_deltas_across_iterations_remain_live_until_final_assistant_arrives() {
         use super::collapse_live_streams;
 
         let prompt = event(EntryKind::HermesUser, "prompt", Some("session"), Some("turn-1"));
         let mut first = event(EntryKind::HermesStreamDelta, "The basic ", Some("session"), Some("turn-1"));
         first.iteration = Some(0);
         let end = event(EntryKind::HermesStreamEnd, "finished", Some("session"), Some("turn-1"));
+        let tool_call = event(EntryKind::HermesToolCall, "Tool: lookup", Some("session"), Some("turn-1"));
+        let tool_result = event(EntryKind::HermesToolResult, "lookup complete", Some("session"), Some("turn-1"));
         let mut second = event(EntryKind::HermesStreamDelta, "necessities of life.", Some("session"), Some("turn-1"));
         second.iteration = Some(1);
-        let assistant = event(EntryKind::HermesAssistant, "duplicate final answer", Some("session"), Some("turn-1"));
         let entries = vec![
             (0, &prompt),
             (1, &first),
             (2, &end),
-            (3, &second),
-            (4, &assistant),
+            (3, &tool_call),
+            (4, &tool_result),
+            (5, &second),
         ];
 
         let collapsed = collapse_live_streams(&entries);
@@ -373,40 +396,59 @@ mod tests {
             collapsed.text_by_first_index.get(&1).map(String::as_str),
             Some("The basic necessities of life.")
         );
-        assert!(collapsed.hidden_delta_indices.contains(&3));
-        assert!(collapsed.replaced_assistant_indices.contains(&4));
-    }
-
-    #[test]
-    fn tool_using_turn_discards_stream_deltas_and_keeps_final_assistant_message() {
-        use super::collapse_live_streams;
-
-        let prompt = event(EntryKind::HermesUser, "run a tool", Some("session"), Some("turn-1"));
-        let first_delta = event(EntryKind::HermesStreamDelta, "I will inspect ", Some("session"), Some("turn-1"));
-        let tool_call = event(EntryKind::HermesToolCall, "Tool: terminal", Some("session"), Some("turn-1"));
-        let tool_result = event(EntryKind::HermesToolResult, "command output", Some("session"), Some("turn-1"));
-        let second_delta = event(EntryKind::HermesStreamDelta, "the result now.", Some("session"), Some("turn-1"));
-        let assistant = event(EntryKind::HermesAssistant, "Here is the completed answer.", Some("session"), Some("turn-1"));
-        let entries = vec![
-            (0, &prompt),
-            (1, &first_delta),
-            (2, &tool_call),
-            (3, &tool_result),
-            (4, &second_delta),
-            (5, &assistant),
-        ];
-
-        let collapsed = collapse_live_streams(&entries);
-        assert!(collapsed.text_by_first_index.is_empty());
-        assert_eq!(
-            collapsed.hidden_delta_indices,
-            [1, 4].into_iter().collect()
-        );
+        assert!(collapsed.hidden_delta_indices.contains(&5));
         assert!(collapsed.replaced_assistant_indices.is_empty());
     }
 
     #[test]
-    fn legacy_tool_using_turn_discards_stream_deltas_at_prompt_boundary() {
+    fn final_assistant_replaces_live_stream_after_tool_activity() {
+        use super::collapse_live_streams;
+
+        let prompt = event(EntryKind::HermesUser, "run a tool", Some("session"), Some("turn-1"));
+        let first_delta = event(EntryKind::HermesStreamDelta, "I will inspect ", Some("session"), Some("turn-1"));
+        let intermediate_assistant = event(EntryKind::HermesAssistant, "I will inspect the system.", Some("session"), Some("turn-1"));
+        let tool_call = event(EntryKind::HermesToolCall, "Tool: terminal", Some("session"), Some("turn-1"));
+        let tool_result = event(EntryKind::HermesToolResult, "command output", Some("session"), Some("turn-1"));
+        let second_delta = event(EntryKind::HermesStreamDelta, "The result is ready.", Some("session"), Some("turn-1"));
+        let final_assistant = event(EntryKind::HermesAssistant, "Here is the completed answer.", Some("session"), Some("turn-1"));
+        let entries = vec![
+            (0, &prompt),
+            (1, &first_delta),
+            (2, &intermediate_assistant),
+            (3, &tool_call),
+            (4, &tool_result),
+            (5, &second_delta),
+            (6, &final_assistant),
+        ];
+
+        let collapsed = collapse_live_streams(&entries);
+        assert!(collapsed.text_by_first_index.is_empty());
+        assert_eq!(collapsed.hidden_delta_indices, [1, 5].into_iter().collect());
+        assert_eq!(collapsed.replaced_assistant_indices, [2].into_iter().collect());
+        assert!(!collapsed.replaced_assistant_indices.contains(&6));
+    }
+
+    #[test]
+    fn legacy_tool_using_turn_keeps_stream_live_until_final_assistant() {
+        use super::collapse_live_streams;
+
+        let prompt = event(EntryKind::HermesUser, "run a tool", None, None);
+        let delta = event(EntryKind::HermesStreamDelta, "intermediate output", None, None);
+        let tool_call = event(EntryKind::HermesToolCall, "Tool: terminal", None, None);
+        let tool_result = event(EntryKind::HermesToolResult, "tool finished", None, None);
+        let entries = vec![(10, &prompt), (11, &delta), (12, &tool_call), (13, &tool_result)];
+
+        let collapsed = collapse_live_streams(&entries);
+        assert_eq!(
+            collapsed.text_by_first_index.get(&11).map(String::as_str),
+            Some("intermediate output")
+        );
+        assert!(collapsed.hidden_delta_indices.is_empty());
+        assert!(collapsed.replaced_assistant_indices.is_empty());
+    }
+
+    #[test]
+    fn legacy_tool_using_turn_final_assistant_replaces_stream() {
         use super::collapse_live_streams;
 
         let prompt = event(EntryKind::HermesUser, "run a tool", None, None);
@@ -417,12 +459,12 @@ mod tests {
 
         let collapsed = collapse_live_streams(&entries);
         assert!(collapsed.text_by_first_index.is_empty());
-        assert!(collapsed.hidden_delta_indices.contains(&11));
+        assert_eq!(collapsed.hidden_delta_indices, [11].into_iter().collect());
         assert!(collapsed.replaced_assistant_indices.is_empty());
     }
 
     #[test]
-    fn legacy_stream_deltas_without_turn_ids_follow_the_prompt_boundary() {
+    fn legacy_stream_deltas_without_turn_ids_are_replaced_by_final_assistant() {
         use super::collapse_live_streams;
 
         let prompt = event(EntryKind::HermesUser, "prompt", None, None);
@@ -430,15 +472,16 @@ mod tests {
         first.iteration = Some(0);
         let mut second = event(EntryKind::HermesStreamDelta, "world", None, None);
         second.iteration = Some(1);
-        let assistant = event(EntryKind::HermesAssistant, "duplicate", None, None);
+        let assistant = event(EntryKind::HermesAssistant, "final answer", None, None);
         let entries = vec![(10, &prompt), (11, &first), (12, &second), (13, &assistant)];
 
         let collapsed = collapse_live_streams(&entries);
+        assert!(collapsed.text_by_first_index.is_empty());
         assert_eq!(
-            collapsed.text_by_first_index.get(&11).map(String::as_str),
-            Some("hello world")
+            collapsed.hidden_delta_indices,
+            [11, 12].into_iter().collect()
         );
-        assert!(collapsed.replaced_assistant_indices.contains(&13));
+        assert!(collapsed.replaced_assistant_indices.is_empty());
     }
 
     #[test]
