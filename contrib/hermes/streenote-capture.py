@@ -411,8 +411,6 @@ def main() -> int:
             old_session_id = str(old_session_id)
         turn_id = event_value(payload, extra, "turn_id")
 
-        if session_id is not None:
-            session_id = str(session_id)
         if turn_id is not None:
             turn_id = str(turn_id)
         if event_name == "pre_llm_call" and session_id:
