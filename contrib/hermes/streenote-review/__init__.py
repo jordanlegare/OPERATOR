@@ -25,6 +25,13 @@ def _diagnostic_log_path() -> Path:
     explicit = os.environ.get("STREENOTE_HERMES_REVIEW_LOG")
     if explicit and Path(explicit).expanduser().is_absolute():
         return Path(explicit).expanduser()
+    runtime_dir = Path("/run/user") / str(os.getuid())
+    try:
+        runtime_stat = runtime_dir.stat()
+        if runtime_dir.is_dir() and runtime_stat.st_uid == os.getuid():
+            return runtime_dir / "streenote" / "hermes-review.log"
+    except OSError:
+        pass
     state_home = os.environ.get("XDG_STATE_HOME")
     if state_home and Path(state_home).is_absolute():
         root = Path(state_home)
