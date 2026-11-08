@@ -130,6 +130,13 @@ def tool_event_text(event_name: str, payload: dict, extra: dict) -> str:
 
 
 
+def render_history_value(value) -> str:
+    cleaned = redact_value(value)
+    if isinstance(cleaned, str):
+        return cleaned
+    return json.dumps(cleaned, ensure_ascii=False, indent=2, sort_keys=True)
+
+
 def history_snapshot_text(history) -> str | None:
     """Render prior user/assistant/tool messages without system or developer prompts."""
     if isinstance(history, dict):
@@ -160,10 +167,10 @@ def history_snapshot_text(history) -> str | None:
             content = message.get("text")
         parts = []
         if content is not None and content != "":
-            parts.append(render_detail(content))
+            parts.append(render_history_value(content))
         tool_calls = message.get("tool_calls")
         if tool_calls:
-            parts.append("Tool calls:\n" + render_detail(tool_calls))
+            parts.append("Tool calls:\n" + render_history_value(tool_calls))
         if not parts:
             continue
         rendered_messages.append(header + "\n" + "\n".join(parts))
