@@ -174,6 +174,7 @@ Rebuild and restart STREENOTE so its Rust-created PTYs receive the inbox variabl
 - `pre_tool_call` captures the tool name and arguments as a `hermes_tool_call` entry.
 - `post_tool_call` captures the tool result, status, duration, and error details (when present) as a `hermes_tool_result` entry.
 - On the first observed `pre_llm_call` for a session, STREENOTE imports a one-time snapshot of the existing `conversation_history`. This lets a resumed Hermes session bring its earlier user, assistant, and tool messages into the same thread instead of starting with a partial transcript. The snapshot is stored once per session; subsequent turns append only new events.
+- Capture begins when Hermes fires its hook for a submitted turn. Text typed into the Hermes input editor but not submitted is not visible to shell hooks and is not captured.
 - The history snapshot excludes system and developer messages. Message bodies, tool calls, and tool results pass through the same best-effort redaction before capture. The snapshot is capped at 1 MiB of rendered text; the inbox accepts events up to 8 MiB.
 - `on_stream_start`, `on_stream_delta`, and `on_stream_end` capture assistant text incrementally. Reasoning deltas are intentionally excluded.
 - `on_interim_message` captures user-visible interim assistant messages. `on_session_start`, `on_session_end`, and `post_compaction` record the lifecycle of a conversation and its context compactions.
