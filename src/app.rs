@@ -2024,6 +2024,109 @@ mod tests {
     }
 
     #[test]
+    fn edited_hermes_response_is_returned_through_the_pending_decision_channel() {
+        use crate::hermes_review::{ReviewDecision, ReviewRequest};
+        use std::sync::mpsc;
+
+        let (mut app, path) = test_app();
+        let (reply, decision) = mpsc::sync_channel(1);
+        app.begin_hermes_review(ReviewRequest {
+            request_id: "review-edit-001".to_string(),
+            session_id: "session-1".to_string(),
+            model: "qwen3.5:latest".to_string(),
+            platform: "tui".to_string(),
+            response_text: "Original draft".to_string(),
+            reply,
+        });
+
+        assert!(app.pending_review.is_some());
+        assert_eq!(app.review_text, "Original draft");
+        for _ in 0..5 {
+            app.review_backspace();
+        }
+        app.review_insert_text("approved");
+        assert_eq!(app.review_text, "Original approved");
+
+        app.approve_hermes_edited();
+        assert_eq!(
+            decision.recv().expect("receive review decision"),
+            ReviewDecision::Replace("Original approved".to_string())
+        );
+        assert!(app.pending_review.is_none());
+        assert!(app.review_text.is_empty());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn original_answer_and_rejection_have_distinct_explicit_decisions() {
+        use crate::hermes_review::{ReviewDecision, ReviewRequest};
+        use std::sync::mpsc;
+
+        let (mut app, path) = test_app();
+        let (reply, decision) = mpsc::sync_channel(1);
+        app.begin_hermes_review(ReviewRequest {
+            request_id: "review-original-001".to_string(),
+            session_id: "session-1".to_string(),
+            model: "model".to_string(),
+            platform: "cli".to_string(),
+            response_text: "Release this exact answer".to_string(),
+            reply,
+        });
+        app.approve_hermes_original();
+        assert_eq!(
+            decision.recv().expect("receive original decision"),
+            ReviewDecision::Approve
+        );
+
+        let (reply, decision) = mpsc::sync_channel(1);
+        app.begin_hermes_review(ReviewRequest {
+            request_id: "review-reject-001".to_string(),
+            session_id: "session-1".to_string(),
+            model: "model".to_string(),
+            platform: "cli".to_string(),
+            response_text: "Do not release this answer".to_string(),
+            reply,
+        });
+        app.reject_hermes_response();
+        assert_eq!(
+            decision.recv().expect("receive rejection decision"),
+            ReviewDecision::Reject
+        );
+        assert!(app.pending_review.is_none());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn review_editor_cursor_respects_utf8_boundaries_and_multiline_navigation() {
+        use crate::hermes_review::ReviewRequest;
+        use std::sync::mpsc;
+
+        let (mut app, path) = test_app();
+        let (reply, _decision) = mpsc::sync_channel(1);
+        app.begin_hermes_review(ReviewRequest {
+            request_id: "review-cursor-001".to_string(),
+            session_id: String::new(),
+            model: String::new(),
+            platform: String::new(),
+            response_text: "Café\nnext".to_string(),
+            reply,
+        });
+
+        app.review_cursor_left();
+        app.review_cursor_left();
+        app.review_cursor_up();
+        assert!(app.review_text.is_char_boundary(app.review_cursor));
+        assert!(app.review_cursor <= "Café".len());
+        app.review_cursor_document_start();
+        app.review_insert_text("Edited ");
+        assert!(app.review_text.starts_with("Edited Café"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn selected_hermes_rows_open_the_full_content_viewer() {
         use crate::storage::{Entry, EntryKind};
 
