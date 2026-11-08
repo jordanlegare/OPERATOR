@@ -142,19 +142,29 @@ impl HermesReviewServer {
                 while !worker_stop.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((stream, _)) => {
-                            if let Err(error) = handle_connection(
-                                stream,
-                                &sender,
-                                &worker_enabled,
-                                &worker_stop,
-                            ) {
-                                if !worker_stop.load(Ordering::Relaxed)
-                                    && error.kind() != io::ErrorKind::WouldBlock
-                                    && error.kind() != io::ErrorKind::TimedOut
-                                {
-                                    eprintln!("STREENOTE Hermes review: {error}");
-                                }
-                            }
+                            // Each accepted client waits on its own thread. The
+                            // accept loop can keep polling, and listener shutdown
+                            // never waits for an operator to decide a pending answer.
+                            let connection_sender = sender.clone();
+                            let connection_enabled = Arc::clone(&worker_enabled);
+                            let connection_stop = Arc::clone(&worker_stop);
+                            let _ = thread::Builder::new()
+                                .name("streenote-review-client".to_string())
+                                .spawn(move || {
+                                    if let Err(error) = handle_connection(
+                                        stream,
+                                        &connection_sender,
+                                        &connection_enabled,
+                                        &connection_stop,
+                                    ) {
+                                        if !connection_stop.load(Ordering::Relaxed)
+                                            && error.kind() != io::ErrorKind::WouldBlock
+                                            && error.kind() != io::ErrorKind::TimedOut
+                                        {
+                                            eprintln!("STREENOTE Hermes review: {error}");
+                                        }
+                                    }
+                                });
                         }
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(25));
