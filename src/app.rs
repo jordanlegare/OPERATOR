@@ -1314,6 +1314,32 @@ impl App {
         self.pending_review = Some(request);
     }
 
+    /// Remove a review whose socket-side deadline has elapsed. The server
+    /// independently fails closed at the same deadline; this keeps the TUI
+    /// from leaving an already-withheld draft open for a late approval.
+    pub fn expire_hermes_review_if_needed(&mut self) -> bool {
+        let expired = self
+            .pending_review
+            .as_ref()
+            .is_some_and(|request| Instant::now() >= request.expires_at);
+        if !expired {
+            return false;
+        }
+
+        let Some(request) = self.pending_review.take() else {
+            return false;
+        };
+        let _ = request.reply.send(ReviewDecision::Reject);
+        self.review_text.clear();
+        self.review_cursor = 0;
+        self.record_system(format!(
+            "Hermes response review {} timed out · original answer withheld.",
+            request.request_id
+        ));
+        self.status = "Hermes final answer timed out in review and was withheld.".to_string();
+        true
+    }
+
     pub fn approve_hermes_original(&mut self) {
         let Some(request) = self.pending_review.take() else {
             return;
@@ -2036,6 +2062,7 @@ mod tests {
             model: "qwen3.5:latest".to_string(),
             platform: "tui".to_string(),
             response_text: "Original draft".to_string(),
+            expires_at: Instant::now() + Duration::from_secs(30),
             reply,
         });
 
@@ -2059,6 +2086,35 @@ mod tests {
     }
 
     #[test]
+    fn expired_review_is_closed_and_returns_a_rejection() {
+        use crate::hermes_review::{ReviewDecision, ReviewRequest};
+        use std::sync::mpsc;
+
+        let (mut app, path) = test_app();
+        let (reply, decision) = mpsc::sync_channel(1);
+        app.begin_hermes_review(ReviewRequest {
+            request_id: "review-expired-001".to_string(),
+            session_id: "session-1".to_string(),
+            model: "model".to_string(),
+            platform: "cli".to_string(),
+            response_text: "This draft must not be released late.".to_string(),
+            expires_at: Instant::now() - Duration::from_secs(1),
+            reply,
+        });
+
+        assert!(app.expire_hermes_review_if_needed());
+        assert_eq!(
+            decision.recv().expect("receive expiration rejection"),
+            ReviewDecision::Reject
+        );
+        assert!(app.pending_review.is_none());
+        assert!(app.review_text.is_empty());
+        assert!(app.status.contains("withheld"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn original_answer_and_rejection_have_distinct_explicit_decisions() {
         use crate::hermes_review::{ReviewDecision, ReviewRequest};
         use std::sync::mpsc;
@@ -2071,6 +2127,7 @@ mod tests {
             model: "model".to_string(),
             platform: "cli".to_string(),
             response_text: "Release this exact answer".to_string(),
+            expires_at: Instant::now() + Duration::from_secs(30),
             reply,
         });
         app.approve_hermes_original();
@@ -2086,6 +2143,7 @@ mod tests {
             model: "model".to_string(),
             platform: "cli".to_string(),
             response_text: "Do not release this answer".to_string(),
+            expires_at: Instant::now() + Duration::from_secs(30),
             reply,
         });
         app.reject_hermes_response();
@@ -2111,6 +2169,7 @@ mod tests {
             model: String::new(),
             platform: String::new(),
             response_text: "Café\nnext".to_string(),
+            expires_at: Instant::now() + Duration::from_secs(30),
             reply,
         });
 
