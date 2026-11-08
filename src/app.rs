@@ -2034,6 +2034,7 @@ mod tests {
         env, fs,
         path::PathBuf,
         sync::atomic::{AtomicUsize, Ordering},
+        time::{Duration, Instant},
     };
 
     static NEXT_TEST_ID: AtomicUsize = AtomicUsize::new(0);
