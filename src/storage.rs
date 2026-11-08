@@ -22,6 +22,9 @@ pub enum EntryKind {
     HermesStreamStart,
     HermesStreamDelta,
     HermesStreamEnd,
+    HermesHistory,
+    HermesInterim,
+    HermesSession,
 }
 
 impl Default for EntryKind {
@@ -398,6 +401,9 @@ pub fn entry_kind_label(kind: EntryKind) -> &'static str {
         EntryKind::HermesStreamStart => "HSTR",
         EntryKind::HermesStreamDelta => "HDEL",
         EntryKind::HermesStreamEnd => "HEND",
+        EntryKind::HermesHistory => "HCTX",
+        EntryKind::HermesInterim => "HINT",
+        EntryKind::HermesSession => "HSES",
     }
 }
 
@@ -450,6 +456,9 @@ pub fn entry_display_text(entry: &Entry) -> String {
             | EntryKind::HermesStreamStart
             | EntryKind::HermesStreamDelta
             | EntryKind::HermesStreamEnd
+            | EntryKind::HermesHistory
+            | EntryKind::HermesInterim
+            | EntryKind::HermesSession
     ) {
         let first_line = entry.text.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
         if entry.text.contains('\n') {
@@ -519,7 +528,10 @@ fn sanitize_entry_text(kind: EntryKind, input: &str) -> String {
         | EntryKind::HermesToolResult
         | EntryKind::HermesStreamStart
         | EntryKind::HermesStreamDelta
-        | EntryKind::HermesStreamEnd => sanitize_multiline(input),
+        | EntryKind::HermesStreamEnd
+        | EntryKind::HermesHistory
+        | EntryKind::HermesInterim
+        | EntryKind::HermesSession => sanitize_multiline(input),
         _ => sanitize_single_line(input),
     }
 }
