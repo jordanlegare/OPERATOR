@@ -33,6 +33,10 @@ struct InboxEvent {
     #[serde(default)]
     conversation_id: Option<String>,
     #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    old_session_id: Option<String>,
+    #[serde(default)]
     turn_id: Option<String>,
     #[serde(default)]
     tool_call_id: Option<String>,
@@ -126,6 +130,8 @@ impl HermesBridge {
                 timestamp,
                 event.event_id,
                 event.conversation_id.filter(|id| !id.is_empty() && id.len() <= 256),
+                event.session_id.filter(|id| !id.is_empty() && id.len() <= 256),
+                event.old_session_id.filter(|id| !id.is_empty() && id.len() <= 256),
                 event.turn_id.filter(|id| !id.is_empty() && id.len() <= 256),
                 event.tool_call_id.filter(|id| !id.is_empty() && id.len() <= 256),
                 event.iteration,
