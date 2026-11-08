@@ -110,9 +110,8 @@ pub fn build_threads(entries: &[Entry]) -> Vec<ConversationThread> {
         if entry.kind == EntryKind::HermesToolCall {
             thread.tool_call_count += 1;
         }
-        if thread.title.is_empty() && entry.kind != EntryKind::HermesHistory {
-            thread.title = preview(&entry.text, 96);
-        }
+        // Prefer an actual user prompt as the thread title; context snapshots
+        // and lifecycle markers are metadata, not the conversation's subject.
     }
 
     for thread in &mut threads {
