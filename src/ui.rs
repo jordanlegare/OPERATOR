@@ -88,6 +88,21 @@ fn draw_hermes_message(
             index + 1,
             format_timestamp(&entry.timestamp)
         ),
+        EntryKind::HermesHistory => format!(
+            " HERMES PRIOR CONVERSATION CONTEXT · ROW {} · {} ",
+            index + 1,
+            format_timestamp(&entry.timestamp)
+        ),
+        EntryKind::HermesInterim => format!(
+            " HERMES INTERIM MESSAGE · ROW {} · {} ",
+            index + 1,
+            format_timestamp(&entry.timestamp)
+        ),
+        EntryKind::HermesSession => format!(
+            " HERMES SESSION EVENT · ROW {} · {} ",
+            index + 1,
+            format_timestamp(&entry.timestamp)
+        ),
         _ => " HERMES MESSAGE ".to_string(),
     };
     let block = Block::default()
@@ -214,6 +229,9 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
                 EntryKind::HermesAssistant => ("ASSISTANT", theme.success),
                 EntryKind::HermesToolCall => ("TOOL CALL", theme.warning),
                 EntryKind::HermesToolResult => ("TOOL RESULT", theme.accent),
+                EntryKind::HermesHistory => ("PRIOR CONTEXT", theme.info),
+                EntryKind::HermesInterim => ("INTERIM MESSAGE", theme.primary),
+                EntryKind::HermesSession => ("SESSION EVENT", theme.muted),
                 EntryKind::HermesStreamDelta => ("ASSISTANT - LIVE STREAM", theme.primary),
                 _ => ("HERMES", theme.muted),
             };
@@ -515,6 +533,9 @@ fn entry_line(entry: &Entry, index: usize, app: &App, theme: Theme) -> Line<'sta
         EntryKind::HermesStreamStart => ("HSTR", theme.primary),
         EntryKind::HermesStreamDelta => ("HDEL", theme.success),
         EntryKind::HermesStreamEnd => ("HEND", theme.muted),
+        EntryKind::HermesHistory => ("HCTX", theme.info),
+        EntryKind::HermesInterim => ("HINT", theme.primary),
+        EntryKind::HermesSession => ("HSES", theme.muted),
     };
 
     let mut spans = vec![
