@@ -76,6 +76,7 @@ pub fn build_threads(entries: &[Entry]) -> Vec<ConversationThread> {
             .filter(|id| !id.is_empty());
         let canonical = conversation_id
             .or_else(|| previous_session_id.map(|id| resolve_session_alias(&session_aliases, id)))
+            .or_else(|| session_aliases.get(session_id).cloned())
             .unwrap_or_else(|| session_id.to_string());
         if let Some(previous_session_id) = previous_session_id {
             session_aliases.insert(previous_session_id.to_string(), canonical.clone());
