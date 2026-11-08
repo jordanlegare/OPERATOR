@@ -388,12 +388,33 @@ def main() -> int:
             session_id = event_value(payload, extra, "conversation_id")
         turn_id = event_value(payload, extra, "turn_id")
 
+        if session_id is not None:
+            session_id = str(session_id)
+        if turn_id is not None:
+            turn_id = str(turn_id)
         if event_name == "pre_llm_call" and session_id:
             history = event_value(payload, extra, "conversation_history")
             if history:
-                write_history_snapshot(Path(inbox_value).expanduser(), str(session_id), history)
+                try:
+                    write_history_snapshot(Path(inbox_value).expanduser(), session_id, history)
+                except Exception as exc:
+                    # A history snapshot is supplementary. Do not lose the
+                    # current prompt if snapshot storage is unavailable.
+                    print(
+                        f"STREENOTE Hermes history snapshot failed: {exc}",
+                        file=sys.stderr,
+                    )
         tool_call_id = event_value(payload, extra, "tool_call_id")
+        if tool_call_id is not None:
+            tool_call_id = str(tool_call_id)
         iteration = event_value(payload, extra, "iteration")
+        if iteration is not None:
+            try:
+                iteration = int(iteration)
+                if iteration < 0 or iteration > 0xFFFFFFFF:
+                    iteration = None
+            except (TypeError, ValueError):
+                iteration = None
         if event_name in ("pre_tool_call", "post_tool_call"):
             identity_id = tool_call_id
         elif event_name in ("on_stream_start", "on_stream_end"):
