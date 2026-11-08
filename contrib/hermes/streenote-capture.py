@@ -20,6 +20,7 @@ from pathlib import Path
 
 MAX_EVENT_BYTES = 2 * 1024 * 1024
 MAX_TOOL_DETAIL_BYTES = 48 * 1024
+MAX_HISTORY_BYTES = 1024 * 1024
 
 SENSITIVE_KEY = re.compile(
     r"(?i)(password|passwd|secret|token|api[_-]?key|authorization|credential|private[_-]?key)"
@@ -127,6 +128,169 @@ def tool_event_text(event_name: str, payload: dict, extra: dict) -> str:
     return "\n".join(lines)
 
 
+
+
+def history_snapshot_text(history) -> str | None:
+    """Render prior user/assistant/tool messages without system or developer prompts."""
+    if isinstance(history, dict):
+        history = history.get("messages")
+    if not isinstance(history, list):
+        return None
+
+    rendered_messages = []
+    for message in history:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or message.get("type") or "").strip().lower()
+        role = {
+            "human": "user",
+            "ai": "assistant",
+            "function": "tool",
+        }.get(role, role)
+        if role not in {"user", "assistant", "tool"}:
+            continue
+
+        name = message.get("name") or message.get("tool_name")
+        header = role.upper()
+        if isinstance(name, str) and name.strip():
+            header += f" ({redact_inline(name.strip())})"
+
+        content = message.get("content")
+        if content is None:
+            content = message.get("text")
+        parts = []
+        if content is not None and content != "":
+            parts.append(render_detail(content))
+        tool_calls = message.get("tool_calls")
+        if tool_calls:
+            parts.append("Tool calls:\n" + render_detail(tool_calls))
+        if not parts:
+            continue
+        rendered_messages.append(header + "\n" + "\n".join(parts))
+
+    if not rendered_messages:
+        return None
+
+    heading = (
+        "PRIOR CONVERSATION CONTEXT "
+        f"({len(rendered_messages)} message(s); system/developer messages excluded)"
+    )
+    snapshot = heading + "\n\n" + "\n\n".join(
+        f"[{index}] {message}"
+        for index, message in enumerate(rendered_messages, start=1)
+    )
+    encoded = snapshot.encode("utf-8")
+    if len(encoded) > MAX_HISTORY_BYTES:
+        prefix = encoded[:MAX_HISTORY_BYTES].decode("utf-8", errors="ignore")
+        snapshot = prefix + (
+            f"\n\n...[history snapshot truncated at {MAX_HISTORY_BYTES} UTF-8 bytes]"
+        )
+    return snapshot
+
+
+def write_inbox_event(inbox: Path, event: dict) -> None:
+    ready = inbox / "ready"
+    ready.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        os.chmod(inbox, 0o700)
+        os.chmod(ready, 0o700)
+    except OSError:
+        pass
+
+    event_id = str(event["event_id"])
+    final_path = ready / f"{time.time_ns():020d}-{event_id}.json"
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=".streenote-", suffix=".tmp", dir=ready
+    )
+    try:
+        with os.fdopen(fd, "wb") as temporary:
+            os.fchmod(temporary.fileno(), 0o600)
+            data = json.dumps(
+                event, ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
+            temporary.write(data)
+            temporary.write(b"\n")
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_name, final_path)
+    except Exception:
+        try:
+            os.unlink(temporary_name)
+        except OSError:
+            pass
+        raise
+
+
+def write_history_snapshot(inbox: Path, session_id: str, history) -> None:
+    """Stage one stable history snapshot per Hermes session."""
+    snapshot = history_snapshot_text(history)
+    if not snapshot:
+        return
+
+    state = inbox / "state"
+    state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        os.chmod(inbox, 0o700)
+        os.chmod(state, 0o700)
+    except OSError:
+        pass
+
+    session_key = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    marker = state / f"{session_key}.history-v1"
+    if marker.exists():
+        return
+
+    event = {
+        "version": 1,
+        "event_id": make_event_id("history_snapshot", session_id, "initial"),
+        "kind": "hermes_history",
+        "timestamp": datetime.now(timezone.utc).astimezone().isoformat(
+            timespec="seconds"
+        ),
+        "text": snapshot,
+        "conversation_id": session_id,
+        "turn_id": None,
+        "tool_call_id": None,
+        "iteration": None,
+    }
+    # Stage the durable event before setting the marker. A crash before the
+    # marker only causes a retry of the same deduplicated event ID.
+    write_inbox_event(inbox, event)
+    try:
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as marker_file:
+            marker_file.write(event["event_id"] + "\n")
+            marker_file.flush()
+            os.fsync(marker_file.fileno())
+    except FileExistsError:
+        # Concurrent hooks may both stage the same snapshot. Rust-side event
+        # ID deduplication makes the second copy harmless.
+        pass
+
+
+def session_event_text(event_name: str, payload: dict, extra: dict) -> str:
+    labels = {
+        "on_session_start": "Hermes session started.",
+        "on_session_end": "Hermes session ended.",
+        "post_compaction": "Hermes conversation context compacted.",
+    }
+    lines = [labels[event_name]]
+    for key in (
+        "reason",
+        "exit_reason",
+        "duration_seconds",
+        "turns_completed",
+        "turns_failed",
+        "messages_before",
+        "messages_after",
+        "messages_compacted",
+    ):
+        value = event_value(payload, extra, key)
+        if isinstance(value, (str, int, float, bool)):
+            lines.append(f"{key}: {redact_inline(str(value))}")
+    return "\n".join(lines)
+
+
 def main() -> int:
     inbox_value = os.environ.get("STREENOTE_HERMES_INBOX")
     if not inbox_value:
@@ -146,6 +310,10 @@ def main() -> int:
             "on_stream_start",
             "on_stream_delta",
             "on_stream_end",
+            "on_interim_message",
+            "on_session_start",
+            "on_session_end",
+            "post_compaction",
         )
         if event_name not in supported_events:
             return 0
@@ -176,6 +344,12 @@ def main() -> int:
                 return 0
             kind = "hermes_stream_delta"
             text = event_value(payload, extra, "delta")
+        elif event_name == "on_interim_message":
+            kind = "hermes_interim"
+            text = event_value(payload, extra, "text")
+        elif event_name in ("on_session_start", "on_session_end", "post_compaction"):
+            kind = "hermes_session"
+            text = session_event_text(event_name, payload, extra)
         else:
             kind = "hermes_stream_end"
             finished = bool(event_value(payload, extra, "finished"))
@@ -203,7 +377,14 @@ def main() -> int:
             return 0
 
         session_id = event_value(payload, extra, "session_id")
+        if not session_id:
+            session_id = event_value(payload, extra, "conversation_id")
         turn_id = event_value(payload, extra, "turn_id")
+
+        if event_name == "pre_llm_call" and session_id:
+            history = event_value(payload, extra, "conversation_history")
+            if history:
+                write_history_snapshot(Path(inbox_value).expanduser(), str(session_id), history)
         tool_call_id = event_value(payload, extra, "tool_call_id")
         iteration = event_value(payload, extra, "iteration")
         if event_name in ("pre_tool_call", "post_tool_call"):
@@ -230,31 +411,7 @@ def main() -> int:
         }
 
         inbox = Path(inbox_value).expanduser()
-        ready = inbox / "ready"
-        ready.mkdir(mode=0o700, parents=True, exist_ok=True)
-        try:
-            os.chmod(inbox, 0o700)
-            os.chmod(ready, 0o700)
-        except OSError:
-            pass
-
-        final_path = ready / f"{time.time_ns():020d}-{event_id}.json"
-        fd, temporary_name = tempfile.mkstemp(prefix=".streenote-", suffix=".tmp", dir=ready)
-        try:
-            with os.fdopen(fd, "wb") as temporary:
-                os.fchmod(temporary.fileno(), 0o600)
-                data = json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-                temporary.write(data)
-                temporary.write(b"\n")
-                temporary.flush()
-                os.fsync(temporary.fileno())
-            os.replace(temporary_name, final_path)
-        except Exception:
-            try:
-                os.unlink(temporary_name)
-            except OSError:
-                pass
-            raise
+        write_inbox_event(inbox, event)
 
         return 0
     except Exception as exc:
