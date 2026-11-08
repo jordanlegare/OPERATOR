@@ -31,9 +31,24 @@ pub fn is_hermes_event(kind: EntryKind) -> bool {
     )
 }
 
-/// Build conversation groups from immutable journal rows. Events captured by
-/// current hooks share a session ID; older rows are grouped conservatively by
-/// pairing each prompt with the following assistant and tool events.
+fn resolve_session_alias(aliases: &HashMap<String, String>, session_id: &str) -> String {
+    let mut current = session_id.to_string();
+    let mut visited = HashSet::new();
+    while visited.insert(current.clone()) {
+        let Some(next) = aliases.get(&current) else {
+            break;
+        };
+        if next == &current {
+            break;
+        }
+        current = next.clone();
+    }
+    current
+}
+
+/// Build conversation groups from immutable journal rows. Hermes can rotate
+/// session IDs after compaction, so resolve current/previous session IDs to a
+/// stable conversation key before grouping entries.
 pub fn build_threads(entries: &[Entry]) -> Vec<ConversationThread> {
     let mut threads: Vec<ConversationThread> = Vec::new();
     let mut positions: HashMap<String, usize> = HashMap::new();
@@ -43,16 +58,52 @@ pub fn build_threads(entries: &[Entry]) -> Vec<ConversationThread> {
     let mut active_thread: Option<String> = None;
     let mut turn_threads: HashMap<String, String> = HashMap::new();
 
+    // Pre-scan all events so prompts that only carry session_id can still be
+    // grouped with tool events that expose the stable conversation_id.
+    let mut session_aliases: HashMap<String, String> = HashMap::new();
+    for entry in entries {
+        let Some(session_id) = entry.session_id.as_deref().filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        let conversation_id = entry
+            .conversation_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .map(|id| resolve_session_alias(&session_aliases, id));
+        let previous_session_id = entry
+            .related_session_id
+            .as_deref()
+            .filter(|id| !id.is_empty());
+        let canonical = conversation_id
+            .or_else(|| previous_session_id.map(|id| resolve_session_alias(&session_aliases, id)))
+            .unwrap_or_else(|| session_id.to_string());
+        if let Some(previous_session_id) = previous_session_id {
+            session_aliases.insert(previous_session_id.to_string(), canonical.clone());
+        }
+        session_aliases.insert(session_id.to_string(), canonical);
+    }
+
     for (index, entry) in entries.iter().enumerate() {
         if !is_hermes_event(entry.kind) {
             continue;
         }
 
-        let session_id = entry.conversation_id.as_deref().filter(|id| !id.is_empty());
         let turn_id = entry.turn_id.as_deref().filter(|id| !id.is_empty());
+        let conversation_key = entry
+            .conversation_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .map(|id| resolve_session_alias(&session_aliases, id))
+            .or_else(|| {
+                entry
+                    .session_id
+                    .as_deref()
+                    .filter(|id| !id.is_empty())
+                    .map(|id| resolve_session_alias(&session_aliases, id))
+            });
 
-        let key = if let Some(session_id) = session_id {
-            let key = format!("session:{session_id}");
+        let key = if let Some(conversation_key) = conversation_key {
+            let key = format!("session:{conversation_key}");
             if let Some(turn_id) = turn_id {
                 turn_threads.insert(turn_id.to_string(), key.clone());
             }
@@ -359,6 +410,59 @@ mod tests {
         assert_eq!(threads[0].entries, vec![0, 1, 2, 3, 4]);
         assert_eq!(threads[0].turn_count, 1);
         assert!(threads[0].title.contains("Continue from there."));
+    }
+
+    #[test]
+    fn compaction_rotation_keeps_new_session_turns_in_the_original_conversation() {
+        let mut first_prompt = event(EntryKind::HermesUser, "first question", None, Some("turn-1"));
+        first_prompt.session_id = Some("session-original".to_string());
+
+        let mut compaction = event(
+            EntryKind::HermesSession,
+            "Hermes conversation context compacted.",
+            None,
+            None,
+        );
+        compaction.session_id = Some("session-rotated".to_string());
+        compaction.related_session_id = Some("session-original".to_string());
+
+        let mut second_prompt = event(
+            EntryKind::HermesUser,
+            "continue after compaction",
+            None,
+            Some("turn-2"),
+        );
+        second_prompt.session_id = Some("session-rotated".to_string());
+
+        // Tool hooks expose the stable conversation_id even when the prompt
+        // hook only carried the rotating session_id.
+        let mut tool_call = event(
+            EntryKind::HermesToolCall,
+            "Tool: lookup",
+            Some("session-original"),
+            Some("turn-2"),
+        );
+        tool_call.session_id = Some("session-rotated".to_string());
+
+        let mut answer = event(
+            EntryKind::HermesAssistant,
+            "completed answer",
+            None,
+            Some("turn-2"),
+        );
+        answer.session_id = Some("session-rotated".to_string());
+
+        let threads = build_threads(&[
+            first_prompt,
+            compaction,
+            second_prompt,
+            tool_call,
+            answer,
+        ]);
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, "session:session-original");
+        assert_eq!(threads[0].turn_count, 2);
+        assert_eq!(threads[0].entries, vec![0, 1, 2, 3, 4]);
     }
 
     #[test]
