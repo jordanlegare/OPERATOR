@@ -27,6 +27,15 @@ const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn diagnostic_log_path() -> PathBuf {
     if let Some(path) = env::var_os("STREENOTE_HERMES_REVIEW_LOG").map(PathBuf::from).filter(|p| p.is_absolute()) { return path; }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let uid = unsafe { libc::geteuid() };
+        let runtime_dir = PathBuf::from(format!("/run/user/{uid}"));
+        if fs::metadata(&runtime_dir).ok().is_some_and(|m| m.is_dir() && m.uid() == uid) {
+            return runtime_dir.join("streenote").join("hermes-review.log");
+        }
+    }
     let state_root = env::var_os("XDG_STATE_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
         .or_else(|| env::var_os("HOME").map(PathBuf::from).map(|p| p.join(".local/state")))
         .unwrap_or_else(|| PathBuf::from(".local/state"));
