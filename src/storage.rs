@@ -736,6 +736,8 @@ mod hermes_stream_delta_tests {
             "2026-11-07T12:00:00-05:00".to_string(),
             event_id.to_string(),
             Some("session-1".to_string()),
+            Some("session-1".to_string()),
+            None,
             Some("turn-1".to_string()),
             None,
             Some(0),
