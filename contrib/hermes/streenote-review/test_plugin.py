@@ -55,6 +55,10 @@ class HermesReviewPluginTests(unittest.TestCase):
                 errors.append(error)
             finally:
                 listener.close()
+                try:
+                    self.socket_path.unlink()
+                except FileNotFoundError:
+                    pass
 
         worker = threading.Thread(target=run, daemon=True)
         worker.start()
