@@ -106,6 +106,9 @@ impl HermesBridge {
                         | EntryKind::HermesStreamStart
                         | EntryKind::HermesStreamDelta
                         | EntryKind::HermesStreamEnd
+                        | EntryKind::HermesHistory
+                        | EntryKind::HermesInterim
+                        | EntryKind::HermesSession
                 )
             {
                 quarantine(&path, &failed)?;
