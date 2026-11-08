@@ -215,6 +215,22 @@ hermes plugins enable streenote-review
 
 Restart the Hermes gateway/process after installing and enabling the plugin. By default, both processes use `/run/user/<uid>/streenote/review.sock` when that directory exists and is owned by the current Unix user. This runtime-directory path is independent of `HOME` and `XDG_DATA_HOME`, so a systemd-managed Hermes gateway and an F1-launched STREENOTE session still find the same listener. If the per-user runtime directory is unavailable, both fall back to `$XDG_DATA_HOME/streenote/review.sock`, or `$HOME/.local/share/streenote/review.sock` when `XDG_DATA_HOME` is unset. A custom path can be set with the absolute `STREENOTE_HERMES_REVIEW_SOCKET` environment variable in **both** processes; it takes precedence over the default. The socket directory is created with mode `0700` and the socket with mode `0600`. The transform hook waits synchronously for the operator; its own socket-side deadline is nine minutes. Hermes' `plugins.hook_callback_timeout` setting does not govern this transform hook.
 
+The plugin writes content-free diagnostics (no prompt or answer text) to `/run/user/<uid>/streenote/hermes-review.log` when that per-user runtime directory is available, so the Hermes gateway and STREENOTE read the same log even with different `HOME` or `XDG_STATE_HOME` values. Otherwise it falls back to `$XDG_STATE_HOME/streenote/hermes-review.log`, or `$HOME/.local/state/streenote/hermes-review.log` when `XDG_STATE_HOME` is unset. The log is private to the user (directory mode `0700`, file mode `0600`). It records plugin registration, callback invocation, socket resolution/connection, request delivery, and the operator decision. `/review status` displays the latest recorded activity.
+
+To require review even when the listener is missing or STREENOTE replies with `bypass`, set this environment variable in the **Hermes gateway service environment** before restarting the gateway:
+
+```bash
+systemctl --user set-environment STREENOTE_HERMES_REVIEW_REQUIRED=1
+hermes gateway restart
+```
+
+With this setting, a missing socket, an OFF toggle, or a socket failure raises an error and withholds the final answer instead of passing it through. This is opt-in so ordinary Hermes sessions can still run when STREENOTE is not active. To restore optional/pass-through behavior:
+
+```bash
+systemctl --user unset-environment STREENOTE_HERMES_REVIEW_REQUIRED
+hermes gateway restart
+```
+
 In STREENOTE, run:
 
 ```text
@@ -230,7 +246,7 @@ Review is disabled by default and its setting is saved by STREENOTE. While a res
 
 Use the arrow keys, Home/End, Backspace/Delete, Enter for a newline, and Ctrl+V or terminal paste to edit. Escape does not dismiss or release a held answer. `/review off` returns to pass-through behavior for new final responses; an already pending review still needs an explicit decision.
 
-The STREENOTE listener waits up to nine minutes. If the review is rejected, the channel fails, or the timeout expires, the plugin raises an error and Hermes withholds the draft rather than releasing it. When STREENOTE is not running and the socket does not exist, the plugin passes the response through unchanged.
+The STREENOTE listener waits up to nine minutes. If the review is rejected, the channel fails, or the timeout expires, the plugin raises an error and Hermes withholds the draft rather than releasing it. When STREENOTE is not running and the socket does not exist, the plugin passes the response through unchanged by default; with `STREENOTE_HERMES_REVIEW_REQUIRED=1`, it withholds the response instead.
 
 This gate covers the **final assistant response**. Hermes commentary between tool calls is not passed through this transform and is hidden on held turns. Tool progress and reasoning are separate display surfaces and are not covered by this approval gate; adjust Hermes' `display.tool_progress` and `display.show_reasoning` settings separately if those surfaces also need to be hidden.
 
