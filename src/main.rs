@@ -1222,6 +1222,7 @@ fn run(
                     break;
                 }
             }
+            Event::Mouse(_) if app.pending_review.is_some() => {}
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Right)
                     if app.message_view_index.is_none()
