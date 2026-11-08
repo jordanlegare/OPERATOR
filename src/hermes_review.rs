@@ -504,7 +504,7 @@ mod tests {
                 Some(PathBuf::from("/xdg/data")),
                 Some(PathBuf::from("/home/test")),
             ),
-            PathBuf::from("/run/user/1000/review.sock")
+            PathBuf::from("/custom/review.sock")
         );
     }
 
