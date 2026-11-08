@@ -78,8 +78,7 @@ class HermesReviewPluginTests(unittest.TestCase):
                 worker, requests, errors = self._serve(
                     {"version": 1, "decision": decision}
                 )
-                with self.assertRaisesIfNeeded() if False else _NullContext():
-                    self.assertIsNone(self._call())
+                self.assertIsNone(self._call())
                 worker.join(timeout=2)
                 self.assertFalse(worker.is_alive())
                 self.assertFalse(errors)
@@ -135,16 +134,6 @@ class HermesReviewPluginTests(unittest.TestCase):
         listener.close()
         with self.assertRaisesRegex(RuntimeError, "stale"):
             self._call()
-
-
-class _NullContext:
-    """No-op context manager kept local to avoid depending on extra packages."""
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        return False
 
 
 if __name__ == "__main__":
