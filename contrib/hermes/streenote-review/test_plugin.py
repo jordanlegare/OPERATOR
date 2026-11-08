@@ -82,7 +82,11 @@ class HermesReviewPluginTests(unittest.TestCase):
                 worker, requests, errors = self._serve(
                     {"version": 1, "decision": decision}
                 )
-                self.assertIsNone(self._call())
+                result = self._call()
+                if decision == "approve":
+                    self.assertEqual(result, "The unreviewed draft.")
+                else:
+                    self.assertIsNone(result)
                 worker.join(timeout=2)
                 self.assertFalse(worker.is_alive())
                 self.assertFalse(errors)
