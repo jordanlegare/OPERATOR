@@ -123,7 +123,7 @@ fn draw_hermes_review(frame: &mut Frame, app: &mut App, theme: Theme) {
     let before_cursor = &app.review_text[..cursor];
     let line_index = before_cursor.bytes().filter(|byte| *byte == b'\n').count();
     let line_start = before_cursor.rfind('\n').map(|index| index + 1).unwrap_or(0);
-    let cursor_column = UnicodeWidthStr::width(app.review_text[line_start..cursor].as_ref());
+    let cursor_column = UnicodeWidthStr::width(&app.review_text[line_start..cursor]);
     let body_height = sections[1].height.max(1) as usize;
     let body_width = sections[1].width.max(1) as usize;
 
