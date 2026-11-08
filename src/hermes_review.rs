@@ -490,7 +490,8 @@ fn handle_connection(
     append_diagnostic_event("REVIEW_DECISION", serde_json::json!({"decision": decision_label}));
 
     let response = match decision {
-        ReviewDecision::Approve => WireResponse {            version: 1,
+        ReviewDecision::Approve => WireResponse {
+            version: 1,
             decision: "approve",
             response_text: None,
             error: None,
