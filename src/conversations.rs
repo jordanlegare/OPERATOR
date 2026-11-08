@@ -25,6 +25,9 @@ pub fn is_hermes_event(kind: EntryKind) -> bool {
             | EntryKind::HermesStreamStart
             | EntryKind::HermesStreamDelta
             | EntryKind::HermesStreamEnd
+            | EntryKind::HermesHistory
+            | EntryKind::HermesInterim
+            | EntryKind::HermesSession
     )
 }
 
@@ -107,7 +110,7 @@ pub fn build_threads(entries: &[Entry]) -> Vec<ConversationThread> {
         if entry.kind == EntryKind::HermesToolCall {
             thread.tool_call_count += 1;
         }
-        if thread.title.is_empty() {
+        if thread.title.is_empty() && entry.kind != EntryKind::HermesHistory {
             thread.title = preview(&entry.text, 96);
         }
     }
@@ -316,6 +319,47 @@ mod tests {
         assert_eq!(threads[0].tool_call_count, 1);
         assert_eq!(threads[1].id, "session:session-b");
         assert_eq!(thread_for_entry(&entries, 3).as_deref(), Some("session:session-a"));
+    }
+
+    #[test]
+    fn initial_history_snapshot_and_lifecycle_events_join_the_same_session_thread() {
+        let history = event(
+            EntryKind::HermesHistory,
+            "PRIOR CONVERSATION CONTEXT\\n\\n[1] USER\\nEarlier question",
+            Some("session-resumed"),
+            None,
+        );
+        let started = event(
+            EntryKind::HermesSession,
+            "Hermes session started.",
+            Some("session-resumed"),
+            None,
+        );
+        let interim = event(
+            EntryKind::HermesInterim,
+            "I am checking the available context.",
+            Some("session-resumed"),
+            Some("turn-current"),
+        );
+        let prompt = event(
+            EntryKind::HermesUser,
+            "Continue from there.",
+            Some("session-resumed"),
+            Some("turn-current"),
+        );
+        let assistant = event(
+            EntryKind::HermesAssistant,
+            "Completed answer.",
+            Some("session-resumed"),
+            Some("turn-current"),
+        );
+
+        let threads = build_threads(&[history, started, interim, prompt, assistant]);
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, "session:session-resumed");
+        assert_eq!(threads[0].entries, vec![0, 1, 2, 3, 4]);
+        assert_eq!(threads[0].turn_count, 1);
+        assert!(threads[0].title.contains("Continue from there."));
     }
 
     #[test]
