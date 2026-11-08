@@ -371,7 +371,13 @@ def main() -> int:
         elif event_name == "on_interim_message":
             kind = "hermes_interim"
             text = event_value(payload, extra, "text")
-        elif event_name in ("on_session_start", "on_session_end", "post_compaction"):
+        elif event_name in (
+            "on_session_start",
+            "on_session_end",
+            "on_session_finalize",
+            "on_session_reset",
+            "post_compaction",
+        ):
             kind = "hermes_session"
             text = session_event_text(event_name, payload, extra)
         else:
