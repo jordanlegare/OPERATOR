@@ -55,6 +55,149 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             ConversationView::Thread { id } => draw_conversation_thread(frame, app, &id, theme),
         }
     }
+    if app.pending_review.is_some() {
+        draw_hermes_review(frame, app, theme);
+    }
+}
+
+fn draw_hermes_review(frame: &mut Frame, app: &mut App, theme: Theme) {
+    let Some((request_id, session_id, model, platform)) = app.pending_review.as_ref().map(|request| (
+        request.request_id.clone(),
+        request.session_id.clone(),
+        request.model.clone(),
+        request.platform.clone(),
+    )) else {
+        return;
+    };
+
+    let popup = centered_rect(96, 94, frame.area());
+    frame.render_widget(Clear, popup);
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(255, 32, 32)))
+        .title(Span::styled(
+            " HERMES FINAL RESPONSE · HELD BEFORE DELIVERY · OPERATOR REVIEW REQUIRED ",
+            Style::default().fg(Color::Rgb(255, 64, 32)).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(theme.panel));
+    let inner = outer.inner(popup);
+    frame.render_widget(outer, popup);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(2),
+        ])
+        .split(inner);
+
+    let model_label = if model.is_empty() { "unknown" } else { &model };
+    let platform_label = if platform.is_empty() { "unknown" } else { &platform };
+    let session_label = if session_id.is_empty() {
+        "unknown".to_string()
+    } else {
+        session_id.chars().take(20).collect::<String>()
+    };
+    let metadata = vec![
+        Line::from(vec![
+            Span::styled(" MODEL ", Style::default().fg(theme.info).add_modifier(Modifier::BOLD)),
+            Span::styled(model_label.to_string(), Style::default().fg(theme.text)),
+            Span::styled("   PLATFORM ", Style::default().fg(theme.info).add_modifier(Modifier::BOLD)),
+            Span::styled(platform_label.to_string(), Style::default().fg(theme.text)),
+            Span::styled("   SESSION ", Style::default().fg(theme.info).add_modifier(Modifier::BOLD)),
+            Span::styled(session_label, Style::default().fg(theme.text)),
+        ]),
+        Line::from(vec![
+            Span::styled(" REVIEW ID ", Style::default().fg(theme.muted).add_modifier(Modifier::BOLD)),
+            Span::styled(request_id, Style::default().fg(theme.muted)),
+            Span::styled("   Edit the answer below. Nothing is delivered until you release it.", Style::default().fg(theme.warning)),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(metadata).style(Style::default().bg(theme.panel)),
+        sections[0],
+    );
+
+    let cursor = app.review_cursor.min(app.review_text.len());
+    let before_cursor = &app.review_text[..cursor];
+    let line_index = before_cursor.bytes().filter(|byte| *byte == b'\n').count();
+    let line_start = before_cursor.rfind('\n').map(|index| index + 1).unwrap_or(0);
+    let cursor_column = UnicodeWidthStr::width(&app.review_text[line_start..cursor]);
+    let body_height = sections[1].height.max(1) as usize;
+    let body_width = sections[1].width.max(1) as usize;
+
+    if line_index < app.review_vertical_scroll as usize {
+        app.review_vertical_scroll = line_index as u16;
+    } else if line_index >= app.review_vertical_scroll as usize + body_height {
+        app.review_vertical_scroll = line_index
+            .saturating_add(1)
+            .saturating_sub(body_height)
+            .min(u16::MAX as usize) as u16;
+    }
+    if cursor_column < app.review_horizontal_scroll as usize {
+        app.review_horizontal_scroll = cursor_column as u16;
+    } else if cursor_column >= app.review_horizontal_scroll as usize + body_width {
+        app.review_horizontal_scroll = cursor_column
+            .saturating_add(1)
+            .saturating_sub(body_width)
+            .min(u16::MAX as usize) as u16;
+    }
+
+    let editor_title = format!(
+        " EDIT RESPONSE · {} CHARACTERS · {} LINES · {} BYTES ",
+        app.review_text.chars().count(),
+        app.review_text.lines().count().max(1),
+        app.review_text.len()
+    );
+    let editor_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.primary))
+        .title(Span::styled(
+            editor_title,
+            Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(theme.panel));
+    let editor_area = sections[1];
+    let editor_inner = editor_block.inner(editor_area);
+    frame.render_widget(
+        Paragraph::new(app.review_text.clone())
+            .style(Style::default().fg(theme.text).bg(theme.panel))
+            .scroll((app.review_vertical_scroll, app.review_horizontal_scroll))
+            .block(editor_block),
+        editor_area,
+    );
+
+    let cursor_x = editor_inner
+        .x
+        .saturating_add(cursor_column.saturating_sub(app.review_horizontal_scroll as usize) as u16);
+    let cursor_y = editor_inner
+        .y
+        .saturating_add(line_index.saturating_sub(app.review_vertical_scroll as usize) as u16);
+    if cursor_x < editor_inner.x.saturating_add(editor_inner.width)
+        && cursor_y < editor_inner.y.saturating_add(editor_inner.height)
+    {
+        frame.set_cursor_position(Position::new(cursor_x, cursor_y));
+    }
+
+    let footer = vec![
+        Line::from(vec![
+            Span::styled(" F2 ", Style::default().fg(theme.bg).bg(theme.success).add_modifier(Modifier::BOLD)),
+            Span::styled(" RELEASE ORIGINAL    ", Style::default().fg(theme.success).add_modifier(Modifier::BOLD)),
+            Span::styled(" F3 ", Style::default().fg(theme.bg).bg(theme.info).add_modifier(Modifier::BOLD)),
+            Span::styled(" RELEASE EDITED    ", Style::default().fg(theme.info).add_modifier(Modifier::BOLD)),
+            Span::styled(" F4 ", Style::default().fg(theme.bg).bg(theme.warning).add_modifier(Modifier::BOLD)),
+            Span::styled(" WITHHOLD RESPONSE", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(Span::styled(
+            "Arrows edit · Enter newline · Home/End line · Ctrl+Home/End document · paste supported · Esc does not release",
+            Style::default().fg(theme.muted),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(footer).style(Style::default().bg(theme.panel)),
+        sections[2],
+    );
 }
 
 fn draw_hermes_message(
@@ -845,6 +988,7 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         Line::from(""),
         Line::from(vec![Span::styled("LOCAL COMMANDS", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD))]),
         Line::from(vec![Span::styled("/search WORDS", Style::default().fg(theme.warning)), Span::raw("  Search full text across every journal entry and Hermes conversation; n/N navigates hits.")]),
+        Line::from(vec![Span::styled("/review on|off|status", Style::default().fg(theme.warning)), Span::raw("  Hold Hermes final answers for operator review before delivery.")]),
         Line::from(vec![Span::styled("/view", Style::default().fg(theme.warning)), Span::raw("           Open the full Markdown body of a selected Hermes event.")]),
         Line::from(vec![Span::styled("/threads", Style::default().fg(theme.warning)), Span::raw("        Browse conversations; Enter or Ctrl+C expands the selected thread.")]),
         Line::from(vec![Span::styled("n / N", Style::default().fg(theme.warning)), Span::raw("          Next / previous search result when input is empty.")]),

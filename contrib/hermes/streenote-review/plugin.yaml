@@ -1,0 +1,5 @@
+name: streenote-review
+version: "1.0"
+description: Hold final Hermes answers for STREENOTE operator review before delivery.
+provides_hooks:
+  - transform_llm_output

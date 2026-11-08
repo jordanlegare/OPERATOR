@@ -10,11 +10,12 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     conversations::{build_threads, collapse_live_streams, is_hermes_event, ConversationThread},
+    hermes_review::{ReviewDecision, ReviewRequest, MAX_REVIEW_BYTES},
     shell::ShellSession,
     settings::Settings,
     storage::{
-        entry_transcript_text, sanitize_single_line, should_suppress_terminal_output, Entry,
-        EntryKind, Journal,
+        entry_transcript_text, sanitize_multiline, sanitize_single_line,
+        should_suppress_terminal_output, Entry, EntryKind, Journal,
     },
     theme::THEMES,
 };
@@ -127,6 +128,15 @@ pub struct App {
     /// One-shot scroll target set when a search hit opens a Hermes conversation.
     /// The renderer consumes this after positioning the matching message.
     pub conversation_focus_entry: Option<usize>,
+    /// Whether final Hermes responses must be approved before client delivery.
+    pub review_hermes_responses: bool,
+    /// Active final-response review; its channel is the only release path to Hermes.
+    pub pending_review: Option<ReviewRequest>,
+    /// Editable copy of the held answer and its UTF-8 byte cursor.
+    pub review_text: String,
+    pub review_cursor: usize,
+    pub review_vertical_scroll: u16,
+    pub review_horizontal_scroll: u16,
     /// Derived conversation groups are cached until the journal's entry count
     /// or byte count changes; this avoids a full-history scan on every frame.
     conversation_cache: RefCell<ConversationCache>,
@@ -197,6 +207,12 @@ impl App {
             conversation_viewport_height: 1,
             conversation_follow_tail: true,
             conversation_focus_entry: None,
+            review_hermes_responses: settings.review_hermes_responses,
+            pending_review: None,
+            review_text: String::new(),
+            review_cursor: 0,
+            review_vertical_scroll: 0,
+            review_horizontal_scroll: 0,
             conversation_cache: RefCell::new(ConversationCache::default()),
             show_banner: settings.show_banner,
             show_canada_watermark: settings.show_canada_watermark,
@@ -1182,6 +1198,7 @@ impl App {
             wrap_transcript: self.wrap_transcript,
             show_banner: self.show_banner,
             show_canada_watermark: self.show_canada_watermark,
+            review_hermes_responses: self.review_hermes_responses,
         }
         .save()
     }
@@ -1257,6 +1274,288 @@ impl App {
         };
     }
 
+    pub fn set_hermes_review_enabled(&mut self, enabled: bool) {
+        if self.review_hermes_responses == enabled {
+            self.status = format!(
+                "Hermes response review is already {}.",
+                if enabled { "ON" } else { "OFF" }
+            );
+            return;
+        }
+        self.review_hermes_responses = enabled;
+        self.status = match self.persist_settings() {
+            Ok(()) => format!(
+                "Hermes response review {} (saved). Final answers will {}.",
+                if enabled { "ON" } else { "OFF" },
+                if enabled { "wait for your approval before delivery" } else { "pass through without review" }
+            ),
+            Err(error) => format!(
+                "Hermes response review changed for this session but settings could not be saved: {error}"
+            ),
+        };
+    }
+
+    pub fn begin_hermes_review(&mut self, request: ReviewRequest) {
+        if self.pending_review.is_some() {
+            let _ = request.reply.send(ReviewDecision::Reject);
+            self.status = "A second Hermes review arrived while another review is pending; the second response was withheld.".to_string();
+            return;
+        }
+
+        self.review_text = sanitize_multiline(&request.response_text);
+        self.review_cursor = self.review_text.len();
+        self.review_vertical_scroll = 0;
+        self.review_horizontal_scroll = 0;
+        self.status = format!(
+            "Hermes final answer held for review · model {} · platform {}.",
+            if request.model.is_empty() { "unknown" } else { &request.model },
+            if request.platform.is_empty() { "unknown" } else { &request.platform }
+        );
+        self.pending_review = Some(request);
+    }
+
+    /// Remove a review whose socket-side deadline has elapsed. The server
+    /// independently fails closed at the same deadline; this keeps the TUI
+    /// from leaving an already-withheld draft open for a late approval.
+    pub fn expire_hermes_review_if_needed(&mut self) -> bool {
+        let expired = self
+            .pending_review
+            .as_ref()
+            .is_some_and(|request| Instant::now() >= request.expires_at);
+        if !expired {
+            return false;
+        }
+
+        let Some(request) = self.pending_review.take() else {
+            return false;
+        };
+        let _ = request.reply.send(ReviewDecision::Reject);
+        self.review_text.clear();
+        self.review_cursor = 0;
+        self.record_system(format!(
+            "Hermes response review {} timed out · original answer withheld.",
+            request.request_id
+        ));
+        self.status = "Hermes final answer timed out in review and was withheld.".to_string();
+        true
+    }
+
+    pub fn approve_hermes_original(&mut self) {
+        let Some(request) = self.pending_review.take() else {
+            return;
+        };
+        let result = request.reply.send(ReviewDecision::Approve);
+        self.review_text.clear();
+        self.review_cursor = 0;
+        self.record_system(if result.is_ok() {
+            format!(
+                "Hermes response review {} · original answer released.",
+                request.request_id
+            )
+        } else {
+            format!(
+                "Hermes response review {} · original-answer approval arrived too late; answer was not released.",
+                request.request_id
+            )
+        });
+    }
+
+    pub fn approve_hermes_edited(&mut self) {
+        if self.review_text.trim().is_empty() {
+            self.status = "An empty answer cannot be released. Restore text or reject the response.".to_string();
+            return;
+        }
+        if self.review_text.len() > MAX_REVIEW_BYTES {
+            self.status = format!(
+                "Edited answer exceeds the {} MiB review limit.",
+                MAX_REVIEW_BYTES / (1024 * 1024)
+            );
+            return;
+        }
+        let Some(request) = self.pending_review.take() else {
+            return;
+        };
+        let edited = self.review_text.clone();
+        let result = request.reply.send(ReviewDecision::Replace(edited));
+        self.review_text.clear();
+        self.review_cursor = 0;
+        self.record_system(if result.is_ok() {
+            format!(
+                "Hermes response review {} · edited answer released.",
+                request.request_id
+            )
+        } else {
+            format!(
+                "Hermes response review {} · edited-answer approval arrived too late; answer was not released.",
+                request.request_id
+            )
+        });
+    }
+
+    pub fn reject_hermes_response(&mut self) {
+        let Some(request) = self.pending_review.take() else {
+            return;
+        };
+        let result = request.reply.send(ReviewDecision::Reject);
+        self.review_text.clear();
+        self.review_cursor = 0;
+        self.record_system(if result.is_ok() {
+            format!(
+                "Hermes response review {} · original answer withheld.",
+                request.request_id
+            )
+        } else {
+            format!(
+                "Hermes response review {} · rejection arrived after the request had already ended; no answer was released.",
+                request.request_id
+            )
+        });
+    }
+
+    pub fn review_insert_text(&mut self, text: &str) {
+        if self.pending_review.is_none() {
+            return;
+        }
+        let cleaned = sanitize_multiline(text);
+        if self.review_text.len().saturating_add(cleaned.len()) > MAX_REVIEW_BYTES {
+            self.status = format!(
+                "Review editor reached its {} MiB text limit.",
+                MAX_REVIEW_BYTES / (1024 * 1024)
+            );
+            return;
+        }
+        self.review_text.insert_str(self.review_cursor, &cleaned);
+        self.review_cursor += cleaned.len();
+    }
+
+    pub fn review_backspace(&mut self) {
+        if self.pending_review.is_none() || self.review_cursor == 0 {
+            return;
+        }
+        let previous = self.review_text[..self.review_cursor]
+            .char_indices()
+            .last()
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        self.review_text.replace_range(previous..self.review_cursor, "");
+        self.review_cursor = previous;
+    }
+
+    pub fn review_delete(&mut self) {
+        if self.pending_review.is_none() || self.review_cursor >= self.review_text.len() {
+            return;
+        }
+        let next = self.review_text[self.review_cursor..]
+            .chars()
+            .next()
+            .map(|character| self.review_cursor + character.len_utf8())
+            .unwrap_or(self.review_cursor);
+        self.review_text.replace_range(self.review_cursor..next, "");
+    }
+
+    pub fn review_cursor_left(&mut self) {
+        if self.pending_review.is_none() || self.review_cursor == 0 {
+            return;
+        }
+        self.review_cursor = self.review_text[..self.review_cursor]
+            .char_indices()
+            .last()
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+    }
+
+    pub fn review_cursor_right(&mut self) {
+        if self.pending_review.is_none() || self.review_cursor >= self.review_text.len() {
+            return;
+        }
+        self.review_cursor += self.review_text[self.review_cursor..]
+            .chars()
+            .next()
+            .map(char::len_utf8)
+            .unwrap_or(0);
+    }
+
+    pub fn review_cursor_home(&mut self) {
+        if self.pending_review.is_none() {
+            return;
+        }
+        self.review_cursor = self.review_text[..self.review_cursor]
+            .rfind('\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+    }
+
+    pub fn review_cursor_end(&mut self) {
+        if self.pending_review.is_none() {
+            return;
+        }
+        self.review_cursor = self.review_text[self.review_cursor..]
+            .find('\n')
+            .map(|offset| self.review_cursor + offset)
+            .unwrap_or(self.review_text.len());
+    }
+
+    pub fn review_cursor_document_start(&mut self) {
+        if self.pending_review.is_some() {
+            self.review_cursor = 0;
+        }
+    }
+
+    pub fn review_cursor_document_end(&mut self) {
+        if self.pending_review.is_some() {
+            self.review_cursor = self.review_text.len();
+        }
+    }
+
+    pub fn review_cursor_up(&mut self) {
+        self.review_move_vertical(-1);
+    }
+
+    pub fn review_cursor_down(&mut self) {
+        self.review_move_vertical(1);
+    }
+
+    fn review_move_vertical(&mut self, direction: i8) {
+        if self.pending_review.is_none() {
+            return;
+        }
+        let before = &self.review_text[..self.review_cursor];
+        let line_start = before.rfind('\n').map(|index| index + 1).unwrap_or(0);
+        let column = before[line_start..].chars().count();
+
+        let (target_start, target_end) = if direction < 0 {
+            if line_start == 0 {
+                return;
+            }
+            let target_end = line_start - 1;
+            let target_start = self.review_text[..target_end]
+                .rfind('\n')
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            (target_start, target_end)
+        } else {
+            let current_end = self.review_text[self.review_cursor..]
+                .find('\n')
+                .map(|offset| self.review_cursor + offset)
+                .unwrap_or(self.review_text.len());
+            if current_end >= self.review_text.len() {
+                return;
+            }
+            let target_start = current_end + 1;
+            let target_end = self.review_text[target_start..]
+                .find('\n')
+                .map(|offset| target_start + offset)
+                .unwrap_or(self.review_text.len());
+            (target_start, target_end)
+        };
+
+        self.review_cursor = self.review_text[target_start..target_end]
+            .char_indices()
+            .nth(column)
+            .map(|(offset, _)| target_start + offset)
+            .unwrap_or(target_end);
+    }
+
     fn execute_command(&mut self, command_line: &str) {
         let command_line = command_line.trim();
         let (command, argument) = command_line
@@ -1276,6 +1575,17 @@ impl App {
                     self.search(argument);
                 }
             }
+            "/review" => match argument.to_ascii_lowercase().as_str() {
+                "" | "status" => {
+                    self.status = format!(
+                        "Hermes response review is {}. Usage: /review on | /review off | /review status",
+                        if self.review_hermes_responses { "ON" } else { "OFF" }
+                    );
+                }
+                "on" | "enable" | "enabled" => self.set_hermes_review_enabled(true),
+                "off" | "disable" | "disabled" => self.set_hermes_review_enabled(false),
+                _ => self.status = "Usage: /review on | /review off | /review status".to_string(),
+            },
             "/clear" => {
                 self.clear_search();
                 self.jump_to_latest();
@@ -1666,6 +1976,7 @@ fn is_streamnote_command(line: &str) -> bool {
             | "/threads"
             | "/conversations"
             | "/search"
+            | "/review"
             | "/clear"
             | "/save"
             | "/stats"
@@ -1735,6 +2046,7 @@ mod tests {
         env, fs,
         path::PathBuf,
         sync::atomic::{AtomicUsize, Ordering},
+        time::{Duration, Instant},
     };
 
     static NEXT_TEST_ID: AtomicUsize = AtomicUsize::new(0);
@@ -1748,6 +2060,142 @@ mod tests {
         let _ = fs::remove_file(&path);
         let journal = Journal::open(path.clone()).expect("open test journal");
         (App::new(journal, String::new()), path)
+    }
+
+    #[test]
+    fn edited_hermes_response_is_returned_through_the_pending_decision_channel() {
+        use crate::hermes_review::{ReviewDecision, ReviewRequest};
+        use std::sync::mpsc;
+
+        let (mut app, path) = test_app();
+        let (reply, decision) = mpsc::sync_channel(1);
+        app.begin_hermes_review(ReviewRequest {
+            request_id: "review-edit-001".to_string(),
+            session_id: "session-1".to_string(),
+            model: "qwen3.5:latest".to_string(),
+            platform: "tui".to_string(),
+            response_text: "Original draft".to_string(),
+            expires_at: Instant::now() + Duration::from_secs(30),
+            reply,
+        });
+
+        assert!(app.pending_review.is_some());
+        assert_eq!(app.review_text, "Original draft");
+        for _ in 0..5 {
+            app.review_backspace();
+        }
+        app.review_insert_text("approved");
+        assert_eq!(app.review_text, "Original approved");
+
+        app.approve_hermes_edited();
+        assert_eq!(
+            decision.recv().expect("receive review decision"),
+            ReviewDecision::Replace("Original approved".to_string())
+        );
+        assert!(app.pending_review.is_none());
+        assert!(app.review_text.is_empty());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn expired_review_is_closed_and_returns_a_rejection() {
+        use crate::hermes_review::{ReviewDecision, ReviewRequest};
+        use std::sync::mpsc;
+
+        let (mut app, path) = test_app();
+        let (reply, decision) = mpsc::sync_channel(1);
+        app.begin_hermes_review(ReviewRequest {
+            request_id: "review-expired-001".to_string(),
+            session_id: "session-1".to_string(),
+            model: "model".to_string(),
+            platform: "cli".to_string(),
+            response_text: "This draft must not be released late.".to_string(),
+            expires_at: Instant::now() - Duration::from_secs(1),
+            reply,
+        });
+
+        assert!(app.expire_hermes_review_if_needed());
+        assert_eq!(
+            decision.recv().expect("receive expiration rejection"),
+            ReviewDecision::Reject
+        );
+        assert!(app.pending_review.is_none());
+        assert!(app.review_text.is_empty());
+        assert!(app.status.contains("withheld"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn original_answer_and_rejection_have_distinct_explicit_decisions() {
+        use crate::hermes_review::{ReviewDecision, ReviewRequest};
+        use std::sync::mpsc;
+
+        let (mut app, path) = test_app();
+        let (reply, decision) = mpsc::sync_channel(1);
+        app.begin_hermes_review(ReviewRequest {
+            request_id: "review-original-001".to_string(),
+            session_id: "session-1".to_string(),
+            model: "model".to_string(),
+            platform: "cli".to_string(),
+            response_text: "Release this exact answer".to_string(),
+            expires_at: Instant::now() + Duration::from_secs(30),
+            reply,
+        });
+        app.approve_hermes_original();
+        assert_eq!(
+            decision.recv().expect("receive original decision"),
+            ReviewDecision::Approve
+        );
+
+        let (reply, decision) = mpsc::sync_channel(1);
+        app.begin_hermes_review(ReviewRequest {
+            request_id: "review-reject-001".to_string(),
+            session_id: "session-1".to_string(),
+            model: "model".to_string(),
+            platform: "cli".to_string(),
+            response_text: "Do not release this answer".to_string(),
+            expires_at: Instant::now() + Duration::from_secs(30),
+            reply,
+        });
+        app.reject_hermes_response();
+        assert_eq!(
+            decision.recv().expect("receive rejection decision"),
+            ReviewDecision::Reject
+        );
+        assert!(app.pending_review.is_none());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn review_editor_cursor_respects_utf8_boundaries_and_multiline_navigation() {
+        use crate::hermes_review::ReviewRequest;
+        use std::sync::mpsc;
+
+        let (mut app, path) = test_app();
+        let (reply, _decision) = mpsc::sync_channel(1);
+        app.begin_hermes_review(ReviewRequest {
+            request_id: "review-cursor-001".to_string(),
+            session_id: String::new(),
+            model: String::new(),
+            platform: String::new(),
+            response_text: "Café\nnext".to_string(),
+            expires_at: Instant::now() + Duration::from_secs(30),
+            reply,
+        });
+
+        app.review_cursor_left();
+        app.review_cursor_left();
+        app.review_cursor_up();
+        assert!(app.review_text.is_char_boundary(app.review_cursor));
+        assert!(app.review_cursor <= "Café".len());
+        app.review_cursor_document_start();
+        app.review_insert_text("Edited ");
+        assert!(app.review_text.starts_with("Edited Café"));
+
+        let _ = fs::remove_file(path);
     }
 
     #[test]

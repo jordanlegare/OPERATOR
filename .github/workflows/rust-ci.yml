@@ -18,6 +18,14 @@ jobs:
         run: cargo check --all-targets
       - name: Test full-text journal search
         run: cargo test app::tests::search_
+      - name: Test Hermes answer review state and socket
+        run: |
+          cargo test app::tests::review_
+          cargo test hermes_review::tests
+      - name: Test Hermes response-review plugin
+        run: |
+          python3 -m py_compile contrib/hermes/streenote-review/__init__.py
+          python3 -m unittest discover -s contrib/hermes/streenote-review -p 'test_*.py'
       - name: Test Hermes inbox bridge
         run: cargo test hermes_bridge::tests
       - name: Test Hermes conversation grouping and stream persistence

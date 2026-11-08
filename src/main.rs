@@ -1,6 +1,7 @@
 mod app;
 mod conversations;
 mod hermes_bridge;
+mod hermes_review;
 mod shell;
 mod settings;
 mod storage;
@@ -30,7 +31,7 @@ use crossterm::{
 use unicode_width::UnicodeWidthStr;
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
@@ -39,6 +40,7 @@ use ratatui::{
 
 use app::{App, ConversationView, InputMode};
 use hermes_bridge::HermesBridge;
+use hermes_review::HermesReviewServer;
 use shell::ShellSession;
 use storage::Journal;
 
@@ -140,7 +142,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut hermes_bridge = HermesBridge::default();
-    let result = run(&mut terminal, &mut app, &mut shell, &mut hermes_bridge);
+    let mut review_server = HermesReviewServer::start()?;
+    review_server.set_enabled(app.review_hermes_responses);
+    let result = run(
+        &mut terminal,
+        &mut app,
+        &mut shell,
+        &mut hermes_bridge,
+        &mut review_server,
+    );
     // Import any Hermes events queued before shutdown, then drain shell output.
     if let Err(error) = drain_hermes_events(&mut app, &mut hermes_bridge) {
         app.status = format!("Hermes journal import pending: {error}");
@@ -150,6 +160,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(shell);
     drop(terminal);
     drop(_guard);
+    // Dropping App closes any pending one-shot decision channel. The review
+    // listener then returns a fail-closed rejection before it is shut down.
+    drop(app);
+    drop(review_server);
 
     result?;
     save_result?;
@@ -1151,8 +1165,16 @@ fn run(
     app: &mut App,
     shell: &mut Option<ShellSession>,
     hermes_bridge: &mut HermesBridge,
+    review_server: &mut HermesReviewServer,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
+        app.expire_hermes_review_if_needed();
+        review_server.set_enabled(app.review_hermes_responses);
+        if app.pending_review.is_none() {
+            if let Some(request) = review_server.try_recv() {
+                app.begin_hermes_review(request);
+            }
+        }
         drain_shell(app, shell)?;
         match drain_hermes_events(app, hermes_bridge) {
             Ok(imported) if imported > 0 => {
@@ -1182,7 +1204,13 @@ fn run(
                     let size = terminal.size()?;
                     match ShellSession::spawn(size.width, size.height) {
                         Ok(mut workspace_session) => {
-                            run_terminal_workspace(terminal, app, &mut workspace_session, hermes_bridge)?;
+                            run_terminal_workspace(
+                                terminal,
+                                app,
+                                &mut workspace_session,
+                                hermes_bridge,
+                                review_server,
+                            )?;
                             // Dropping this session closes only the workspace shell.
                             // STREENOTE's primary transcript shell remains untouched.
                             terminal.clear()?;
@@ -1195,6 +1223,7 @@ fn run(
                     break;
                 }
             }
+            Event::Mouse(_) if app.pending_review.is_some() => {}
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Right)
                     if app.message_view_index.is_none()
@@ -1224,7 +1253,11 @@ fn run(
                 _ => {}
             },
             Event::Paste(text) => {
-                paste_clipboard_text(app, &text, "terminal paste event");
+                if app.pending_review.is_some() {
+                    app.review_insert_text(&text);
+                } else {
+                    paste_clipboard_text(app, &text, "terminal paste event");
+                }
             },
             Event::Resize(cols, rows) => {
                 if let Some(session) = shell.as_ref() {
@@ -1245,6 +1278,7 @@ fn run_terminal_workspace(
     app: &mut App,
     session: &mut ShellSession,
     hermes_bridge: &mut HermesBridge,
+    review_server: &mut HermesReviewServer,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut out = stdout();
     let size = terminal.size()?;
@@ -1263,7 +1297,7 @@ fn run_terminal_workspace(
     )?;
     out.flush()?;
 
-    let result = run_terminal_workspace_loop(terminal, app, session, hermes_bridge);
+    let result = run_terminal_workspace_loop(terminal, app, session, hermes_bridge, review_server);
     let echo_result = session.set_echo(false);
 
     // Restore the input modes expected by STREENOTE. A nested full-screen
@@ -1293,6 +1327,7 @@ fn run_terminal_workspace_loop(
     app: &mut App,
     session: &mut ShellSession,
     hermes_bridge: &mut HermesBridge,
+    review_server: &mut HermesReviewServer,
 ) -> Result<(), Box<dyn std::error::Error>> {
     const INPUT_POLL: Duration = Duration::from_millis(12);
     const ESCAPE_SEQUENCE_GRACE: Duration = Duration::from_millis(60);
@@ -1308,6 +1343,18 @@ fn run_terminal_workspace_loop(
     let mut last_size = terminal.size()?;
 
     loop {
+        app.expire_hermes_review_if_needed();
+        review_server.set_enabled(app.review_hermes_responses);
+        if app.pending_review.is_none() {
+            if let Some(request) = review_server.try_recv() {
+                app.begin_hermes_review(request);
+            }
+        }
+        if app.pending_review.is_some() {
+            run_workspace_review_overlay(terminal, app)?;
+            continue;
+        }
+
         // Keep importing Hermes hook records while the F1 PTY is active.
         match drain_hermes_events(app, hermes_bridge) {
             Ok(imported) if imported > 0 => {
@@ -1376,14 +1423,175 @@ fn run_terminal_workspace_loop(
     Ok(())
 }
 
+/// Temporarily reclaim the client terminal from the F1 PTY while a final
+/// Hermes answer is held. The PTY process remains alive and resumes unchanged
+/// after the operator releases or rejects the response.
+fn run_workspace_review_overlay(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut out = stdout();
+    execute!(
+        out,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+        ),
+        crossterm::cursor::Hide
+    )?;
+    terminal.clear()?;
+
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        while app.pending_review.is_some() {
+            app.expire_hermes_review_if_needed();
+            if app.pending_review.is_none() {
+                break;
+            }
+            terminal.draw(|frame| ui::draw(frame, app))?;
+            if !event::poll(Duration::from_millis(40))? {
+                continue;
+            }
+            match event::read()? {
+                Event::Key(key)
+                    if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat =>
+                {
+                    handle_review_key(key.code, key.modifiers, app);
+                }
+                Event::Paste(text) => app.review_insert_text(&text),
+                Event::Resize(_, _) => {}
+                _ => {}
+            }
+        }
+        Ok(())
+    })();
+
+    let cleanup = execute!(
+        out,
+        PopKeyboardEnhancementFlags,
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    );
+    let clear = terminal.clear();
+    result?;
+    cleanup?;
+    clear?;
+    Ok(())
+}
+
+fn handle_review_key(code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
+    if app.pending_review.is_none() {
+        return;
+    }
+
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        match code {
+            KeyCode::Char('v') => paste_review_from_system_clipboard(app),
+            KeyCode::Home => app.review_cursor_document_start(),
+            KeyCode::End => app.review_cursor_document_end(),
+            KeyCode::Char('q') => {
+                app.status = "A held Hermes answer must be released with F2/F3 or withheld with F4.".to_string();
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    match code {
+        KeyCode::F(2) => app.approve_hermes_original(),
+        KeyCode::F(3) => app.approve_hermes_edited(),
+        KeyCode::F(4) => app.reject_hermes_response(),
+        KeyCode::Esc => {
+            app.status = "The answer remains held. Use F2 to release original, F3 to release edits, or F4 to withhold.".to_string();
+        }
+        KeyCode::Left => app.review_cursor_left(),
+        KeyCode::Right => app.review_cursor_right(),
+        KeyCode::Up => app.review_cursor_up(),
+        KeyCode::Down => app.review_cursor_down(),
+        KeyCode::PageUp => {
+            for _ in 0..10 {
+                app.review_cursor_up();
+            }
+        }
+        KeyCode::PageDown => {
+            for _ in 0..10 {
+                app.review_cursor_down();
+            }
+        }
+        KeyCode::Home => app.review_cursor_home(),
+        KeyCode::End => app.review_cursor_end(),
+        KeyCode::Backspace => app.review_backspace(),
+        KeyCode::Delete => app.review_delete(),
+        KeyCode::Enter => app.review_insert_text("\n"),
+        KeyCode::Tab => app.review_insert_text("    "),
+        KeyCode::Char(character) if !modifiers.contains(KeyModifiers::ALT) => {
+            app.review_insert_text(&character.to_string());
+        }
+        _ => {}
+    }
+}
+
+fn paste_review_from_system_clipboard(app: &mut App) {
+    match read_osc52_terminal_clipboard() {
+        Ok(Some(text)) if !text.is_empty() => {
+            let count = text.chars().count();
+            app.review_insert_text(&text);
+            app.status = format!("Inserted {count} characters from the client clipboard into the held answer.");
+            return;
+        }
+        Ok(Some(_)) => {
+            app.status = "Client terminal clipboard is empty.".to_string();
+            return;
+        }
+        Ok(None) | Err(_) => {}
+    }
+
+    match read_server_clipboard_cache() {
+        Ok(text) if !text.is_empty() => {
+            let count = text.chars().count();
+            app.review_insert_text(&text);
+            app.status = format!("Inserted {count} characters from the STREENOTE server clipboard into the held answer.");
+        }
+        Ok(_) => app.status = "STREENOTE server clipboard cache is empty.".to_string(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            match read_system_clipboard() {
+                Ok(text) if !text.is_empty() => {
+                    let count = text.chars().count();
+                    app.review_insert_text(&text);
+                    app.status = format!("Inserted {count} characters from the server clipboard into the held answer.");
+                }
+                Ok(_) => app.status = "No clipboard text is available to paste.".to_string(),
+                Err(error) => app.status = format!("Could not read clipboard for answer review: {error}"),
+            }
+        }
+        Err(error) => app.status = format!("Could not read STREENOTE clipboard cache: {error}"),
+    }
+}
+
 #[cfg(not(unix))]
 fn run_terminal_workspace_loop(
     _terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     session: &mut ShellSession,
     hermes_bridge: &mut HermesBridge,
+    review_server: &mut HermesReviewServer,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
+        app.expire_hermes_review_if_needed();
+        review_server.set_enabled(app.review_hermes_responses);
+        if app.pending_review.is_none() {
+            if let Some(request) = review_server.try_recv() {
+                app.begin_hermes_review(request);
+            }
+        }
+        if app.pending_review.is_some() {
+            run_workspace_review_overlay(_terminal, app)?;
+            continue;
+        }
         match drain_hermes_events(app, hermes_bridge) {
             Ok(imported) if imported > 0 => {
                 app.status = format!(
@@ -1597,6 +1805,11 @@ fn handle_key(
     // Conversation list and thread viewer own keyboard focus. The thread
     // is rendered from the current journal on every frame, so stream deltas
     // imported by the main loop appear without closing or reopening the modal.
+    if app.pending_review.is_some() {
+        handle_review_key(code, modifiers, app);
+        return Ok(false);
+    }
+
     if let Some(view) = app.conversation_view.clone() {
         match view {
             ConversationView::List => match code {

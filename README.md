@@ -79,7 +79,7 @@ The default input mode is **TERMINAL**.
 - `Alt+Left` / `Alt+Right` horizontally pan the feed.
 - Unbounded in-memory `Vec<Entry>` with no application-level cache eviction.
 - JSON Lines persistence; non-secret commands, notes, useful terminal output records, and system events are appended to the journal. Empty terminal-output rows and standard shell-prompt rows are filtered both when loading older journals and when appending new output; existing journal files are not rewritten.
-- `/search <terms>` searches the records visible in the main transcript case-insensitively. Hermes assistant, tool, and stream events are inspected in `/threads`.
+- `/search <terms>` searches the complete text of journal entries and every Hermes conversation event, including assistant responses, tool arguments/results, prior context, and coalesced live-stream text. A hit in a hidden Hermes event opens its conversation at the matching message.
 - `n` / `N` navigate search hits.
 - Command/input history, Bash-powered Tab completion for commands and filesystem paths, nine high-contrast color palettes, export, stats, path display, and save/retry.
 - Older journal entries without a `kind` field remain compatible and load as `note` entries.
@@ -197,6 +197,42 @@ Rebuild and restart STREENOTE so its Rust-created PTYs receive the inbox variabl
 Events are staged in `~/.local/share/streenote/hermes-inbox/ready` (or under `$XDG_DATA_HOME/streenote/hermes-inbox/ready`) with private directory/file permissions. STREENOTE imports them through its in-memory journal and normal append/retry path. Malformed or oversized events are moved to the inbox's `failed` directory.
 
 Conversation prompts and answers may contain sensitive information. Protect the journal and its backups accordingly.
+
+## Hermes final-answer review
+
+STREENOTE can hold Hermes' completed answer until an operator approves the original, edits it, or withholds it. This uses Hermes' `transform_llm_output` plugin hook registered with `hold_stream=True`; Hermes does not stream the unreviewed final answer to the client. The replacement text is returned through the same transform hook, so Hermes persists and delivers the edited response as its actual assistant answer. This does not run another LLM inference.
+
+Install the plugin into the **user-level Hermes plugin directory** on the same host and Unix account that runs the Hermes gateway. A gateway does not load a plugin from the F1 working directory:
+
+```bash
+mkdir -p ~/.hermes/plugins/streenote-review
+install -m 600 contrib/hermes/streenote-review/plugin.yaml \
+  ~/.hermes/plugins/streenote-review/plugin.yaml
+install -m 700 contrib/hermes/streenote-review/__init__.py \
+  ~/.hermes/plugins/streenote-review/__init__.py
+hermes plugins enable streenote-review
+```
+
+Restart the Hermes gateway/process after installing and enabling the plugin. STREENOTE's review listener and the Hermes gateway must resolve the same socket path. The default is `$XDG_DATA_HOME/streenote/review.sock`, or `$HOME/.local/share/streenote/review.sock` when `XDG_DATA_HOME` is unset. A custom path can be set with the absolute `STREENOTE_HERMES_REVIEW_SOCKET` environment variable in **both** processes. The socket directory is created with mode `0700` and the socket with mode `0600`. The transform hook waits synchronously for the operator; its own socket-side deadline is nine minutes. Hermes' `plugins.hook_callback_timeout` setting does not govern this transform hook.
+
+In STREENOTE, run:
+
+```text
+/review status
+/review on
+```
+
+Review is disabled by default and its setting is saved by STREENOTE. While a response is held, the review editor takes control of the STREENOTE terminal:
+
+- **F2** releases the exact original answer.
+- **F3** releases the edited text.
+- **F4** withholds the answer. This does not automatically ask Hermes to regenerate; send a follow-up instruction as a new turn when appropriate.
+
+Use the arrow keys, Home/End, Backspace/Delete, Enter for a newline, and Ctrl+V or terminal paste to edit. Escape does not dismiss or release a held answer. `/review off` returns to pass-through behavior for new final responses; an already pending review still needs an explicit decision.
+
+The STREENOTE listener waits up to nine minutes. If the review is rejected, the channel fails, or the timeout expires, the plugin raises an error and Hermes withholds the draft rather than releasing it. When STREENOTE is not running and the socket does not exist, the plugin passes the response through unchanged.
+
+This gate covers the **final assistant response**. Hermes commentary between tool calls is not passed through this transform and is hidden on held turns. Tool progress and reasoning are separate display surfaces and are not covered by this approval gate; adjust Hermes' `display.tool_progress` and `display.show_reasoning` settings separately if those surfaces also need to be hidden.
 
 ## Requirements
 
