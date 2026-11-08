@@ -22,6 +22,9 @@ pub enum EntryKind {
     HermesStreamStart,
     HermesStreamDelta,
     HermesStreamEnd,
+    HermesHistory,
+    HermesInterim,
+    HermesSession,
 }
 
 impl Default for EntryKind {
@@ -39,9 +42,15 @@ pub struct Entry {
     /// Stable ID for externally imported events; used only for deduplication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_id: Option<String>,
-    /// Hermes session identifier shared by every turn in one conversation.
+    /// Stable Hermes conversation identifier; it survives session rotation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    /// Current Hermes session identifier; may rotate after context compaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Previous session identifier when Hermes rotates a session during compaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related_session_id: Option<String>,
     /// Hermes turn identifier shared by prompt, stream, and tool events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
@@ -65,6 +74,8 @@ impl Entry {
             text: sanitize_entry_text(kind, &text),
             event_id: None,
             conversation_id: None,
+            session_id: None,
+            related_session_id: None,
             turn_id: None,
             tool_call_id: None,
             iteration: None,
@@ -79,6 +90,8 @@ impl Entry {
         timestamp: String,
         event_id: String,
         conversation_id: Option<String>,
+        session_id: Option<String>,
+        related_session_id: Option<String>,
         turn_id: Option<String>,
         tool_call_id: Option<String>,
         iteration: Option<u32>,
@@ -89,6 +102,8 @@ impl Entry {
             text: sanitize_entry_text(kind, &text),
             event_id: Some(event_id),
             conversation_id,
+            session_id,
+            related_session_id,
             turn_id,
             tool_call_id,
             iteration,
@@ -398,6 +413,9 @@ pub fn entry_kind_label(kind: EntryKind) -> &'static str {
         EntryKind::HermesStreamStart => "HSTR",
         EntryKind::HermesStreamDelta => "HDEL",
         EntryKind::HermesStreamEnd => "HEND",
+        EntryKind::HermesHistory => "HCTX",
+        EntryKind::HermesInterim => "HINT",
+        EntryKind::HermesSession => "HSES",
     }
 }
 
@@ -450,6 +468,9 @@ pub fn entry_display_text(entry: &Entry) -> String {
             | EntryKind::HermesStreamStart
             | EntryKind::HermesStreamDelta
             | EntryKind::HermesStreamEnd
+            | EntryKind::HermesHistory
+            | EntryKind::HermesInterim
+            | EntryKind::HermesSession
     ) {
         let first_line = entry.text.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
         if entry.text.contains('\n') {
@@ -519,7 +540,10 @@ fn sanitize_entry_text(kind: EntryKind, input: &str) -> String {
         | EntryKind::HermesToolResult
         | EntryKind::HermesStreamStart
         | EntryKind::HermesStreamDelta
-        | EntryKind::HermesStreamEnd => sanitize_multiline(input),
+        | EntryKind::HermesStreamEnd
+        | EntryKind::HermesHistory
+        | EntryKind::HermesInterim
+        | EntryKind::HermesSession => sanitize_multiline(input),
         _ => sanitize_single_line(input),
     }
 }
@@ -712,6 +736,8 @@ mod hermes_stream_delta_tests {
             "2026-11-07T12:00:00-05:00".to_string(),
             event_id.to_string(),
             Some("session-1".to_string()),
+            Some("session-1".to_string()),
+            None,
             Some("turn-1".to_string()),
             None,
             Some(0),

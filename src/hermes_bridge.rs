@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use crate::storage::{Entry, EntryKind, Journal};
 
-const MAX_EVENT_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_EVENT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_EVENTS_PER_POLL: usize = 64;
 
 #[derive(Debug)]
@@ -32,6 +32,10 @@ struct InboxEvent {
     text: String,
     #[serde(default)]
     conversation_id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    old_session_id: Option<String>,
     #[serde(default)]
     turn_id: Option<String>,
     #[serde(default)]
@@ -106,6 +110,9 @@ impl HermesBridge {
                         | EntryKind::HermesStreamStart
                         | EntryKind::HermesStreamDelta
                         | EntryKind::HermesStreamEnd
+                        | EntryKind::HermesHistory
+                        | EntryKind::HermesInterim
+                        | EntryKind::HermesSession
                 )
             {
                 quarantine(&path, &failed)?;
@@ -123,6 +130,8 @@ impl HermesBridge {
                 timestamp,
                 event.event_id,
                 event.conversation_id.filter(|id| !id.is_empty() && id.len() <= 256),
+                event.session_id.filter(|id| !id.is_empty() && id.len() <= 256),
+                event.old_session_id.filter(|id| !id.is_empty() && id.len() <= 256),
                 event.turn_id.filter(|id| !id.is_empty() && id.len() <= 256),
                 event.tool_call_id.filter(|id| !id.is_empty() && id.len() <= 256),
                 event.iteration,
@@ -305,6 +314,58 @@ mod tests {
         let reloaded = Journal::open(journal_path).expect("reload journal");
         assert_eq!(reloaded.entries.len(), 1);
         drop(reloaded);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn imports_history_interim_and_session_lifecycle_events() {
+        let root = test_root();
+        let ready = root.join("ready");
+        let journal_path = root.join("journal.jsonl");
+        fs::create_dir_all(&ready).expect("create ready directory");
+
+        for (event_id, kind, text) in [
+            ("history-001", "hermes_history", "PRIOR CONVERSATION CONTEXT\\n[1] USER\\nEarlier prompt"),
+            ("interim-001", "hermes_interim", "Checking the previous context."),
+            ("session-001", "hermes_session", "Hermes session started."),
+        ] {
+            let event = serde_json::json!({
+                "version": 1,
+                "event_id": event_id,
+                "kind": kind,
+                "timestamp": "2026-11-08T12:00:00-05:00",
+                "text": text,
+                "conversation_id": if event_id == "session-001" { serde_json::Value::Null } else { serde_json::json!("resumed-session") },
+                "session_id": if event_id == "session-001" { "rotated-session" } else { "resumed-session" },
+                "old_session_id": if event_id == "session-001" { serde_json::json!("resumed-session") } else { serde_json::Value::Null }
+            });
+            fs::write(
+                ready.join(format!("{event_id}.json")),
+                serde_json::to_vec(&event).expect("serialize event"),
+            ).expect("write event");
+        }
+
+        let mut journal = Journal::open(journal_path).expect("open journal");
+        let mut bridge = HermesBridge::new(root.clone());
+        assert_eq!(bridge.drain(&mut journal).expect("drain new event kinds"), 3);
+        assert_eq!(
+            journal.entries.iter().map(|entry| entry.kind).collect::<Vec<_>>(),
+            vec![EntryKind::HermesHistory, EntryKind::HermesInterim, EntryKind::HermesSession]
+        );
+        assert_eq!(
+            journal.entries[2].session_id.as_deref(),
+            Some("rotated-session")
+        );
+        assert_eq!(
+            journal.entries[2].related_session_id.as_deref(),
+            Some("resumed-session")
+        );
+        assert_eq!(
+            journal.entries[0].session_id.as_deref(),
+            Some("resumed-session")
+        );
+
+        drop(journal);
         let _ = fs::remove_dir_all(root);
     }
 

@@ -27,7 +27,7 @@ jobs:
         run: |
           python3 -m py_compile contrib/hermes/streenote-capture.py
           inbox="$(mktemp -d)"
-          printf '%s' '{"hook_event_name":"pre_llm_call","session_id":"ci-session","extra":{"turn_id":"ci-turn","user_message":"capture smoke test"}}' \
+          printf '%s' '{"hook_event_name":"pre_llm_call","session_id":"ci-session","extra":{"turn_id":"ci-turn","user_message":"capture smoke test","conversation_history":[{"role":"system","content":"SYSTEM MUST NOT BE RECORDED"},{"role":"user","content":"earlier prompt"},{"role":"assistant","content":"earlier answer"},{"role":"tool","name":"terminal","content":"api_key=topsecret"}]}}' \
             | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
           printf '%s' '{"hook_event_name":"post_llm_call","session_id":"ci-session","extra":{"turn_id":"ci-turn","assistant_response":"captured answer"}}' \
             | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
@@ -36,6 +36,20 @@ jobs:
           printf '%s' '{"hook_event_name":"on_stream_delta","session_id":"ci-session","extra":{"turn_id":"ci-turn","iteration":0,"kind":"text","delta":" "}}' \
             | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
           printf '%s' '{"hook_event_name":"on_stream_end","session_id":"ci-session","extra":{"turn_id":"ci-turn","iteration":0,"finished":true}}' \
+            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+          printf '%s' '{"hook_event_name":"on_interim_message","session_id":"ci-session","extra":{"turn_id":"ci-turn","text":"Interim status update"}}' \
+            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+          printf '%s' '{"hook_event_name":"on_session_start","session_id":"ci-session"}' \
+            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+          printf '%s' '{"hook_event_name":"on_session_end","session_id":"ci-session","extra":{"completed":true,"interrupted":false,"turn_exit_reason":"completed"}}' \
+            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+          printf '%s' '{"hook_event_name":"on_session_finalize","session_id":"ci-session","extra":{"reason":"normal_exit"}}' \
+            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+          printf '%s' '{"hook_event_name":"on_session_reset","session_id":"ci-session","extra":{"reason":"new_conversation"}}' \
+            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+          printf '%s' '{"hook_event_name":"post_compaction","session_id":"ci-session-v2","extra":{"old_session_id":"ci-session","kind":"summarize","reason":"manual","before_tokens":900,"after_tokens":300}}' \
+            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+          printf '%s' '{"hook_event_name":"pre_llm_call","session_id":"ci-session","extra":{"turn_id":"ci-turn-2","user_message":"second turn","conversation_history":[{"role":"user","content":"earlier prompt"},{"role":"assistant","content":"earlier answer"},{"role":"user","content":"new message"}]}}' \
             | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
           python3 - "$inbox" <<'PY'
           import json
@@ -47,14 +61,31 @@ jobs:
           by_kind = {event["kind"]: event for event in events}
           assert set(by_kind) == {
               "hermes_user", "hermes_assistant", "hermes_stream_start",
-              "hermes_stream_delta", "hermes_stream_end"
+              "hermes_stream_delta", "hermes_stream_end", "hermes_history",
+              "hermes_interim", "hermes_session"
           }
-          assert by_kind["hermes_user"]["text"] == "capture smoke test"
+          history_events = [event for event in events if event["kind"] == "hermes_history"]
+          assert len(history_events) == 1, "history snapshot must be emitted once per session"
+          history = history_events[0]["text"]
+          assert "earlier prompt" in history and "earlier answer" in history
+          assert "SYSTEM MUST NOT BE RECORDED" not in history
+          assert "api_key=[REDACTED]" in history
+          assert by_kind["hermes_interim"]["text"] == "Interim status update"
+          assert sum(event["kind"] == "hermes_session" for event in events) == 5
+          compacted = next(event for event in events if event["text"].startswith("Hermes conversation context compacted"))
+          assert compacted["session_id"] == "ci-session-v2"
+          assert compacted["old_session_id"] == "ci-session"
+          assert "before_tokens: 900" in compacted["text"] and "after_tokens: 300" in compacted["text"]
+          user_events = [event for event in events if event["kind"] == "hermes_user"]
+          assert any(event["text"] == "capture smoke test" for event in user_events)
+          assert any(event["text"] == "second turn" for event in user_events)
+          first_user = next(event for event in user_events if event["text"] == "capture smoke test")
           assert by_kind["hermes_assistant"]["text"] == "captured answer"
-          assert by_kind["hermes_user"]["event_id"] != by_kind["hermes_assistant"]["event_id"]
+          assert first_user["event_id"] != by_kind["hermes_assistant"]["event_id"]
           delta = by_kind["hermes_stream_delta"]
           assert delta["text"] == " "
-          assert delta["conversation_id"] == "ci-session"
+          assert delta["session_id"] == "ci-session"
+          assert delta["conversation_id"] is None
           assert delta["turn_id"] == "ci-turn"
           assert delta["iteration"] == 0
           PY

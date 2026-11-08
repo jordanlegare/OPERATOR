@@ -1088,6 +1088,9 @@ impl App {
                     EntryKind::HermesStreamDelta => "ASSISTANT - LIVE STREAM",
                     EntryKind::HermesStreamStart => "STREAM START",
                     EntryKind::HermesStreamEnd => "STREAM END",
+                    EntryKind::HermesHistory => "PRIOR CONTEXT",
+                    EntryKind::HermesInterim => "INTERIM MESSAGE",
+                    EntryKind::HermesSession => "SESSION EVENT",
                     _ => "HERMES",
                 };
                 (label, entry.text.as_str())

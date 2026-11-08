@@ -142,6 +142,30 @@ hooks:
   on_stream_end:
     - command: "/home/jordan/.hermes/hooks/streenote-capture"
       timeout: 3
+
+  on_interim_message:
+    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+      timeout: 3
+
+  on_session_start:
+    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+      timeout: 3
+
+  on_session_end:
+    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+      timeout: 3
+
+  on_session_finalize:
+    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+      timeout: 3
+
+  on_session_reset:
+    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+      timeout: 3
+
+  post_compaction:
+    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+      timeout: 3
 ```
 
 Hermes requests first-use approval for each hook event/command combination. Review and approve the STREENOTE capture script when prompted, then inspect the result:
@@ -153,17 +177,21 @@ hermes hooks doctor
 
 Rebuild and restart STREENOTE so its Rust-created PTYs receive the inbox variable, then launch Hermes from that shell. If your Hermes configuration routes hooks through a separate gateway service, point the hook command at a gateway wrapper that exports the same inbox path; see the process-boundary note above.
 
-- `pre_llm_call` captures the user's prompt as a `hermes_user` entry.
+- `pre_llm_call` captures the user's prompt as a `hermes_user` entry and, once per session, any prior user/assistant/tool history as a `hermes_history` entry (`HCTX`).
 - `post_llm_call` captures the final assistant response as a `hermes_assistant` entry.
 - `pre_tool_call` captures the tool name and arguments as a `hermes_tool_call` entry.
 - `post_tool_call` captures the tool result, status, duration, and error details (when present) as a `hermes_tool_result` entry.
+- On the first observed `pre_llm_call` for a session, STREENOTE imports a one-time snapshot of the existing `conversation_history`. This lets a resumed Hermes session bring its earlier user, assistant, and tool messages into the same thread instead of starting with a partial transcript. The snapshot is stored once per session; subsequent turns append only new events.
+- Capture begins when Hermes fires its hook for a submitted turn. Text typed into the Hermes input editor but not submitted is not visible to shell hooks and is not captured.
+- The history snapshot excludes system and developer messages. Message bodies, tool calls, and tool results pass through the same best-effort redaction before capture. The snapshot is capped at 1 MiB of rendered text; the inbox accepts events up to 8 MiB.
 - `on_stream_start`, `on_stream_delta`, and `on_stream_end` capture assistant text incrementally. Reasoning deltas are intentionally excluded.
+- `on_interim_message` captures user-visible interim assistant messages. `on_session_start` records creation, `on_session_end` records each turn's completion/interruption outcome, `on_session_finalize` and `on_session_reset` record session teardown/boundaries, and `post_compaction` records context compaction metadata.
 - The capture adapter stores `session_id`, `turn_id`, `tool_call_id`, and stream iteration metadata so prompts, responses, and tool events remain correlated.
 - Stream deltas are written durably as separate JSONL events but coalesced into one in-memory assistant bubble per turn/iteration; the thread viewer therefore updates live without creating one visible row per token chunk.
 - Tool-call and tool-result records share the tool's `tool_call_id` for correlation; pre/post event IDs remain distinct for retry deduplication.
 - Tool argument and result previews are capped at 48 KiB each. Common secret-bearing object keys and common inline token/password assignments are redacted on a best-effort basis; this is not a complete secret filter.
 - Interrupted or unsuccessful turns can have a prompt entry without a final-answer entry. A tool call that never reaches its post-hook can likewise have a call entry without a result entry.
-- Full Markdown is retained in JSONL. The main transcript shows HUSR prompts but hides HAI, HCAL, HRES, and stream-event rows. With an empty input bar, Enter on a highlighted HUSR row opens its complete conversation; when the input bar contains text, Enter submits that input instead. Ctrl+C on a highlighted HUSR row also opens its conversation. `/threads` opens the conversation index (Enter or Ctrl+C expands the selected thread). The expanded view includes user prompts, tool calls/results, and one uninterrupted `ASSISTANT - LIVE STREAM` block per active streamed turn, including while tools are running. Stream deltas across iterations are concatenated. Once a final assistant event arrives after the latest stream and tool activity, it replaces the live block so the completed answer appears once without duplication. If a turn is interrupted before a final assistant event arrives, its captured live text remains visible. The viewer follows new stream deltas automatically while it is open. `/view` remains available for an individual event's full body.
+- Full Markdown is retained in JSONL. Prior history snapshots appear as `HCTX`, interim messages as `HINT`, and session lifecycle events as `HSES`; they are included in the expanded thread and thread copy/export. The main transcript shows HUSR prompts but hides other Hermes events, including HCTX, HINT, and HSES. With an empty input bar, Enter on a highlighted HUSR row opens its complete conversation; when the input bar contains text, Enter submits that input instead. Ctrl+C on a highlighted HUSR row also opens its conversation. `/threads` opens the conversation index (Enter or Ctrl+C expands the selected thread). The expanded view includes user prompts, tool calls/results, and one uninterrupted `ASSISTANT - LIVE STREAM` block per active streamed turn, including while tools are running. Stream deltas across iterations are concatenated. Once a final assistant event arrives after the latest stream and tool activity, it replaces the live block so the completed answer appears once without duplication. If a turn is interrupted before a final assistant event arrives, its captured live text remains visible. The viewer follows new stream deltas automatically while it is open. `/view` remains available for an individual event's full body.
 - Hermes events use stable event IDs for retry deduplication. Those IDs are internal metadata, not journal partitions or visible session labels.
 
 Events are staged in `~/.local/share/streenote/hermes-inbox/ready` (or under `$XDG_DATA_HOME/streenote/hermes-inbox/ready`) with private directory/file permissions. STREENOTE imports them through its in-memory journal and normal append/retry path. Malformed or oversized events are moved to the inbox's `failed` directory.
@@ -306,7 +334,7 @@ Each line in `journal.jsonl` is an independent JSON object. Example:
 
 The transcript renders each stored RFC 3339 timestamp as local `YYYY-MM-DD HH:MM:SS ±HH:MM`, so the date, time and UTC offset are visible for every row.
 
-Kinds include `note`, `terminal_command`, `terminal_output`, `system`, `hermes_user`, `hermes_assistant`, `hermes_tool_call`, `hermes_tool_result`, `hermes_stream_start`, `hermes_stream_delta`, and `hermes_stream_end`. Hermes records also carry optional session, turn, tool-call, and iteration identifiers. Old records without `kind` are treated as notes. The journal is append-only from the application's perspective; malformed lines are skipped at load and counted in the startup status. It is never truncated by StreamNote. Input entered while terminal echo is off is intentionally not included.
+Kinds include `note`, `terminal_command`, `terminal_output`, `system`, `hermes_user`, `hermes_assistant`, `hermes_tool_call`, `hermes_tool_result`, `hermes_stream_start`, `hermes_stream_delta`, `hermes_stream_end`, `hermes_history`, `hermes_interim`, and `hermes_session`. Hermes records also carry optional session, turn, tool-call, and iteration identifiers. Old records without `kind` are treated as notes. The journal is append-only from the application's perspective; malformed lines are skipped at load and counted in the startup status. It is never truncated by StreamNote. Input entered while terminal echo is off is intentionally not included.
 
 ## Cache and persistence semantics
 
