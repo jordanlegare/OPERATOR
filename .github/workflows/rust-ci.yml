@@ -41,9 +41,13 @@ jobs:
             | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
           printf '%s' '{"hook_event_name":"on_session_start","session_id":"ci-session"}' \
             | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
-          printf '%s' '{"hook_event_name":"on_session_end","session_id":"ci-session","extra":{"reason":"completed"}}' \
+          printf '%s' '{"hook_event_name":"on_session_end","session_id":"ci-session","extra":{"completed":true,"interrupted":false,"turn_exit_reason":"completed"}}' \
             | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
-          printf '%s' '{"hook_event_name":"post_compaction","session_id":"ci-session","extra":{"messages_before":90,"messages_after":24}}' \
+          printf '%s' '{"hook_event_name":"on_session_finalize","session_id":"ci-session","extra":{"reason":"normal_exit"}}' \
+            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+          printf '%s' '{"hook_event_name":"on_session_reset","session_id":"ci-session","extra":{"reason":"new_conversation"}}' \
+            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+          printf '%s' '{"hook_event_name":"post_compaction","session_id":"ci-session-v2","extra":{"old_session_id":"ci-session","kind":"summarize","reason":"manual","before_tokens":900,"after_tokens":300}}' \
             | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
           printf '%s' '{"hook_event_name":"pre_llm_call","session_id":"ci-session","extra":{"turn_id":"ci-turn-2","user_message":"second turn","conversation_history":[{"role":"user","content":"earlier prompt"},{"role":"assistant","content":"earlier answer"},{"role":"user","content":"new message"}]}}' \
             | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
@@ -67,7 +71,11 @@ jobs:
           assert "SYSTEM MUST NOT BE RECORDED" not in history
           assert "api_key=[REDACTED]" in history
           assert by_kind["hermes_interim"]["text"] == "Interim status update"
-          assert sum(event["kind"] == "hermes_session" for event in events) == 3
+          assert sum(event["kind"] == "hermes_session" for event in events) == 5
+          compacted = next(event for event in events if event["text"].startswith("Hermes conversation context compacted"))
+          assert compacted["session_id"] == "ci-session-v2"
+          assert compacted["old_session_id"] == "ci-session"
+          assert "before_tokens: 900" in compacted["text"] and "after_tokens: 300" in compacted["text"]
           user_events = [event for event in events if event["kind"] == "hermes_user"]
           assert any(event["text"] == "capture smoke test" for event in user_events)
           assert any(event["text"] == "second turn" for event in user_events)
@@ -76,7 +84,8 @@ jobs:
           assert first_user["event_id"] != by_kind["hermes_assistant"]["event_id"]
           delta = by_kind["hermes_stream_delta"]
           assert delta["text"] == " "
-          assert delta["conversation_id"] == "ci-session"
+          assert delta["session_id"] == "ci-session"
+          assert delta["conversation_id"] is None
           assert delta["turn_id"] == "ci-turn"
           assert delta["iteration"] == 0
           PY
