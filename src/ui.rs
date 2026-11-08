@@ -200,8 +200,12 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
     // event follows the latest delta and tool event, it replaces the live block.
     let collapsed_streams = collapse_live_streams(&entries);
     let replaced_assistant_entries = &collapsed_streams.replaced_assistant_indices;
+    let focus_entry = app.conversation_focus_entry.take();
+    let query = app.search_query.as_deref().filter(|query| !query.is_empty());
+    let needle = query.map(str::to_ascii_lowercase);
 
     let mut lines = Vec::new();
+    let mut focus_line_index = None;
     let mut previous_turn: Option<String> = None;
     for (index, entry) in entries {
         if matches!(entry.kind, EntryKind::HermesStreamStart | EntryKind::HermesStreamEnd) {
@@ -237,18 +241,41 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
             };
             (label, color, entry.text.as_str())
         };
-        lines.push(Line::from(vec![
-            Span::styled(format!("{label}  "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{}  ·  row {}", format_timestamp(&entry.timestamp), index + 1), Style::default().fg(theme.muted)),
-        ]));
-        for body_line in body.lines() {
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(body_line.to_string(), Style::default().fg(theme.text)),
-            ]));
+        let active = app.is_active_match(index);
+        let message_style = if active {
+            Style::default().bg(theme.selected_row)
+        } else {
+            Style::default()
+        };
+        let header_line = lines.len();
+        if focus_entry == Some(index) {
+            focus_line_index = Some(header_line);
         }
-        if entry.text.is_empty() {
-            lines.push(Line::from("  "));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{label}  "),
+                Style::default().fg(color).add_modifier(Modifier::BOLD).patch(message_style),
+            ),
+            Span::styled(
+                format!("{}  ·  row {}", format_timestamp(&entry.timestamp), index + 1),
+                Style::default().fg(theme.muted).patch(message_style),
+            ),
+        ]));
+
+        for body_line in body.lines() {
+            if focus_entry == Some(index)
+                && focus_line_index == Some(header_line)
+                && needle.as_ref().is_some_and(|needle| body_line.to_ascii_lowercase().contains(needle))
+            {
+                focus_line_index = Some(lines.len());
+            }
+            let body_style = Style::default().fg(theme.text).patch(message_style);
+            let mut spans = vec![Span::styled("  ", body_style)];
+            spans.extend(search_highlighted_spans(body_line, query, theme, body_style));
+            lines.push(Line::from(spans));
+        }
+        if body.is_empty() {
+            lines.push(Line::from(Span::styled("  ", message_style)));
         }
         lines.push(Line::from(""));
     }
@@ -267,24 +294,34 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
         ))
         .style(Style::default().bg(theme.panel));
     let inner = block.inner(popup);
-    // Paint the expanded-thread modal block itself. Without rendering it,
-    // the underlying transcript border remains visible around the popup.
     frame.render_widget(block, popup);
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(inner);
-    // Count the rows after Ratatui wraps long tool arguments/results to the
-    // actual modal width. Counting only the original Line objects underestimates
-    // content height and makes long threads impossible to scroll to the end.
+
+    // Ratatui counts wrapped visual rows, so position the selected search hit
+    // using the actual thread width rather than the unwrapped Line index.
+    let paragraph_width = sections[0].width.max(1);
+    let focus_scroll = focus_line_index.map(|line_index| {
+        Paragraph::new(lines.iter().take(line_index).cloned().collect::<Vec<_>>())
+            .wrap(Wrap { trim: false })
+            .line_count(paragraph_width)
+            .saturating_sub(1)
+    });
     let paragraph = Paragraph::new(lines)
         .style(Style::default().fg(theme.text).bg(theme.panel))
         .wrap(Wrap { trim: false });
-    app.conversation_content_height = paragraph.line_count(sections[0].width.max(1));
+    app.conversation_content_height = paragraph.line_count(paragraph_width);
     app.conversation_viewport_height = sections[0].height.max(1) as usize;
     let max_scroll = app.conversation_content_height
         .saturating_sub(app.conversation_viewport_height);
-    let scroll = if app.conversation_follow_tail {
+    let scroll = if let Some(focus_scroll) = focus_scroll {
+        let scroll = focus_scroll.min(max_scroll);
+        app.conversation_scroll = scroll;
+        app.conversation_follow_tail = false;
+        scroll
+    } else if app.conversation_follow_tail {
         max_scroll
     } else {
         app.conversation_scroll.min(max_scroll)
@@ -293,9 +330,13 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
         paragraph.scroll((scroll.min(u16::MAX as usize) as u16, 0)),
         sections[0],
     );
+    let footer = if app.matches.is_empty() {
+        " ↑/↓ scroll · PgUp/PgDn page · Home/End · Ctrl+C copy thread · Esc close "
+    } else {
+        " ↑/↓ scroll · n/N next/previous search hit · Ctrl+C copy thread · Esc close "
+    };
     frame.render_widget(
-        Paragraph::new(" ↑/↓ scroll · PgUp/PgDn page · Home/End · Ctrl+C copy thread · Esc close ")
-            .style(Style::default().fg(theme.muted).bg(theme.panel)),
+        Paragraph::new(footer).style(Style::default().fg(theme.muted).bg(theme.panel)),
         sections[1],
     );
 }
@@ -494,6 +535,46 @@ fn draw_maple_watermark(frame: &mut Frame, area: Rect, theme: Theme) {
     }
 }
 
+/// Split text into styled spans and highlight every case-insensitive occurrence
+/// of the active search query. ASCII folding preserves byte offsets for slicing.
+fn search_highlighted_spans(
+    text: &str,
+    query: Option<&str>,
+    theme: Theme,
+    base_style: Style,
+) -> Vec<Span<'static>> {
+    let Some(query) = query.filter(|query| !query.is_empty()) else {
+        return vec![Span::styled(text.to_string(), base_style)];
+    };
+
+    let needle = query.to_ascii_lowercase();
+    let haystack = text.to_ascii_lowercase();
+    let highlight_style = Style::default()
+        .fg(theme.search_fg)
+        .bg(theme.search_bg)
+        .add_modifier(Modifier::BOLD);
+    let mut spans = Vec::new();
+    let mut cursor = 0usize;
+
+    while let Some(relative_start) = haystack[cursor..].find(&needle) {
+        let start = cursor + relative_start;
+        let end = start + needle.len();
+        if start > cursor {
+            spans.push(Span::styled(text[cursor..start].to_string(), base_style));
+        }
+        spans.push(Span::styled(text[start..end].to_string(), highlight_style));
+        cursor = end;
+    }
+
+    if cursor < text.len() {
+        spans.push(Span::styled(text[cursor..].to_string(), base_style));
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled(text.to_string(), base_style));
+    }
+    spans
+}
+
 /// Blend the border color toward the panel color to keep the watermark subtle.
 fn watermark_tint(panel: Color, border: Color) -> Color {
     match (panel, border) {
@@ -545,50 +626,12 @@ fn entry_line(entry: &Entry, index: usize, app: &App, theme: Theme) -> Line<'sta
         Span::styled("│ ", Style::default().fg(theme.border).patch(row_style)),
     ];
 
-    if let Some(query) = app.search_query.as_deref().filter(|_| hit) {
-        let needle = query.to_ascii_lowercase();
-        let haystack = display_text.to_ascii_lowercase();
-        if let Some(start) = haystack.find(needle.as_str()) {
-            let end = start + query.len();
-            if start <= display_text.len()
-                && end <= display_text.len()
-                && display_text.is_char_boundary(start)
-                && display_text.is_char_boundary(end)
-            {
-                spans.push(Span::styled(
-                    display_text[..start].to_string(),
-                    Style::default().fg(theme.text).patch(row_style),
-                ));
-                spans.push(Span::styled(
-                    display_text[start..end].to_string(),
-                    Style::default()
-                        .patch(row_style)
-                        .fg(theme.search_fg)
-                        .bg(theme.search_bg)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::styled(
-                    display_text[end..].to_string(),
-                    Style::default().fg(theme.text).patch(row_style),
-                ));
-            } else {
-                spans.push(Span::styled(
-                    display_text.clone(),
-                    Style::default().fg(theme.text).patch(row_style),
-                ));
-            }
-        } else {
-            spans.push(Span::styled(
-                display_text.clone(),
-                Style::default().fg(theme.text).patch(row_style),
-            ));
-        }
-    } else {
-        spans.push(Span::styled(
-            display_text.clone(),
-            Style::default().fg(theme.text).patch(row_style),
-        ));
-    }
+    spans.extend(search_highlighted_spans(
+        &display_text,
+        app.search_query.as_deref().filter(|_| hit),
+        theme,
+        Style::default().fg(theme.text).patch(row_style),
+    ));
 
     apply_selection(Line::from(spans), selected_columns, theme)
 }
@@ -797,11 +840,11 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         ]),
         Line::from(vec![
             Span::styled("SEARCH    ", Style::default().fg(theme.success).add_modifier(Modifier::BOLD)),
-            Span::raw("/search words searches visible transcript rows, including Hermes user prompts."),
+            Span::raw("/search words searches all journal text and full Hermes conversation bodies."),
         ]),
         Line::from(""),
         Line::from(vec![Span::styled("LOCAL COMMANDS", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD))]),
-        Line::from(vec![Span::styled("/search WORDS", Style::default().fg(theme.warning)), Span::raw("  Search visible transcript rows and jump to the latest hit.")]),
+        Line::from(vec![Span::styled("/search WORDS", Style::default().fg(theme.warning)), Span::raw("  Search full text across every journal entry and Hermes conversation; n/N navigates hits.")]),
         Line::from(vec![Span::styled("/view", Style::default().fg(theme.warning)), Span::raw("           Open the full Markdown body of a selected Hermes event.")]),
         Line::from(vec![Span::styled("/threads", Style::default().fg(theme.warning)), Span::raw("        Browse conversations; Enter or Ctrl+C expands the selected thread.")]),
         Line::from(vec![Span::styled("n / N", Style::default().fg(theme.warning)), Span::raw("          Next / previous search result when input is empty.")]),
