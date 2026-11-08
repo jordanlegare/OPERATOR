@@ -15,7 +15,7 @@ use std::{
         Arc,
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -24,6 +24,54 @@ pub const MAX_REVIEW_BYTES: usize = 8 * 1024 * 1024;
 const DECISION_TIMEOUT: Duration = Duration::from_secs(540);
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn diagnostic_log_path() -> PathBuf {
+    if let Some(path) = env::var_os("STREENOTE_HERMES_REVIEW_LOG").map(PathBuf::from).filter(|p| p.is_absolute()) { return path; }
+    let state_root = env::var_os("XDG_STATE_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
+        .or_else(|| env::var_os("HOME").map(PathBuf::from).map(|p| p.join(".local/state")))
+        .unwrap_or_else(|| PathBuf::from(".local/state"));
+    state_root.join("streenote").join("hermes-review.log")
+}
+
+fn append_diagnostic_event(event: &str, details: serde_json::Value) {
+    use std::io::Write;
+    let path = diagnostic_log_path();
+    let Some(parent) = path.parent() else { return; };
+    if fs::create_dir_all(parent).is_err() { return; }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+        let mut options = fs::OpenOptions::new();
+        options.create(true).append(true).write(true).mode(0o600);
+        if let Ok(mut file) = options.open(&path) {
+            let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
+            let record = serde_json::json!({"event": event, "timestamp_unix": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(), "details": details});
+            if let Ok(mut bytes) = serde_json::to_vec(&record) { bytes.push(b'\n'); let _ = file.write_all(&bytes); }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let record = serde_json::json!({"event": event, "timestamp_unix": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(), "details": details});
+            if let Ok(mut bytes) = serde_json::to_vec(&record) { bytes.push(b'\n'); let _ = file.write_all(&bytes); }
+        }
+    }
+}
+
+/// Summarize real plugin/listener activity for `/review status`.
+pub fn diagnostics_summary() -> String {
+    let path = diagnostic_log_path();
+    let Ok(contents) = fs::read_to_string(&path) else { return format!("No Hermes plugin diagnostics yet; expected log: {}", path.display()); };
+    let records: Vec<serde_json::Value> = contents.lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
+    if records.is_empty() { return format!("Hermes diagnostics log is empty: {}", path.display()); }
+    let latest = |name: &str| records.iter().rev().find(|r| r.get("event").and_then(|v| v.as_str()) == Some(name));
+    let val = |name: &str| latest(name).map(|r| r.get("timestamp").and_then(|v| v.as_str()).unwrap_or("recorded")).unwrap_or("never");
+    let request = latest("REVIEW_REQUEST_RECEIVED").map(|r| r.get("timestamp_unix").map(|v| v.to_string()).unwrap_or_else(|| "recorded".into())).unwrap_or_else(|| "never".into());
+    let decision = latest("REVIEW_DECISION").and_then(|r| r.get("details")).and_then(|d| d.get("decision")).and_then(|v| v.as_str()).unwrap_or("none");
+    format!("plugin registered: {}; callback: {}; socket connected: {}; STREENOTE request: {}; last decision: {}; log: {}", val("PLUGIN_REGISTERED"), val("CALLBACK_INVOKED"), val("SOCKET_CONNECT_OK"), request, decision, path.display())
+}
+
 
 #[derive(Debug)]
 pub struct ReviewRequest {
@@ -349,10 +397,20 @@ fn handle_connection(
         );
     }
 
+    append_diagnostic_event("REVIEW_REQUEST_RECEIVED", serde_json::json!({
+        "request_id": request.request_id,
+        "platform": request.platform,
+        "model": request.model,
+    }));
+
     // A missing STREENOTE toggle must never surprise the operator with a
     // blocking prompt. The plugin remains loaded, but the original response
     // passes through immediately until /review on is selected.
     if !enabled.load(Ordering::Relaxed) {
+        append_diagnostic_event("REVIEW_BYPASS", serde_json::json!({
+            "request_id": request.request_id,
+            "reason": "review mode is OFF",
+        }));
         return write_wire_response(
             &mut stream,
             WireResponse {
@@ -395,9 +453,15 @@ fn handle_connection(
         Err(mpsc::RecvTimeoutError::Disconnected) => ReviewDecision::Reject,
     };
 
+    let decision_label = match &decision {
+        ReviewDecision::Approve => "approve",
+        ReviewDecision::Replace(_) => "replace",
+        ReviewDecision::Reject => "reject",
+    };
+    append_diagnostic_event("REVIEW_DECISION", serde_json::json!({"decision": decision_label}));
+
     let response = match decision {
-        ReviewDecision::Approve => WireResponse {
-            version: 1,
+        ReviewDecision::Approve => WireResponse {            version: 1,
             decision: "approve",
             response_text: None,
             error: None,
