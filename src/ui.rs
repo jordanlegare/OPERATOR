@@ -265,7 +265,7 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
         for body_line in body.lines() {
             if focus_entry == Some(index)
                 && focus_line_index == Some(header_line)
-                && needle.as_ref().is_some_and(|needle| body_line.to_ascii_lowercase().contains(needle))
+                && needle.as_ref().is_some_and(|needle| body_line.to_ascii_lowercase().contains(needle.as_str()))
             {
                 focus_line_index = Some(lines.len());
             }
@@ -556,7 +556,7 @@ fn search_highlighted_spans(
     let mut spans = Vec::new();
     let mut cursor = 0usize;
 
-    while let Some(relative_start) = haystack[cursor..].find(&needle) {
+    while let Some(relative_start) = haystack[cursor..].find(needle.as_str()) {
         let start = cursor + relative_start;
         let end = start + needle.len();
         if start > cursor {
