@@ -68,9 +68,12 @@ jobs:
           assert "api_key=[REDACTED]" in history
           assert by_kind["hermes_interim"]["text"] == "Interim status update"
           assert sum(event["kind"] == "hermes_session" for event in events) == 3
-          assert by_kind["hermes_user"]["text"] == "capture smoke test"
+          user_events = [event for event in events if event["kind"] == "hermes_user"]
+          assert any(event["text"] == "capture smoke test" for event in user_events)
+          assert any(event["text"] == "second turn" for event in user_events)
+          first_user = next(event for event in user_events if event["text"] == "capture smoke test")
           assert by_kind["hermes_assistant"]["text"] == "captured answer"
-          assert by_kind["hermes_user"]["event_id"] != by_kind["hermes_assistant"]["event_id"]
+          assert first_user["event_id"] != by_kind["hermes_assistant"]["event_id"]
           delta = by_kind["hermes_stream_delta"]
           assert delta["text"] == " "
           assert delta["conversation_id"] == "ci-session"
