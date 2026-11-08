@@ -1,6 +1,7 @@
 mod app;
 mod conversations;
 mod hermes_bridge;
+mod hermes_review;
 mod shell;
 mod settings;
 mod storage;
@@ -39,6 +40,7 @@ use ratatui::{
 
 use app::{App, ConversationView, InputMode};
 use hermes_bridge::HermesBridge;
+use hermes_review::HermesReviewServer;
 use shell::ShellSession;
 use storage::Journal;
 
@@ -140,7 +142,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut hermes_bridge = HermesBridge::default();
-    let result = run(&mut terminal, &mut app, &mut shell, &mut hermes_bridge);
+    let mut review_server = HermesReviewServer::start()?;
+    review_server.set_enabled(app.review_hermes_responses);
+    let result = run(
+        &mut terminal,
+        &mut app,
+        &mut shell,
+        &mut hermes_bridge,
+        &mut review_server,
+    );
     // Import any Hermes events queued before shutdown, then drain shell output.
     if let Err(error) = drain_hermes_events(&mut app, &mut hermes_bridge) {
         app.status = format!("Hermes journal import pending: {error}");
@@ -150,6 +160,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(shell);
     drop(terminal);
     drop(_guard);
+    // Dropping App closes any pending one-shot decision channel. The review
+    // listener then returns a fail-closed rejection before it is shut down.
+    drop(app);
+    drop(review_server);
 
     result?;
     save_result?;
@@ -1151,8 +1165,15 @@ fn run(
     app: &mut App,
     shell: &mut Option<ShellSession>,
     hermes_bridge: &mut HermesBridge,
+    review_server: &mut HermesReviewServer,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
+        review_server.set_enabled(app.review_hermes_responses);
+        if app.pending_review.is_none() {
+            if let Some(request) = review_server.try_recv() {
+                app.begin_hermes_review(request);
+            }
+        }
         drain_shell(app, shell)?;
         match drain_hermes_events(app, hermes_bridge) {
             Ok(imported) if imported > 0 => {
@@ -1182,7 +1203,13 @@ fn run(
                     let size = terminal.size()?;
                     match ShellSession::spawn(size.width, size.height) {
                         Ok(mut workspace_session) => {
-                            run_terminal_workspace(terminal, app, &mut workspace_session, hermes_bridge)?;
+                            run_terminal_workspace(
+                                terminal,
+                                app,
+                                &mut workspace_session,
+                                hermes_bridge,
+                                review_server,
+                            )?;
                             // Dropping this session closes only the workspace shell.
                             // STREENOTE's primary transcript shell remains untouched.
                             terminal.clear()?;
@@ -1224,7 +1251,11 @@ fn run(
                 _ => {}
             },
             Event::Paste(text) => {
-                paste_clipboard_text(app, &text, "terminal paste event");
+                if app.pending_review.is_some() {
+                    app.review_insert_text(&text);
+                } else {
+                    paste_clipboard_text(app, &text, "terminal paste event");
+                }
             },
             Event::Resize(cols, rows) => {
                 if let Some(session) = shell.as_ref() {
@@ -1245,6 +1276,7 @@ fn run_terminal_workspace(
     app: &mut App,
     session: &mut ShellSession,
     hermes_bridge: &mut HermesBridge,
+    review_server: &mut HermesReviewServer,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut out = stdout();
     let size = terminal.size()?;
@@ -1263,7 +1295,7 @@ fn run_terminal_workspace(
     )?;
     out.flush()?;
 
-    let result = run_terminal_workspace_loop(terminal, app, session, hermes_bridge);
+    let result = run_terminal_workspace_loop(terminal, app, session, hermes_bridge, review_server);
     let echo_result = session.set_echo(false);
 
     // Restore the input modes expected by STREENOTE. A nested full-screen
@@ -1293,6 +1325,7 @@ fn run_terminal_workspace_loop(
     app: &mut App,
     session: &mut ShellSession,
     hermes_bridge: &mut HermesBridge,
+    review_server: &mut HermesReviewServer,
 ) -> Result<(), Box<dyn std::error::Error>> {
     const INPUT_POLL: Duration = Duration::from_millis(12);
     const ESCAPE_SEQUENCE_GRACE: Duration = Duration::from_millis(60);
@@ -1308,6 +1341,17 @@ fn run_terminal_workspace_loop(
     let mut last_size = terminal.size()?;
 
     loop {
+        review_server.set_enabled(app.review_hermes_responses);
+        if app.pending_review.is_none() {
+            if let Some(request) = review_server.try_recv() {
+                app.begin_hermes_review(request);
+            }
+        }
+        if app.pending_review.is_some() {
+            run_workspace_review_overlay(terminal, app)?;
+            continue;
+        }
+
         // Keep importing Hermes hook records while the F1 PTY is active.
         match drain_hermes_events(app, hermes_bridge) {
             Ok(imported) if imported > 0 => {
@@ -1382,8 +1426,19 @@ fn run_terminal_workspace_loop(
     app: &mut App,
     session: &mut ShellSession,
     hermes_bridge: &mut HermesBridge,
+    review_server: &mut HermesReviewServer,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
+        review_server.set_enabled(app.review_hermes_responses);
+        if app.pending_review.is_none() {
+            if let Some(request) = review_server.try_recv() {
+                app.begin_hermes_review(request);
+            }
+        }
+        if app.pending_review.is_some() {
+            run_workspace_review_overlay(_terminal, app)?;
+            continue;
+        }
         match drain_hermes_events(app, hermes_bridge) {
             Ok(imported) if imported > 0 => {
                 app.status = format!(
@@ -1597,6 +1652,11 @@ fn handle_key(
     // Conversation list and thread viewer own keyboard focus. The thread
     // is rendered from the current journal on every frame, so stream deltas
     // imported by the main loop appear without closing or reopening the modal.
+    if app.pending_review.is_some() {
+        handle_review_key(code, modifiers, app);
+        return Ok(false);
+    }
+
     if let Some(view) = app.conversation_view.clone() {
         match view {
             ConversationView::List => match code {
