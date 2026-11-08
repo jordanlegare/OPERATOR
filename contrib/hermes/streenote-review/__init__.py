@@ -128,8 +128,12 @@ def review_response(
         raise RuntimeError("STREENOTE returned an unsupported review protocol version")
 
     decision = reply.get("decision")
-    if decision in {"bypass", "approve"}:
+    if decision == "bypass":
         return None
+    if decision == "approve":
+        # Return the exact approved text as a non-empty transform result so a
+        # later transform hook cannot silently rewrite what the operator saw.
+        return response_text
 
     if decision == "replace":
         replacement = reply.get("response_text")
