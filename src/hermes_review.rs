@@ -68,19 +68,38 @@ fn append_diagnostic_event(event: &str, details: serde_json::Value) {
     }
 }
 
+fn latest_diagnostic<'a>(records: &'a [serde_json::Value], name: &str) -> Option<&'a serde_json::Value> {
+    records.iter().rev().find(|record| record.get("event").and_then(|v| v.as_str()) == Some(name))
+}
+
 /// Summarize real plugin/listener activity for `/review status`.
 pub fn diagnostics_summary() -> String {
     let path = diagnostic_log_path();
     let Ok(contents) = fs::read_to_string(&path) else { return format!("No Hermes plugin diagnostics yet; expected log: {}", path.display()); };
     let records: Vec<serde_json::Value> = contents.lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
     if records.is_empty() { return format!("Hermes diagnostics log is empty: {}", path.display()); }
-    let latest = |name: &str| records.iter().rev().find(|r| r.get("event").and_then(|v| v.as_str()) == Some(name));
-    let val = |name: &str| latest(name).map(|r| r.get("timestamp").and_then(|v| v.as_str()).unwrap_or("recorded")).unwrap_or("never");
-    let request = latest("REVIEW_REQUEST_RECEIVED").map(|r| r.get("timestamp_unix").map(|v| v.to_string()).unwrap_or_else(|| "recorded".into())).unwrap_or_else(|| "never".into());
-    let decision = latest("REVIEW_DECISION").and_then(|r| r.get("details")).and_then(|d| d.get("decision")).and_then(|v| v.as_str()).unwrap_or("none");
-    format!("plugin registered: {}; callback: {}; socket connected: {}; STREENOTE request: {}; last decision: {}; log: {}", val("PLUGIN_REGISTERED"), val("CALLBACK_INVOKED"), val("SOCKET_CONNECT_OK"), request, decision, path.display())
+    let plugin = latest_diagnostic(&records, "PLUGIN_REGISTERED")
+        .and_then(|r| r.get("timestamp").and_then(|v| v.as_str())).unwrap_or("never");
+    let callback = latest_diagnostic(&records, "CALLBACK_INVOKED")
+        .and_then(|r| r.get("timestamp").and_then(|v| v.as_str())).unwrap_or("never");
+    let socket = latest_diagnostic(&records, "SOCKET_PATH_RESOLVED").map(|r| {
+        let resolved = r.get("socket_path").and_then(|v| v.as_str()).unwrap_or("unknown path");
+        let exists = r.get("exists").and_then(|v| v.as_bool()).unwrap_or(false);
+        format!("{} ({})", resolved, if exists { "exists" } else { "missing" })
+    }).unwrap_or_else(|| "not checked".to_string());
+    let connected = latest_diagnostic(&records, "SOCKET_CONNECT_OK")
+        .and_then(|r| r.get("timestamp").and_then(|v| v.as_str())).unwrap_or("never");
+    let request = latest_diagnostic(&records, "REVIEW_REQUEST_RECEIVED")
+        .map(|r| r.get("timestamp_unix").map(|v| v.to_string()).unwrap_or_else(|| "recorded".into()))
+        .unwrap_or_else(|| "never".into());
+    let decision = latest_diagnostic(&records, "REVIEW_DECISION")
+        .and_then(|r| r.get("details")).and_then(|d| d.get("decision"))
+        .and_then(|v| v.as_str()).unwrap_or("none");
+    let error = latest_diagnostic(&records, "REVIEW_ERROR")
+        .and_then(|r| r.get("error").or_else(|| r.get("details").and_then(|d| d.get("error"))))
+        .and_then(|v| v.as_str()).unwrap_or("none");
+    format!("plugin registered: {plugin}; callback: {callback}; socket: {socket}; connected: {connected}; STREENOTE request: {request}; last decision: {decision}; last error: {error}; log: {}", path.display())
 }
-
 
 #[derive(Debug)]
 pub struct ReviewRequest {
@@ -420,6 +439,7 @@ fn handle_connection(
             "request_id": request.request_id,
             "reason": "review mode is OFF",
         }));
+        append_diagnostic_event("REVIEW_DECISION", serde_json::json!({"decision": "bypass"}));
         return write_wire_response(
             &mut stream,
             WireResponse {
