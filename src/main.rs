@@ -1420,6 +1420,151 @@ fn run_terminal_workspace_loop(
     Ok(())
 }
 
+/// Temporarily reclaim the client terminal from the F1 PTY while a final
+/// Hermes answer is held. The PTY process remains alive and resumes unchanged
+/// after the operator releases or rejects the response.
+fn run_workspace_review_overlay(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut out = stdout();
+    execute!(
+        out,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+        ),
+        crossterm::cursor::Hide
+    )?;
+    terminal.clear()?;
+
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        while app.pending_review.is_some() {
+            terminal.draw(|frame| ui::draw(frame, app))?;
+            if !event::poll(Duration::from_millis(40))? {
+                continue;
+            }
+            match event::read()? {
+                Event::Key(key)
+                    if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat =>
+                {
+                    handle_review_key(key.code, key.modifiers, app);
+                }
+                Event::Paste(text) => app.review_insert_text(&text),
+                Event::Resize(_, _) => {}
+                _ => {}
+            }
+        }
+        Ok(())
+    })();
+
+    let cleanup = execute!(
+        out,
+        PopKeyboardEnhancementFlags,
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    );
+    let clear = terminal.clear();
+    result?;
+    cleanup?;
+    clear?;
+    Ok(())
+}
+
+fn handle_review_key(code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
+    if app.pending_review.is_none() {
+        return;
+    }
+
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        match code {
+            KeyCode::Char('v') => paste_review_from_system_clipboard(app),
+            KeyCode::Home => app.review_cursor_document_start(),
+            KeyCode::End => app.review_cursor_document_end(),
+            KeyCode::q => {
+                app.status = "A held Hermes answer must be released with F2/F3 or withheld with F4.".to_string();
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    match code {
+        KeyCode::F(2) => app.approve_hermes_original(),
+        KeyCode::F(3) => app.approve_hermes_edited(),
+        KeyCode::F(4) => app.reject_hermes_response(),
+        KeyCode::Esc => {
+            app.status = "The answer remains held. Use F2 to release original, F3 to release edits, or F4 to withhold.".to_string();
+        }
+        KeyCode::Left => app.review_cursor_left(),
+        KeyCode::Right => app.review_cursor_right(),
+        KeyCode::Up => app.review_cursor_up(),
+        KeyCode::Down => app.review_cursor_down(),
+        KeyCode::PageUp => {
+            for _ in 0..10 {
+                app.review_cursor_up();
+            }
+        }
+        KeyCode::PageDown => {
+            for _ in 0..10 {
+                app.review_cursor_down();
+            }
+        }
+        KeyCode::Home => app.review_cursor_home(),
+        KeyCode::End => app.review_cursor_end(),
+        KeyCode::Backspace => app.review_backspace(),
+        KeyCode::Delete => app.review_delete(),
+        KeyCode::Enter => app.review_insert_text("\n"),
+        KeyCode::Tab => app.review_insert_text("    "),
+        KeyCode::Char(character) if !modifiers.contains(KeyModifiers::ALT) => {
+            app.review_insert_text(&character.to_string());
+        }
+        _ => {}
+    }
+}
+
+fn paste_review_from_system_clipboard(app: &mut App) {
+    match read_osc52_terminal_clipboard() {
+        Ok(Some(text)) if !text.is_empty() => {
+            let count = text.chars().count();
+            app.review_insert_text(&text);
+            app.status = format!("Inserted {count} characters from the client clipboard into the held answer.");
+            return;
+        }
+        Ok(Some(_)) => {
+            app.status = "Client terminal clipboard is empty.".to_string();
+            return;
+        }
+        Ok(None) | Err(_) => {}
+    }
+
+    match read_server_clipboard_cache() {
+        Ok(text) if !text.is_empty() => {
+            let count = text.chars().count();
+            app.review_insert_text(&text);
+            app.status = format!("Inserted {count} characters from the STREENOTE server clipboard into the held answer.");
+        }
+        Ok(_) => app.status = "STREENOTE server clipboard cache is empty.".to_string(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            match read_system_clipboard() {
+                Ok(text) if !text.is_empty() => {
+                    let count = text.chars().count();
+                    app.review_insert_text(&text);
+                    app.status = format!("Inserted {count} characters from the server clipboard into the held answer.");
+                }
+                Ok(_) => app.status = "No clipboard text is available to paste.".to_string(),
+                Err(error) => app.status = format!("Could not read clipboard for answer review: {error}"),
+            }
+        }
+        Err(error) => app.status = format!("Could not read STREENOTE clipboard cache: {error}"),
+    }
+}
+
 #[cfg(not(unix))]
 fn run_terminal_workspace_loop(
     _terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
