@@ -335,7 +335,9 @@ mod tests {
                 "kind": kind,
                 "timestamp": "2026-11-08T12:00:00-05:00",
                 "text": text,
-                "conversation_id": "resumed-session"
+                "conversation_id": if event_id == "session-001" { serde_json::Value::Null } else { serde_json::json!("resumed-session") },
+                "session_id": if event_id == "session-001" { "rotated-session" } else { "resumed-session" },
+                "old_session_id": if event_id == "session-001" { serde_json::json!("resumed-session") } else { serde_json::Value::Null }
             });
             fs::write(
                 ready.join(format!("{event_id}.json")),
@@ -350,9 +352,18 @@ mod tests {
             journal.entries.iter().map(|entry| entry.kind).collect::<Vec<_>>(),
             vec![EntryKind::HermesHistory, EntryKind::HermesInterim, EntryKind::HermesSession]
         );
-        assert!(journal.entries.iter().all(|entry| {
-            entry.conversation_id.as_deref() == Some("resumed-session")
-        }));
+        assert_eq!(
+            journal.entries[2].session_id.as_deref(),
+            Some("rotated-session")
+        );
+        assert_eq!(
+            journal.entries[2].related_session_id.as_deref(),
+            Some("resumed-session")
+        );
+        assert_eq!(
+            journal.entries[0].session_id.as_deref(),
+            Some("resumed-session")
+        );
 
         drop(journal);
         let _ = fs::remove_dir_all(root);
