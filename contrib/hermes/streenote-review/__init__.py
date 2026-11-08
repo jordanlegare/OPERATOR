@@ -207,9 +207,10 @@ def review_response(
     decision = reply.get("decision")
     _log_event("DECISION_RECEIVED", request_id=request_id, decision=str(decision))
     if decision == "bypass":
+        # This is an explicit operator choice (/review off), not a listener
+        # failure. It must override fail-closed mode and pass the original
+        # Hermes response through unchanged.
         _log_event("REVIEW_BYPASS", request_id=request_id, required=required)
-        if required:
-            raise RuntimeError("STREENOTE review is required but STREENOTE returned bypass (review mode is OFF); the Hermes response was withheld.")
         return None
     if decision == "approve":
         _log_event("REVIEW_APPROVED", request_id=request_id)

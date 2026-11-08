@@ -112,14 +112,17 @@ class HermesReviewPluginTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "socket is missing.*withheld"):
                 self._call()
 
-    def test_required_review_fails_closed_on_listener_bypass(self):
+    def test_required_review_allows_explicit_listener_bypass_when_review_is_off(self):
         worker, _, errors = self._serve({"version": 1, "decision": "bypass"})
         with patch.dict(os.environ, {"STREENOTE_HERMES_REVIEW_REQUIRED": "true"}):
-            with self.assertRaisesRegex(RuntimeError, "returned bypass.*withheld"):
-                self._call()
+            self.assertIsNone(self._call())
         worker.join(timeout=2)
         self.assertFalse(worker.is_alive())
         self.assertFalse(errors)
+        records = [json.loads(line) for line in self.diagnostic_path.read_text().splitlines()]
+        bypass = [record for record in records if record["event"] == "REVIEW_BYPASS"]
+        self.assertEqual(len(bypass), 1)
+        self.assertTrue(bypass[0]["required"])
 
     def test_callback_and_socket_decisions_are_logged_without_answer_content(self):
         log_path = Path(self.temp_dir.name) / "diagnostics.jsonl"
