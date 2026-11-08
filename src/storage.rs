@@ -42,7 +42,7 @@ pub struct Entry {
     /// Stable ID for externally imported events; used only for deduplication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_id: Option<String>,
-    /// Hermes session identifier shared by every turn in one conversation.
+    /// Stable Hermes conversation identifier; it survives session rotation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
     /// Current Hermes session identifier; may rotate after context compaction.
