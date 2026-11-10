@@ -61,6 +61,7 @@ The default input mode is **TERMINAL**.
 - In TERMINAL mode, an ordinary submitted line runs in the Debian shell.
 - In NOTES mode, an ordinary submitted line becomes a note.
 - `/note text` saves a note without changing mode. `/note` by itself switches to NOTES mode.
+- Notes are shared live across every running STREENOTE terminal using the same journal path. A note submitted in one SSH terminal appears in the others on their next journal poll (normally within one 40 ms UI cycle). Stable row IDs and the journal's inter-process file lock prevent duplicate replication when terminals write concurrently. This live fan-out applies to notes; shell commands and raw terminal output are not echoed into other active terminals.
 - Prefix a line with `!` to run it as a shell command even while in NOTES mode.
 - Recognized StreamNote commands (such as `/search`, `/save`, and `/stats`) are handled locally in either mode.
 - Absolute shell paths such as `/usr/bin/ls` are sent to the shell in TERMINAL mode; they are not mistaken for local StreamNote commands.
