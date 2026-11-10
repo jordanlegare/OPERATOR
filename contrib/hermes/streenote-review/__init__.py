@@ -28,11 +28,11 @@ MAX_METADATA_CHARS = 1024
 MAX_PROMPT_BYTES = 8 * 1024 * 1024
 
 _PROMPT_SECRET_ASSIGNMENT = re.compile(
-    r"""(?i)\\b(api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|authorization|credential)\\b(\\s*[:=]\\s*)(?:"[^"]*"|'[^']*'|[^\\s,;]+)"""
+    r"""(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|authorization|credential)\b(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)"""
 )
-_PROMPT_BEARER_VALUE = re.compile(r"(?i)\\bBearer\\s+[A-Za-z0-9._~+/\\-=]+")
+_PROMPT_BEARER_VALUE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/\\-=]+")
 _PROMPT_SECRET_FLAG = re.compile(
-    r"""(?i)(--(?:api[-_]key|token|password|secret)(?:=|\\s+))(?: "[^"]*"|'[^']*'|[^\\s]+)"""
+    r"""(?i)(--(?:api[-_]key|token|password|secret)(?:=|\s+))(?:\"[^\"]*\"|'[^']*'|[^\s]+)"""
 )
 
 
