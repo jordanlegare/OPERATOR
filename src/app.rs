@@ -1327,30 +1327,30 @@ impl App {
     }
 
     pub fn receive_hermes_broadcast(&mut self, broadcast: ReviewBroadcast) {
-        // The result message updates the corresponding pending notification
-        // instead of creating a second copy. It is also valid for the reviewer
-        // terminal to receive only the result after its editor closes.
+        // Pending copies let other terminals inspect the draft while one operator
+        // reviews it. A result is only a lifecycle signal: close that pending
+        // copy silently instead of opening a confirmation modal on every terminal.
+        // The selected reviewer's F2/F3/F4 decision remains authoritative.
+        if broadcast.phase == "result" {
+            self.review_broadcasts
+                .retain(|item| item.request_id != broadcast.request_id);
+            self.review_broadcast_scroll = 0;
+            return;
+        }
+
         if let Some(existing) = self.review_broadcasts.iter_mut().find(|item| {
             item.request_id == broadcast.request_id
         }) {
             *existing = broadcast;
         } else {
-            // Retain every response notification until the operator dismisses
-            // it; silently dropping an older answer would break terminal fan-out.
             self.review_broadcasts.push_back(broadcast);
         }
         if self.pending_review.is_none() {
-            let latest = self.review_broadcasts.back();
-            self.status = match latest.and_then(|item| item.decision.as_deref()) {
-                Some("approve") => "Hermes answer approved unchanged and shared with all connected terminals.".to_string(),
-                Some("replace") => "Edited Hermes answer approved and shared with all connected terminals.".to_string(),
-                Some("reject") => "Hermes answer withheld by the reviewer and shared as a withheld status.".to_string(),
-                Some("bypass") => "Hermes answer released without review and shared with all connected terminals.".to_string(),
-                _ => "A Hermes response is awaiting review in another connected STREENOTE terminal.".to_string(),
-            };
+            self.status =
+                "A Hermes response is awaiting review in another connected STREENOTE terminal."
+                    .to_string();
         }
     }
-
     pub fn dismiss_hermes_broadcast(&mut self) {
         self.review_broadcasts.pop_front();
         self.review_broadcast_scroll = 0;
@@ -2179,7 +2179,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_hermes_broadcast_is_upgraded_in_place_with_the_final_edited_answer() {
+    fn final_review_result_silently_closes_the_read_only_broadcast() {
         use crate::hermes_review::ReviewBroadcast;
 
         let (mut app, path) = test_app();
@@ -2194,7 +2194,9 @@ mod tests {
         });
         assert_eq!(app.review_broadcasts.len(), 1);
         assert_eq!(app.review_broadcasts[0].response_text, "Original draft");
+        app.status = "Keep the normal terminal status.".to_string();
 
+        app.review_broadcast_scroll = 12;
         app.receive_hermes_broadcast(ReviewBroadcast {
             request_id: "shared-review-001".to_string(),
             session_id: "session-1".to_string(),
@@ -2204,16 +2206,21 @@ mod tests {
             phase: "result".to_string(),
             decision: Some("replace".to_string()),
         });
-        assert_eq!(app.review_broadcasts.len(), 1, "result must update, not duplicate");
-        assert_eq!(
-            app.review_broadcasts[0].response_text,
-            "Edited and approved final text"
-        );
-        assert_eq!(
-            app.review_broadcasts[0].decision.as_deref(),
-            Some("replace")
-        );
-        assert!(app.status.contains("Edited Hermes answer approved"));
+        assert!(app.review_broadcasts.is_empty());
+        assert_eq!(app.review_broadcast_scroll, 0);
+        assert_eq!(app.status, "Keep the normal terminal status.");
+
+        // A result-only event must not create a new notification modal.
+        app.receive_hermes_broadcast(ReviewBroadcast {
+            request_id: "result-only-review".to_string(),
+            session_id: "session-1".to_string(),
+            model: "qwen3.5:latest".to_string(),
+            platform: "api_server".to_string(),
+            response_text: String::new(),
+            phase: "result".to_string(),
+            decision: Some("approve".to_string()),
+        });
+        assert!(app.review_broadcasts.is_empty());
 
         let _ = fs::remove_file(path);
     }
