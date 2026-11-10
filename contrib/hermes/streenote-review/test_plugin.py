@@ -56,12 +56,12 @@ class HermesReviewPluginTests(unittest.TestCase):
                     connection, _ = listener.accept()
                     with connection:
                         data = bytearray()
-                        while b"\\n" not in data:
+                        while b"\n" not in data:
                             chunk = connection.recv(65536)
                             if not chunk:
                                 raise AssertionError("plugin closed before sending request")
                             data.extend(chunk)
-                        request = json.loads(bytes(data).split(b"\\n", 1)[0])
+                        request = json.loads(bytes(data).split(b"\n", 1)[0])
                         requests.append(request)
                         response = (
                             {"version": 1, "decision": "observed"}
@@ -69,7 +69,7 @@ class HermesReviewPluginTests(unittest.TestCase):
                             else reply
                         )
                         connection.sendall(
-                            json.dumps(response, ensure_ascii=False).encode("utf-8") + b"\\n"
+                            json.dumps(response, ensure_ascii=False).encode("utf-8") + b"\n"
                         )
             except socket.timeout:
                 pass
