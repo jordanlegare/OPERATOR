@@ -901,3 +901,64 @@ mod hermes_stream_delta_tests {
         let _ = fs::remove_file(path);
     }
 }
+
+
+#[cfg(test)]
+mod shared_journal_tests {
+    use super::{Entry, EntryKind, Journal};
+    use std::{fs, path::PathBuf, sync::atomic::{AtomicUsize, Ordering}};
+
+    static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn journal_path() -> PathBuf {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "streenote-shared-journal-{}-{id}.jsonl",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn same_hermes_event_imported_by_two_ssh_instances_is_persisted_once_and_cached_in_both() {
+        let path = journal_path();
+        let mut first = Journal::open(path.clone()).expect("open first terminal journal");
+        let mut second = Journal::open(path.clone()).expect("open second terminal journal");
+        let event = Entry::with_external_event(
+            EntryKind::HermesUser,
+            "A prompt delivered to all connected terminals.".to_string(),
+            "2026-11-10T12:00:00-05:00".to_string(),
+            "shared-hermes-event-001".to_string(),
+            Some("conversation-1".to_string()),
+            Some("session-1".to_string()),
+            None,
+            Some("turn-1".to_string()),
+            None,
+            None,
+        );
+
+        first.append(event.clone()).expect("first terminal persists event");
+        second.append(event).expect("second terminal imports its own copy");
+
+        assert_eq!(first.entries.len(), 1);
+        assert_eq!(second.entries.len(), 1);
+        assert_eq!(
+            second.entries[0].text,
+            "A prompt delivered to all connected terminals."
+        );
+        drop(first);
+        drop(second);
+
+        let contents = fs::read_to_string(&path).expect("read unified journal");
+        assert_eq!(
+            contents
+                .lines()
+                .filter(|line| line.contains("shared-hermes-event-001"))
+                .count(),
+            1,
+            "both terminals must display the event while only one JSONL row is stored"
+        );
+        let _ = fs::remove_file(&path);
+        let lock = PathBuf::from(format!("{}.lock", path.display()));
+        let _ = fs::remove_file(lock);
+    }
+}
