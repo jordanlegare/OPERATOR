@@ -383,7 +383,7 @@ impl Journal {
                 }
             }
             self.pending.extend(entries);
-            return self.save_pending();
+            return self.save_pending_locked();
         }
 
         for entry in &entries {
