@@ -1327,30 +1327,30 @@ impl App {
     }
 
     pub fn receive_hermes_broadcast(&mut self, broadcast: ReviewBroadcast) {
-        // The result message updates the corresponding pending notification
-        // instead of creating a second copy. It is also valid for the reviewer
-        // terminal to receive only the result after its editor closes.
+        // Pending copies let other terminals inspect the draft while one operator
+        // reviews it. A result is only a lifecycle signal: close that pending
+        // copy silently instead of opening a confirmation modal on every terminal.
+        // The selected reviewer's F2/F3/F4 decision remains authoritative.
+        if broadcast.phase == "result" {
+            self.review_broadcasts
+                .retain(|item| item.request_id != broadcast.request_id);
+            self.review_broadcast_scroll = 0;
+            return;
+        }
+
         if let Some(existing) = self.review_broadcasts.iter_mut().find(|item| {
             item.request_id == broadcast.request_id
         }) {
             *existing = broadcast;
         } else {
-            // Retain every response notification until the operator dismisses
-            // it; silently dropping an older answer would break terminal fan-out.
             self.review_broadcasts.push_back(broadcast);
         }
         if self.pending_review.is_none() {
-            let latest = self.review_broadcasts.back();
-            self.status = match latest.and_then(|item| item.decision.as_deref()) {
-                Some("approve") => "Hermes answer approved unchanged and shared with all connected terminals.".to_string(),
-                Some("replace") => "Edited Hermes answer approved and shared with all connected terminals.".to_string(),
-                Some("reject") => "Hermes answer withheld by the reviewer and shared as a withheld status.".to_string(),
-                Some("bypass") => "Hermes answer released without review and shared with all connected terminals.".to_string(),
-                _ => "A Hermes response is awaiting review in another connected STREENOTE terminal.".to_string(),
-            };
+            self.status =
+                "A Hermes response is awaiting review in another connected STREENOTE terminal."
+                    .to_string();
         }
     }
-
     pub fn dismiss_hermes_broadcast(&mut self) {
         self.review_broadcasts.pop_front();
         self.review_broadcast_scroll = 0;
