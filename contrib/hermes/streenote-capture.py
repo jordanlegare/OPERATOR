@@ -318,7 +318,7 @@ def history_snapshot_text(history) -> str | None:
     return snapshot
 
 
-def write_inbox_event(inbox: Path, event: dict) -> None:
+def _write_inbox_event_one(inbox: Path, event: dict) -> None:
     ready = inbox / "ready"
     ready.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
@@ -339,7 +339,7 @@ def write_inbox_event(inbox: Path, event: dict) -> None:
                 event, ensure_ascii=False, separators=(",", ":")
             ).encode("utf-8")
             temporary.write(data)
-            temporary.write(b"\n")
+            temporary.write(b"\\n")
             temporary.flush()
             os.fsync(temporary.fileno())
         os.replace(temporary_name, final_path)
@@ -349,6 +349,74 @@ def write_inbox_event(inbox: Path, event: dict) -> None:
         except OSError:
             pass
         raise
+
+
+def _connected_instance_inboxes(registry: Path) -> list[Path]:
+    """Find private per-terminal inboxes for every currently live STREENOTE listener."""
+    try:
+        registry_stat = registry.lstat()
+        if (
+            not stat.S_ISDIR(registry_stat.st_mode)
+            or registry_stat.st_uid != os.getuid()
+            or stat.S_IMODE(registry_stat.st_mode) & 0o077
+        ):
+            return []
+    except OSError:
+        return []
+
+    instance_ids = set()
+    for manifest in registry.glob("*.json"):
+        try:
+            metadata = manifest.lstat()
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) & 0o077
+                or metadata.st_size > 4096
+            ):
+                continue
+            registration = json.loads(manifest.read_text(encoding="utf-8"))
+            if not isinstance(registration, dict):
+                continue
+            instance_id = registration.get("instance_id")
+            if (
+                registration.get("version") == 1
+                and isinstance(instance_id, str)
+                and manifest.name == f"{instance_id}.json"
+                and _review_instance_is_active(registry, instance_id)
+            ):
+                instance_ids.add(instance_id)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+
+    inbox_root = registry / "inboxes"
+    return [
+        inbox_root / instance_id
+        for instance_id in sorted(instance_ids)
+    ]
+
+
+def write_inbox_event(inbox: Path, event: dict) -> None:
+    """Fan each Hermes hook event out to every live STREENOTE terminal.
+
+    Every TUI gets a private queue, so one process cannot consume another
+    terminal's messages. The shared Journal uses event IDs and an inter-process
+    file lock to persist a single copy even though every process imports it.
+    """
+    registry_value = os.environ.get("STREENOTE_HERMES_REVIEW_SESSION_DIR")
+    recipients = []
+    if registry_value:
+        registry = Path(registry_value).expanduser()
+        if registry.is_absolute():
+            recipients = _connected_instance_inboxes(registry)
+
+    if not recipients:
+        # Preserve the original single-inbox contract for non-SSH or legacy
+        # Hermes integrations that do not publish a review-session registry.
+        recipients = [inbox]
+
+    for recipient in recipients:
+        _write_inbox_event_one(recipient, event)
 
 
 def write_history_snapshot(
