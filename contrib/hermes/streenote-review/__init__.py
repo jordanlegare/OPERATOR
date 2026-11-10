@@ -442,9 +442,13 @@ def _exchange(
     request: dict[str, Any],
     instance_id: str,
     observe_only: bool = False,
+    phase: str = "pending",
+    decision: str | None = None,
 ) -> dict[str, Any]:
     payload = dict(request)
     payload["observe_only"] = observe_only
+    payload["phase"] = phase
+    payload["decision"] = decision
     encoded = json.dumps(
         payload, ensure_ascii=False, separators=(",", ":")
     ).encode("utf-8")
@@ -478,6 +482,43 @@ def _exchange(
     except Exception:
         connection.close()
         raise
+
+
+def _broadcast_review_result(
+    routes: list[dict[str, Any]],
+    request: dict[str, Any],
+    decision: str,
+    final_response: str | None,
+) -> None:
+    """Publish the final outcome to every connected terminal, including reviewer."""
+    result_request = dict(request)
+    result_request["response_text"] = final_response or ""
+    for route in routes:
+        try:
+            reply = _exchange(
+                route["socket_path"],
+                result_request,
+                route["instance_id"],
+                observe_only=True,
+                phase="result",
+                decision=decision,
+            )
+            if reply.get("decision") != "observed":
+                raise RuntimeError("terminal did not acknowledge final-result broadcast")
+            _log_event(
+                "REVIEW_RESULT_BROADCAST",
+                request_id=request["request_id"],
+                instance_id=route["instance_id"],
+                decision=decision,
+            )
+        except Exception as error:
+            _log_event(
+                "REVIEW_RESULT_BROADCAST_ERROR",
+                request_id=request["request_id"],
+                instance_id=route["instance_id"],
+                decision=decision,
+                error=str(error),
+            )
 
 
 def review_response(
@@ -650,6 +691,7 @@ def review_response(
                     instance_id=observer["instance_id"],
                     error=str(error),
                 )
+        _broadcast_review_result(routes, request, "bypass", response_text)
         _log_event("REVIEW_BYPASS", request_id=request_id, required=required, reason="no enabled reviewers")
         return None
     if reply is None:
@@ -679,9 +721,11 @@ def review_response(
     )
     if decision == "bypass":
         # An explicit operator choice (/review off) overrides fail-closed mode.
+        _broadcast_review_result(routes, request, "bypass", response_text)
         _log_event("REVIEW_BYPASS", request_id=request_id, required=required)
         return None
     if decision == "approve":
+        _broadcast_review_result(routes, request, "approve", response_text)
         _log_event("REVIEW_APPROVED", request_id=request_id)
         return response_text
     if decision == "replace":
@@ -696,6 +740,7 @@ def review_response(
             raise RuntimeError(
                 "STREENOTE replacement exceeded the review limit; the Hermes response was withheld."
             )
+        _broadcast_review_result(routes, request, "replace", replacement)
         _log_event(
             "REVIEW_REPLACED",
             request_id=request_id,
@@ -705,6 +750,7 @@ def review_response(
     if decision == "reject":
         reason = reply.get("error")
         detail = f" ({reason})" if isinstance(reason, str) and reason else ""
+        _broadcast_review_result(routes, request, "reject", None)
         _log_event("REVIEW_REJECTED", request_id=request_id, reason=str(reason or "")[:300])
         raise RuntimeError(f"STREENOTE operator withheld this Hermes response{detail}.")
     _log_event("REVIEW_ERROR", request_id=request_id, error=f"unknown decision {decision!r}")
