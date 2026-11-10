@@ -1,5 +1,6 @@
 use std::{
     cell::{Ref, RefCell},
+    collections::VecDeque,
     io,
     path::PathBuf,
     time::{Duration, Instant},
@@ -10,7 +11,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     conversations::{build_threads, collapse_live_streams, is_hermes_event, ConversationThread},
-    hermes_review::{diagnostics_summary, ReviewDecision, ReviewRequest, MAX_REVIEW_BYTES},
+    hermes_review::{
+        diagnostics_summary, ReviewBroadcast, ReviewDecision, ReviewRequest, MAX_REVIEW_BYTES,
+    },
     shell::ShellSession,
     settings::Settings,
     storage::{
@@ -132,6 +135,9 @@ pub struct App {
     pub review_hermes_responses: bool,
     /// Active final-response review; its channel is the only release path to Hermes.
     pub pending_review: Option<ReviewRequest>,
+    /// Read-only copies of final responses delivered to this non-reviewing terminal.
+    pub review_broadcasts: VecDeque<ReviewBroadcast>,
+    pub review_broadcast_scroll: u16,
     /// Editable copy of the held answer and its UTF-8 byte cursor.
     pub review_text: String,
     pub review_cursor: usize,
@@ -209,6 +215,8 @@ impl App {
             conversation_focus_entry: None,
             review_hermes_responses: settings.review_hermes_responses,
             pending_review: None,
+            review_broadcasts: VecDeque::new(),
+            review_broadcast_scroll: 0,
             review_text: String::new(),
             review_cursor: 0,
             review_vertical_scroll: 0,
@@ -1292,6 +1300,37 @@ impl App {
             Err(error) => format!(
                 "Hermes response review changed for this session but settings could not be saved: {error}"
             ),
+        };
+    }
+
+    pub fn receive_hermes_broadcast(&mut self, broadcast: ReviewBroadcast) {
+        // Bound memory use if many final answers arrive while this terminal is
+        // unattended. The review terminal remains the only release authority.
+        if self.review_broadcasts.len() >= 32 {
+            self.review_broadcasts.pop_front();
+        }
+        self.review_broadcasts.push_back(broadcast);
+        if self.pending_review.is_none() {
+            self.status = "A Hermes response is being reviewed in another connected STREENOTE terminal.".to_string();
+        }
+    }
+
+    pub fn dismiss_hermes_broadcast(&mut self) {
+        self.review_broadcasts.pop_front();
+        self.review_broadcast_scroll = 0;
+        if !self.review_broadcasts.is_empty() {
+            self.status = format!(
+                "{} more Hermes response broadcast(s) waiting.",
+                self.review_broadcasts.len()
+            );
+        }
+    }
+
+    pub fn scroll_hermes_broadcast(&mut self, amount: i32) {
+        self.review_broadcast_scroll = if amount < 0 {
+            self.review_broadcast_scroll.saturating_sub(amount.unsigned_abs() as u16)
+        } else {
+            self.review_broadcast_scroll.saturating_add(amount as u16)
         };
     }
 
