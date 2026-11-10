@@ -462,7 +462,7 @@ def _exchange(
             request_id=request.get("request_id", ""),
         )
         with connection:
-            connection.sendall(encoded + b"\\n")
+            connection.sendall(encoded + b"\n")
             _log_event(
                 "REQUEST_SENT",
                 request_id=request.get("request_id", ""),
