@@ -131,6 +131,56 @@ class CapturePromptFanoutTests(unittest.TestCase):
             "every terminal must receive the identical original prompt event",
         )
 
+    def test_union_registries_even_when_first_valid_registry_has_only_one_terminal(self):
+        # A valid but partial override must not shadow the shared runtime
+        # registry. This reproduces the one-terminal-only first-prompt failure.
+        partial_registry = self.root / "partial-review-sessions"
+        partial_registry.mkdir(mode=0o700)
+        socket_path = partial_registry / "c3.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(socket_path))
+        os.chmod(socket_path, 0o600)
+        self.sockets.append(listener)
+
+        manifest = partial_registry / "c3.json"
+        manifest.write_text(json.dumps({
+            "version": 1,
+            "instance_id": "c3",
+            "socket_path": str(socket_path),
+            "review_enabled": True,
+        }), encoding="utf-8")
+        os.chmod(manifest, 0o600)
+
+        event = {
+            "event_id": "union-registry-prompt-001",
+            "kind": "hermes_user",
+            "text": "The original first prompt must reach every terminal.",
+        }
+        with patch.object(
+            CAPTURE,
+            "review_session_registry_candidates",
+            return_value=[partial_registry, self.registry],
+        ):
+            CAPTURE.write_inbox_event(self.inboxes["a1"], event)
+
+        recipient_inboxes = [
+            self.inboxes["a1"],
+            self.inboxes["b2"],
+            partial_registry / "inboxes" / "c3",
+        ]
+        received = []
+        for inbox in recipient_inboxes:
+            events = self._events(inbox)
+            self.assertEqual(len(events), 1, f"missing event in {inbox}")
+            self.assertEqual(events[0]["text"], event["text"])
+            received.append(events[0]["event_id"])
+
+        self.assertEqual(
+            received,
+            [event["event_id"]] * 3,
+            "every valid registry must contribute its terminal inboxes",
+        )
+
     def test_multimodal_prompt_keeps_text_and_never_persists_binary_payload(self):
         secret_image_payload = "data:image/png;base64,THIS_MUST_NOT_BE_STORED"
         self._run_hook({
