@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     fs::{self, File, OpenOptions},
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -122,6 +122,63 @@ pub struct Journal {
     persisted_event_ids: HashSet<String>,
     /// Event IDs accepted into memory but not yet confirmed durable.
     pending_event_ids: HashSet<String>,
+    /// Byte offset through the shared JSONL file already checked for external
+    /// event IDs. Each SSH process advances this while holding JournalFileLock.
+    journal_scan_offset: u64,
+}
+
+#[cfg(unix)]
+struct JournalFileLock(File);
+
+#[cfg(unix)]
+impl JournalFileLock {
+    fn acquire(journal_path: &Path) -> io::Result<Self> {
+        use std::os::fd::AsRawFd;
+
+        let mut lock_name = journal_path.as_os_str().to_os_string();
+        lock_name.push(".lock");
+        let lock_path = PathBuf::from(lock_name);
+        if let Some(parent) = lock_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(lock_path)?;
+        loop {
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+            if result == 0 {
+                return Ok(Self(file));
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for JournalFileLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct JournalFileLock;
+
+#[cfg(not(unix))]
+impl JournalFileLock {
+    fn acquire(_journal_path: &Path) -> io::Result<Self> {
+        Ok(Self)
+    }
 }
 
 impl Journal {
@@ -135,6 +192,7 @@ impl Journal {
             File::create(&path)?;
         }
 
+        let _journal_lock = JournalFileLock::acquire(&path)?;
         let file = File::open(&path)?;
         let reader = BufReader::new(file);
         let mut entries = Vec::new();
@@ -185,6 +243,7 @@ impl Journal {
             pending: Vec::new(),
             persisted_event_ids,
             pending_event_ids: HashSet::new(),
+            journal_scan_offset: fs::metadata(&path)?.len(),
         })
     }
 
@@ -197,28 +256,34 @@ impl Journal {
             return Ok(());
         }
 
-        if let Some(event_id) = entry.event_id.as_ref() {
+        let _journal_lock = JournalFileLock::acquire(&self.path)?;
+        let event_id = entry.event_id.clone();
+        let was_already_known = event_id
+            .as_ref()
+            .is_some_and(|id| self.persisted_event_ids.contains(id));
+        if let Some(event_id) = event_id.as_ref() {
             if self.pending_event_ids.contains(event_id) {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
                     "event is in the journal's pending-write queue",
                 ));
             }
+        }
+        self.refresh_external_event_ids()?;
+
+        if let Some(event_id) = event_id.as_ref() {
             if self.persisted_event_ids.contains(event_id) {
+                // Another SSH instance may have persisted this event first.
+                // Still add it to this process's in-memory view, but never
+                // append a duplicate JSONL row.
+                if !was_already_known {
+                    self.push_entry_to_memory(entry);
+                }
                 return Ok(());
             }
         }
 
-        self.total_text_bytes = self.total_text_bytes.saturating_add(entry.text.len());
-        if let Some(previous) = self.entries.last_mut().filter(|previous| {
-            can_merge_stream_delta(previous, &entry)
-        }) {
-            // Keep one live assistant bubble in memory while persisting every
-            // raw delta as its own append-only event for crash recovery.
-            previous.text.push_str(&entry.text);
-        } else {
-            self.entries.push(entry.clone());
-        }
+        self.push_entry_to_memory(entry.clone());
 
         // Never let a newer entry overtake an older entry whose disk append failed.
         if !self.pending.is_empty() {
@@ -226,7 +291,7 @@ impl Journal {
                 self.pending_event_ids.insert(event_id.clone());
             }
             self.pending.push(entry);
-            return self.save_pending();
+            return self.save_pending_locked();
         }
 
         match append_jsonl(&self.path, &entry) {
@@ -234,6 +299,7 @@ impl Journal {
                 if let Some(event_id) = entry.event_id.as_ref() {
                     self.persisted_event_ids.insert(event_id.clone());
                 }
+                self.journal_scan_offset = fs::metadata(&self.path)?.len();
                 Ok(())
             }
             Err(error) => {
@@ -246,6 +312,48 @@ impl Journal {
         }
     }
 
+    fn push_entry_to_memory(&mut self, entry: Entry) {
+        self.total_text_bytes = self.total_text_bytes.saturating_add(entry.text.len());
+        if let Some(previous) = self.entries.last_mut().filter(|previous| {
+            can_merge_stream_delta(previous, &entry)
+        }) {
+            // Keep one live assistant bubble in memory while persisting every
+            // raw delta as its own append-only event for crash recovery.
+            previous.text.push_str(&entry.text);
+        } else {
+            self.entries.push(entry);
+        }
+    }
+
+    /// Refresh event IDs appended by other STREENOTE processes since our last
+    /// file offset. The caller holds the inter-process journal lock.
+    fn refresh_external_event_ids(&mut self) -> io::Result<()> {
+        let metadata = fs::metadata(&self.path)?;
+        if metadata.len() < self.journal_scan_offset {
+            self.journal_scan_offset = 0;
+            self.persisted_event_ids.clear();
+        }
+        let file = File::open(&self.path)?;
+        let mut reader = BufReader::new(file);
+        reader.seek(SeekFrom::Start(self.journal_scan_offset))?;
+        let mut line = Vec::new();
+        let mut scanned = 0u64;
+        loop {
+            line.clear();
+            let count = reader.read_until(b'\\n', &mut line)?;
+            if count == 0 || !line.ends_with(b"\\n") {
+                break;
+            }
+            if let Ok(entry) = serde_json::from_slice::<Entry>(&line) {
+                if let Some(event_id) = entry.event_id {
+                    self.persisted_event_ids.insert(event_id);
+                }
+            }
+            scanned = scanned.saturating_add(count as u64);
+        }
+        self.journal_scan_offset = self.journal_scan_offset.saturating_add(scanned);
+        Ok(())
+    }
     /// Batch append is used for PTY output so high-volume commands do not force
     /// one fsync per output line. Entries enter the cache before any disk I/O.
     pub fn append_batch(&mut self, entries: Vec<Entry>) -> io::Result<()> {
@@ -259,6 +367,9 @@ impl Journal {
         if entries.is_empty() {
             return Ok(());
         }
+
+        let _journal_lock = JournalFileLock::acquire(&self.path)?;
+        self.refresh_external_event_ids()?;
 
         for entry in &entries {
             self.total_text_bytes = self.total_text_bytes.saturating_add(entry.text.len());
@@ -310,20 +421,28 @@ impl Journal {
         file.flush()?;
         file.sync_data()?;
         self.persisted_event_ids.extend(self.pending_event_ids.drain());
+        self.journal_scan_offset = fs::metadata(&self.path)?.len();
         Ok(())
     }
 
     pub fn save_pending(&mut self) -> io::Result<()> {
+        let _journal_lock = JournalFileLock::acquire(&self.path)?;
+        self.refresh_external_event_ids()?;
+        self.save_pending_locked()
+    }
+
+    fn save_pending_locked(&mut self) -> io::Result<()> {
         let mut file = OpenOptions::new().create(true).append(true).open(&self.path)?;
         if self.pending.is_empty() {
             file.sync_data()?;
             self.persisted_event_ids.extend(self.pending_event_ids.drain());
+            self.journal_scan_offset = fs::metadata(&self.path)?.len();
             return Ok(());
         }
 
         // If a previous write stopped halfway through a JSON line, terminate that
         // damaged fragment before retrying. Blank lines are ignored by the loader.
-        file.write_all(b"\n")?;
+        file.write_all(b"\\n")?;
         let pending = std::mem::take(&mut self.pending);
         for (index, entry) in pending.iter().enumerate() {
             let mut bytes = match serde_json::to_vec(entry) {
@@ -333,7 +452,7 @@ impl Journal {
                     return Err(io::Error::other(error));
                 }
             };
-            bytes.push(b'\n');
+            bytes.push(b'\\n');
             if let Err(error) = file.write_all(&bytes) {
                 self.pending.extend_from_slice(&pending[index..]);
                 return Err(error);
@@ -342,9 +461,9 @@ impl Journal {
         file.flush()?;
         file.sync_data()?;
         self.persisted_event_ids.extend(self.pending_event_ids.drain());
+        self.journal_scan_offset = fs::metadata(&self.path)?.len();
         Ok(())
     }
-
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
