@@ -140,6 +140,8 @@ pub struct ReviewBroadcast {
     pub model: String,
     pub platform: String,
     pub response_text: String,
+    pub phase: String,
+    pub decision: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,7 +163,15 @@ struct WireRequest {
     platform: String,
     #[serde(default)]
     observe_only: bool,
+    #[serde(default = "default_broadcast_phase")]
+    phase: String,
+    #[serde(default)]
+    decision: Option<String>,
     response_text: String,
+}
+
+fn default_broadcast_phase() -> String {
+    "pending".to_string()
 }
 
 #[derive(Debug, Serialize)]
@@ -598,7 +608,9 @@ fn handle_connection(
         || request.session_id.len() > 1024
         || request.model.len() > 1024
         || request.platform.len() > 128
-        || request.response_text.is_empty()
+        || request.phase.len() > 16
+        || request.decision.as_ref().is_some_and(|decision| decision.len() > 16)
+        || (!request.observe_only && request.response_text.is_empty())
         || request.response_text.len() > MAX_REVIEW_BYTES
     {
         return write_wire_response(
@@ -629,6 +641,8 @@ fn handle_connection(
             model: request.model.clone(),
             platform: request.platform.clone(),
             response_text: request.response_text.clone(),
+            phase: request.phase.clone(),
+            decision: request.decision.clone(),
         };
         if broadcast_sender.send(broadcast).is_err() {
             return write_wire_response(
