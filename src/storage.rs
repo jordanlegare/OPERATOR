@@ -235,6 +235,7 @@ impl Journal {
             }
         }
 
+        let journal_scan_offset = fs::metadata(&path)?.len();
         Ok(Self {
             path,
             entries,
@@ -243,7 +244,7 @@ impl Journal {
             pending: Vec::new(),
             persisted_event_ids,
             pending_event_ids: HashSet::new(),
-            journal_scan_offset: fs::metadata(&path)?.len(),
+            journal_scan_offset,
         })
     }
 
