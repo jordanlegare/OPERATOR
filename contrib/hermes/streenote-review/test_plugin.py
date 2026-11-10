@@ -60,9 +60,15 @@ class HermesReviewPluginTests(unittest.TestCase):
                         if not chunk:
                             raise AssertionError("plugin closed before sending request")
                         data.extend(chunk)
-                    requests.append(json.loads(bytes(data).split(b"\n", 1)[0]))
+                    request = json.loads(bytes(data).split(b"\n", 1)[0])
+                    requests.append(request)
+                    response = (
+                        {"version": 1, "decision": "observed"}
+                        if request.get("observe_only")
+                        else reply
+                    )
                     connection.sendall(
-                        json.dumps(reply, ensure_ascii=False).encode("utf-8") + b"\n"
+                        json.dumps(response, ensure_ascii=False).encode("utf-8") + b"\n"
                     )
             except socket.timeout:
                 pass
@@ -104,117 +110,94 @@ class HermesReviewPluginTests(unittest.TestCase):
         records = [json.loads(line) for line in self.diagnostic_path.read_text().splitlines()]
         self.assertEqual(records[-1]["event"], "PLUGIN_REGISTERED")
 
-    def test_pre_llm_capture_binds_each_hermes_session_to_its_originating_ssh_instance(self):
+    def test_response_is_broadcast_to_all_terminals_and_reviewed_by_one_enabled_terminal(self):
         registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
         registry.mkdir(mode=0o700, parents=True)
-        instance_ids = ["a1", "b2", "c3"]
+        instance_ids = ("a1", "b2", "c3")
         workers = []
-        server_error_lists = []
+        requests_by_instance = {}
+        errors_by_instance = {}
+
         for instance_id in instance_ids:
             socket_path = registry / f"{instance_id}.sock"
-            worker, _, listener_errors = self._serve(
-                {
-                    "version": 1,
-                    "decision": "replace",
-                    "response_text": f"routed:{instance_id}",
-                },
+            worker, requests, errors = self._serve(
+                {"version": 1, "decision": "approve"},
                 socket_path=socket_path,
             )
             workers.append(worker)
-            server_error_lists.append(listener_errors)
-            manifest_path = registry / f"{instance_id}.json"
-            manifest_path.write_text(json.dumps({
+            requests_by_instance[instance_id] = requests
+            errors_by_instance[instance_id] = errors
+            manifest = registry / f"{instance_id}.json"
+            manifest.write_text(json.dumps({
                 "version": 1,
                 "instance_id": instance_id,
                 "socket_path": str(socket_path),
-                "pid": os.getpid(),
+                "review_enabled": instance_id != "c3",
             }))
-            os.chmod(manifest_path, 0o600)
+            os.chmod(manifest, 0o600)
 
-        # This is the same helper called by the existing pre_llm_call capture
-        # hook in each STREENOTE-managed PTY.
-        session_a = "hermes-session-origin-a"
-        session_b = "hermes-session-origin-b"
-        CAPTURE.write_review_session_route(registry, session_a, "a1")
-        CAPTURE.write_review_session_route(registry, session_b, "c3")
-        # Concurrent turns for the same Hermes session must not let another
-        # SSH-launched STREENOTE process steal its live origin assignment.
-        CAPTURE.write_review_session_route(registry, session_a, "b2")
-
-        routes, directory = PLUGIN._load_review_routes()
-        self.assertEqual({route["instance_id"] for route in routes}, set(instance_ids))
-        self.assertEqual(
-            PLUGIN._select_review_route(session_a, routes, directory)["instance_id"],
-            "a1",
+        result = PLUGIN.review_response(
+            "One response shared with every connected SSH terminal.",
+            session_id="shared-session-1",
+            model="qwen3.5:latest",
+            platform="api_server",
         )
         self.assertEqual(
-            PLUGIN._select_review_route(session_b, routes, directory)["instance_id"],
-            "c3",
+            result,
+            "One response shared with every connected SSH terminal.",
         )
 
-        self.assertEqual(
-            PLUGIN.review_response(
-                "Unreviewed response A",
-                session_id=session_a,
-                model="qwen3.5:latest",
-                platform="api_server",
-            ),
-            "routed:a1",
-        )
-        self.assertEqual(
-            PLUGIN.review_response(
-                "Unreviewed response B",
-                session_id=session_b,
-                model="qwen3.5:latest",
-                platform="api_server",
-            ),
-            "routed:c3",
-        )
-
-        # Existing session affinity is stable even after the active set changes.
-        self.assertEqual(
-            PLUGIN._select_review_route(session_a, routes, directory)["instance_id"],
-            "a1",
-        )
         for worker in workers:
             worker.join(timeout=5)
             self.assertFalse(worker.is_alive())
-        self.assertFalse(any(server_error_lists))
 
-    def test_multiple_review_sessions_without_origin_affinity_are_not_misrouted(self):
+        self.assertFalse(any(error for errors in errors_by_instance.values() for error in errors))
+        delivered = {
+            instance_id: requests[0]
+            for instance_id, requests in requests_by_instance.items()
+        }
+        self.assertEqual(set(delivered), set(instance_ids))
+        active = [
+            instance_id for instance_id, request in delivered.items()
+            if not request.get("observe_only", False)
+        ]
+        observers = [
+            instance_id for instance_id, request in delivered.items()
+            if request.get("observe_only", False)
+        ]
+        self.assertEqual(len(active), 1)
+        self.assertIn(active[0], ("a1", "b2"))
+        self.assertEqual(set(observers), set(instance_ids) - set(active))
+        self.assertEqual(delivered["c3"]["observe_only"], True)
+
+    def test_review_pool_round_robins_and_skips_a_terminal_with_an_active_lease(self):
         registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
         registry.mkdir(mode=0o700, parents=True)
-        sockets = []
-        for instance_id in ("a1", "b2"):
-            socket_path = registry / f"{instance_id}.sock"
-            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            listener.bind(str(socket_path))
-            os.chmod(socket_path, 0o600)
-            listener.listen(1)
-            sockets.append(listener)
-            manifest_path = registry / f"{instance_id}.json"
-            manifest_path.write_text(json.dumps({
-                "version": 1,
-                "instance_id": instance_id,
-                "socket_path": str(socket_path),
-            }))
-            os.chmod(manifest_path, 0o600)
-        try:
-            # Ambiguous routing must fail closed even when the optional global
-            # STREENOTE_HERMES_REVIEW_REQUIRED switch is unset.
-            with patch.dict(os.environ, {}, clear=False):
-                os.environ.pop("STREENOTE_HERMES_REVIEW_REQUIRED", None)
-                with self.assertRaisesRegex(RuntimeError, "response was withheld"):
-                    PLUGIN.review_response(
-                        "Unreviewed response",
-                        session_id="session-without-origin-affinity",
-                        model="qwen3.5:latest",
-                        platform="api_server",
-                    )
-        finally:
-            for listener in sockets:
-                listener.close()
+        routes = [
+            {"instance_id": name, "review_enabled": True}
+            for name in ("a1", "b2", "c3")
+        ]
 
+        first, first_fd = PLUGIN._acquire_review_slot(routes, registry, timeout=0.2)
+        second, second_fd = PLUGIN._acquire_review_slot(routes, registry, timeout=0.2)
+        third, third_fd = PLUGIN._acquire_review_slot(routes, registry, timeout=0.2)
+        try:
+            self.assertEqual(
+                {first["instance_id"], second["instance_id"], third["instance_id"]},
+                {"a1", "b2", "c3"},
+            )
+            fourth, fourth_fd = None, None
+            PLUGIN._release_review_slot(second_fd)
+            second_fd = -1
+            fourth, fourth_fd = PLUGIN._acquire_review_slot(routes, registry, timeout=0.2)
+            self.assertEqual(fourth["instance_id"], "b2")
+            PLUGIN._release_review_slot(fourth_fd)
+            fourth_fd = -1
+        finally:
+            PLUGIN._release_review_slot(first_fd)
+            PLUGIN._release_review_slot(third_fd)
+            if second_fd >= 0:
+                PLUGIN._release_review_slot(second_fd)
 
     def test_runtime_socket_path_is_shared_by_processes_with_different_home_values(self):
         with tempfile.TemporaryDirectory(prefix="streenote-runtime-") as runtime:
