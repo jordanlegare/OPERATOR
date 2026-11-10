@@ -474,6 +474,27 @@ def _render_prompt_text(value: Any) -> str | None:
     return None
 
 
+
+def _last_user_message_from_history(history: Any) -> Any:
+    """Fallback for hook implementations that omit user_message."""
+    if isinstance(history, dict):
+        history = history.get("messages")
+    if not isinstance(history, list):
+        return None
+    for message in reversed(history):
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or message.get("type") or "").strip().lower()
+        if role not in {"user", "human"}:
+            continue
+        content = message.get("content")
+        if content is None:
+            content = message.get("text")
+        if content is not None:
+            return content
+    return None
+
+
 def _default_prompt_inbox() -> Path:
     explicit = os.environ.get("STREENOTE_HERMES_INBOX")
     if explicit and Path(explicit).expanduser().is_absolute():
@@ -516,32 +537,61 @@ def _write_prompt_event(inbox: Path, event: dict[str, Any]) -> None:
 
 
 def capture_user_prompt(
+    source: str = "pre_llm_call",
     session_id: str = "",
     user_message: Any = None,
     turn_id: str | None = None,
     **kwargs: Any,
 ) -> None:
-    """Fan the original pre-LLM user message to every connected STREENOTE inbox.
+    """Fan the original user message out through a native plugin observer.
 
-    This runs inside the already-loaded review plugin, not as a shell-hook
-    subprocess. That avoids losing the first prompt to gateway hook startup or
-    environment inheritance differences. The shell capture hook remains a
-    redundant path and continues to stage history snapshots and other events.
+    Hermes dispatches plugin callbacks as keyword arguments. Keep this callback
+    fail-open and content-free in its diagnostics; multiple hook sources use
+    the same stable event ID so a prompt can be recovered when one hook path is
+    absent without creating duplicate journal rows.
     """
+    session_id = str(session_id or "")
+    turn_id = str(turn_id) if turn_id is not None else None
+    history = kwargs.get("conversation_history")
+    is_first_turn = kwargs.get("is_first_turn")
     try:
         rendered = _render_prompt_text(user_message)
+        message_source = "user_message"
         if not isinstance(rendered, str) or not rendered.strip():
-            return
-        if len(rendered.encode("utf-8")) > MAX_PROMPT_BYTES:
+            fallback_message = _last_user_message_from_history(history)
+            rendered = _render_prompt_text(fallback_message)
+            message_source = "conversation_history"
+
+        _log_event(
+            "PROMPT_HOOK_INVOKED",
+            hook=source,
+            user_message_type=type(user_message).__name__,
+            history_type=type(history).__name__,
+            is_first_turn=bool(is_first_turn),
+            has_turn_id=bool(turn_id),
+            session_hash=hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16],
+            captured=bool(isinstance(rendered, str) and rendered.strip()),
+            message_source=message_source if isinstance(rendered, str) and rendered.strip() else "none",
+        )
+
+        if not isinstance(rendered, str) or not rendered.strip():
             _log_event(
                 "PROMPT_CAPTURE_SKIPPED",
+                hook=source,
+                reason="no_user_message_in_hook_payload",
+                session_hash=hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16],
+            )
+            return
+        encoded = rendered.encode("utf-8")
+        if len(encoded) > MAX_PROMPT_BYTES:
+            _log_event(
+                "PROMPT_CAPTURE_SKIPPED",
+                hook=source,
                 reason="prompt_exceeds_size_limit",
-                prompt_bytes=len(rendered.encode("utf-8")),
+                prompt_bytes=len(encoded),
             )
             return
 
-        session_id = str(session_id or "")
-        turn_id = str(turn_id) if turn_id is not None else None
         conversation_id = kwargs.get("conversation_id")
         if conversation_id is not None:
             conversation_id = str(conversation_id)
@@ -550,9 +600,13 @@ def capture_user_prompt(
             identity = f"pre_llm_call\0{session_id}\0{turn_id}"
             event_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         else:
-            # Hermes normally supplies turn_id. Preserve capture for older
-            # hook payloads where it is absent; the observer must never block.
-            event_id = uuid.uuid4().hex
+            # Use a per-session/content fingerprint when an older hook payload
+            # omits turn_id. This de-duplicates multiple observers for the same
+            # prompt without persisting the message text in diagnostics.
+            fingerprint = hashlib.sha256(encoded).hexdigest()
+            event_id = hashlib.sha256(
+                f"prompt\0{session_id}\0{fingerprint}".encode("utf-8")
+            ).hexdigest()
 
         event = {
             "version": 1,
@@ -580,14 +634,13 @@ def capture_user_prompt(
             normalized = recipient.expanduser().resolve(strict=False)
             recipients.setdefault(normalized, normalized)
 
-        # A direct CLI invocation may have an inbox configured even when the
-        # legacy single socket is not represented in the instance registry.
         if not recipients and fallback.is_absolute():
             recipients[fallback.resolve(strict=False)] = fallback.resolve(strict=False)
 
         if not recipients:
             _log_event(
                 "PROMPT_CAPTURE_SKIPPED",
+                hook=source,
                 reason="no_live_terminal_inboxes",
                 session_hash=hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16],
             )
@@ -604,16 +657,37 @@ def capture_user_prompt(
 
         _log_event(
             "PROMPT_FANOUT",
+            hook=source,
             event_id=event_id,
             delivered=delivered,
             recipients=len(recipients),
             session_hash=hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16],
             turn_id=turn_id or "",
+            message_source=message_source,
+            registry=str(registry_dir),
+            instance_ids=[route["instance_id"] for route in routes],
             failures=failures,
         )
     except Exception as error:
         # Prompt capture is observational only and must never alter model flow.
-        _log_event("PROMPT_CAPTURE_FAILED", error=str(error)[:300])
+        _log_event(
+            "PROMPT_CAPTURE_FAILED",
+            hook=source,
+            error=str(error)[:300],
+            session_hash=hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16],
+        )
+
+
+def capture_pre_llm_prompt(**kwargs: Any) -> None:
+    capture_user_prompt(source="pre_llm_call", **kwargs)
+
+
+def capture_pre_api_prompt(**kwargs: Any) -> None:
+    capture_user_prompt(source="pre_api_request", **kwargs)
+
+
+def capture_post_llm_prompt(**kwargs: Any) -> None:
+    capture_user_prompt(source="post_llm_call", **kwargs)
 
 
 def review_response(
@@ -860,14 +934,22 @@ def review_response(
 
 
 def register(ctx: Any) -> None:
-    # Capture the user's original input inside the already-loaded plugin so
-    # the first pre-LLM prompt is not dependent on a detached shell-hook process.
-    ctx.register_hook("pre_llm_call", capture_user_prompt)
+    # The pre-LLM hook is the immediate path. The per-provider observer and
+    # successful-turn observer are independent fallbacks for gateway/provider
+    # paths where the pre-LLM payload is incomplete or not dispatched.
+    ctx.register_hook("pre_llm_call", capture_pre_llm_prompt)
+    ctx.register_hook("pre_api_request", capture_pre_api_prompt)
+    ctx.register_hook("post_llm_call", capture_post_llm_prompt)
     # hold_stream is essential: without it, Hermes could display the original
     # draft before STREENOTE has had a chance to review or replace it.
     ctx.register_hook("transform_llm_output", review_response, hold_stream=True)
     _log_event(
         "PLUGIN_REGISTERED",
-        hooks=["pre_llm_call", "transform_llm_output"],
+        hooks=[
+            "pre_llm_call",
+            "pre_api_request",
+            "post_llm_call",
+            "transform_llm_output",
+        ],
         hold_stream=True,
     )
