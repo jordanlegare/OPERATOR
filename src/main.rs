@@ -1192,7 +1192,6 @@ fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         app.expire_hermes_review_if_needed();
-        app.sync_hermes_review_setting();
         review_server.set_enabled(app.review_hermes_responses);
         drain_review_broadcasts(app, review_server);
         if app.pending_review.is_none() {
@@ -1376,7 +1375,6 @@ fn run_terminal_workspace_loop(
 
     loop {
         app.expire_hermes_review_if_needed();
-        app.sync_hermes_review_setting();
         review_server.set_enabled(app.review_hermes_responses);
         drain_review_broadcasts(app, review_server);
         if app.pending_review.is_none() {
@@ -1616,7 +1614,6 @@ fn run_terminal_workspace_loop(
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         app.expire_hermes_review_if_needed();
-        app.sync_hermes_review_setting();
         review_server.set_enabled(app.review_hermes_responses);
         if app.pending_review.is_none() {
             if let Some(request) = review_server.try_recv() {
