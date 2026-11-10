@@ -859,10 +859,16 @@ mod tests {
         assert!(first_registration.exists());
         assert!(second_registration.exists());
         first.set_enabled(true);
+        second.set_enabled(true);
+        first.set_enabled(false);
         let first_manifest: serde_json::Value = serde_json::from_slice(
-            &fs::read(&first_registration).expect("read registration manifest"),
-        ).expect("parse registration manifest");
-        assert_eq!(first_manifest["review_enabled"], true);
+            &fs::read(&first_registration).expect("read first registration manifest"),
+        ).expect("parse first registration manifest");
+        let second_manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(&second_registration).expect("read second registration manifest"),
+        ).expect("parse second registration manifest");
+        assert_eq!(first_manifest["review_enabled"], false);
+        assert_eq!(second_manifest["review_enabled"], true);
         assert_eq!(
             fs::read_dir(&root).expect("read session registry").count(),
             4

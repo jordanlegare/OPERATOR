@@ -132,8 +132,6 @@ pub struct App {
     pub conversation_focus_entry: Option<usize>,
     /// Whether final Hermes responses must be approved before client delivery.
     pub review_hermes_responses: bool,
-    /// Throttle disk checks while synchronizing the per-user review preference.
-    last_review_settings_check: Instant,
     /// Active final-response review; its channel is the only release path to Hermes.
     pub pending_review: Option<ReviewRequest>,
     /// Editable copy of the held answer and its UTF-8 byte cursor.
@@ -211,8 +209,9 @@ impl App {
             conversation_viewport_height: 1,
             conversation_follow_tail: true,
             conversation_focus_entry: None,
-            review_hermes_responses: settings.review_hermes_responses,
-            last_review_settings_check: Instant::now(),
+            // Every new terminal joins the reviewer pool. Operators can opt
+            // this instance out temporarily with /review off.
+            review_hermes_responses: true,
             pending_review: None,
             review_text: String::new(),
             review_cursor: 0,
@@ -1203,7 +1202,6 @@ impl App {
             wrap_transcript: self.wrap_transcript,
             show_banner: self.show_banner,
             show_canada_watermark: self.show_canada_watermark,
-            review_hermes_responses: self.review_hermes_responses,
         }
         .save()
     }
@@ -1279,44 +1277,23 @@ impl App {
         };
     }
 
-    /// Synchronize the per-user review preference written by another SSH-launched
-    /// STREENOTE process. A single /review on therefore makes every live
-    /// terminal eligible for the shared reviewer pool.
-    pub fn sync_hermes_review_setting(&mut self) -> bool {
-        if self.last_review_settings_check.elapsed() < Duration::from_millis(250) {
-            return false;
-        }
-        self.last_review_settings_check = Instant::now();
-        let persisted = Settings::load().review_hermes_responses;
-        if persisted == self.review_hermes_responses {
-            return false;
-        }
-        self.review_hermes_responses = persisted;
-        self.status = format!(
-            "Shared Hermes response review is now {} in all connected STREENOTE terminals.",
-            if persisted { "ON" } else { "OFF" }
-        );
-        true
-    }
-
+    /// Set reviewer availability for this STREENOTE terminal only. The main
+    /// loop publishes this value to this instance's private registry manifest;
+    /// it must never be persisted as a shared user preference.
     pub fn set_hermes_review_enabled(&mut self, enabled: bool) {
         if self.review_hermes_responses == enabled {
             self.status = format!(
-                "Hermes response review is already {}.",
+                "Hermes reviewer availability is already {} for this terminal.",
                 if enabled { "ON" } else { "OFF" }
             );
             return;
         }
+
         self.review_hermes_responses = enabled;
-        self.status = match self.persist_settings() {
-            Ok(()) => format!(
-                "Hermes response review {} (saved). Final answers will {}.",
-                if enabled { "ON" } else { "OFF" },
-                if enabled { "wait for your approval before delivery" } else { "pass through without review" }
-            ),
-            Err(error) => format!(
-                "Hermes response review changed for this session but settings could not be saved: {error}"
-            ),
+        self.status = if enabled {
+            "This terminal has rejoined the active Hermes reviewer pool.".to_string()
+        } else {
+            "This terminal has left the active Hermes reviewer pool; other reviewers remain available.".to_string()
         };
     }
 
@@ -1611,7 +1588,7 @@ impl App {
             "/review" => match argument.to_ascii_lowercase().as_str() {
                 "" | "status" => {
                     self.status = format!(
-                        "Hermes review {} · {}",
+                        "Hermes reviewer availability (this terminal): {} · {}",
                         if self.review_hermes_responses { "ON" } else { "OFF" },
                         diagnostics_summary()
                     );
@@ -2130,6 +2107,22 @@ mod tests {
         );
         assert!(app.pending_review.is_none());
         assert!(app.review_text.is_empty());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn reviewer_availability_can_be_disabled_and_reenabled_for_this_terminal() {
+        let (mut app, path) = test_app();
+        assert!(app.review_hermes_responses, "new terminals join the reviewer pool");
+
+        app.set_hermes_review_enabled(false);
+        assert!(!app.review_hermes_responses);
+        assert!(app.status.contains("this terminal"));
+
+        app.set_hermes_review_enabled(true);
+        assert!(app.review_hermes_responses);
+        assert!(app.status.contains("rejoined"));
 
         let _ = fs::remove_file(path);
     }
