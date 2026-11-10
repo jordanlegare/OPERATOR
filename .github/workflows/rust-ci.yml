@@ -101,6 +101,6 @@ jobs:
       - name: Test original Hermes prompt fan-out
         run: python3 -m unittest discover -s contrib/hermes -p 'test_*.py'
       - name: Test journal storage and cross-terminal synchronization
-        run: cargo test storage::
+        run: "cargo test storage::"
       - name: Test Restricted Access splash layouts
         run: cargo test access_splash_tests
