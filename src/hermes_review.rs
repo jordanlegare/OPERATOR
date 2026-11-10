@@ -923,31 +923,58 @@ mod tests {
 
         let client_socket = socket.clone();
         let client = thread::spawn(move || {
-            let mut stream = UnixStream::connect(client_socket).expect("connect observer");
-            let request = json!({
+            let mut stream = UnixStream::connect(&client_socket).expect("connect observer");
+            let pending = json!({
                 "version": 1,
                 "request_id": "broadcast-001",
                 "session_id": "session-shared",
                 "model": "qwen3.5:latest",
                 "platform": "api_server",
                 "observe_only": true,
-                "response_text": "Visible in every connected terminal",
+                "phase": "pending",
+                "response_text": "Original draft",
             });
-            writeln!(stream, "{request}").expect("send observer broadcast");
+            writeln!(stream, "{pending}").expect("send pending broadcast");
             let mut response = String::new();
             BufReader::new(stream)
                 .read_line(&mut response)
-                .expect("read observer acknowledgment");
+                .expect("read pending acknowledgment");
             let response: serde_json::Value =
-                serde_json::from_str(&response).expect("decode observer acknowledgment");
+                serde_json::from_str(&response).expect("decode pending acknowledgment");
+            assert_eq!(response["decision"], "observed");
+
+            let mut stream = UnixStream::connect(client_socket).expect("connect result observer");
+            let result = json!({
+                "version": 1,
+                "request_id": "broadcast-001",
+                "session_id": "session-shared",
+                "model": "qwen3.5:latest",
+                "platform": "api_server",
+                "observe_only": true,
+                "phase": "result",
+                "decision": "replace",
+                "response_text": "Edited final answer",
+            });
+            writeln!(stream, "{result}").expect("send final-result broadcast");
+            let mut response = String::new();
+            BufReader::new(stream)
+                .read_line(&mut response)
+                .expect("read result acknowledgment");
+            let response: serde_json::Value =
+                serde_json::from_str(&response).expect("decode result acknowledgment");
             assert_eq!(response["decision"], "observed");
         });
 
         client.join().expect("observer client completes");
-        let broadcast = server.try_recv_broadcast().expect("TUI receives broadcast copy");
-        assert_eq!(broadcast.request_id, "broadcast-001");
-        assert_eq!(broadcast.session_id, "session-shared");
-        assert_eq!(broadcast.response_text, "Visible in every connected terminal");
+        let pending = server.try_recv_broadcast().expect("TUI receives pending copy");
+        assert_eq!(pending.request_id, "broadcast-001");
+        assert_eq!(pending.phase, "pending");
+        assert_eq!(pending.response_text, "Original draft");
+        let result = server.try_recv_broadcast().expect("TUI receives final result copy");
+        assert_eq!(result.request_id, "broadcast-001");
+        assert_eq!(result.phase, "result");
+        assert_eq!(result.decision.as_deref(), Some("replace"));
+        assert_eq!(result.response_text, "Edited final answer");
         assert!(server.try_recv().is_none(), "observer copy must not open an editable review");
         drop(server);
         let _ = fs::remove_dir_all(root);
