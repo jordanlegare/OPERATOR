@@ -429,6 +429,14 @@ impl Drop for HermesReviewServer {
         }
         if let Some(registration_path) = &self.registration_path {
             let _ = fs::remove_file(registration_path);
+            if let (Some(instance_id), Some(registry_dir)) =
+                (self.instance_id.as_deref(), self.session_registry_dir())
+            {
+                // Remove only this TUI's inbox. Other live SSH instances keep
+                // their independent copies of every queued hook event.
+                let inbox = registry_dir.join("inboxes").join(instance_id);
+                let _ = fs::remove_dir_all(inbox);
+            }
         }
         let _ = fs::remove_file(&self.socket_path);
     }
