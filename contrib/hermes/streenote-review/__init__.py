@@ -470,11 +470,11 @@ def review_response(
     excluded: set[str] = set()
     reply: dict[str, Any] | None = None
     selected_route: dict[str, Any] | None = None
+    reviewers_were_configured = any(
+        route.get("review_enabled", True) for route in routes
+    )
     max_attempts = max(1, len(routes))
     for _ in range(max_attempts):
-        reviewers_were_configured = any(
-            route.get("review_enabled", True) for route in routes
-        )
         try:
             selected_route, slot_fd = _acquire_review_slot(
                 routes, registry_dir, excluded=excluded
