@@ -1164,6 +1164,21 @@ fn drain_review_broadcasts(app: &mut App, review_server: &mut HermesReviewServer
     }
 }
 
+const REVIEWER_COUNT_REFRESH_INTERVAL: Duration = Duration::from_millis(300);
+
+/// Refresh from the shared per-session registry so all SSH terminals display
+/// the same count shortly after any operator runs /review on or /review off.
+fn refresh_active_reviewer_count(
+    app: &mut App,
+    review_server: &HermesReviewServer,
+    last_refresh: &mut Instant,
+) {
+    if last_refresh.elapsed() >= REVIEWER_COUNT_REFRESH_INTERVAL {
+        app.active_reviewer_count = review_server.active_reviewer_count();
+        *last_refresh = Instant::now();
+    }
+}
+
 /// Import Hermes events while keeping a highlighted live-tail row attached
 /// to the newest imported record.
 fn drain_hermes_events(
@@ -1190,9 +1205,13 @@ fn run(
     hermes_bridge: &mut HermesBridge,
     review_server: &mut HermesReviewServer,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    app.active_reviewer_count = review_server.active_reviewer_count();
+    let mut last_reviewer_count_refresh = Instant::now();
+
     loop {
         app.expire_hermes_review_if_needed();
         review_server.set_enabled(app.review_hermes_responses);
+        refresh_active_reviewer_count(app, review_server, &mut last_reviewer_count_refresh);
         drain_review_broadcasts(app, review_server);
         if app.pending_review.is_none() {
             if let Some(request) = review_server.try_recv() {
