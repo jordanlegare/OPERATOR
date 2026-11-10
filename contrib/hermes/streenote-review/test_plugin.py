@@ -14,6 +14,11 @@ SPEC = importlib.util.spec_from_file_location("streenote_review_plugin", PLUGIN_
 PLUGIN = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PLUGIN)
 
+CAPTURE_PATH = PLUGIN_PATH.parent.parent / "streenote-capture.py"
+CAPTURE_SPEC = importlib.util.spec_from_file_location("streenote_capture_plugin", CAPTURE_PATH)
+CAPTURE = importlib.util.module_from_spec(CAPTURE_SPEC)
+CAPTURE_SPEC.loader.exec_module(CAPTURE)
+
 
 class HermesReviewPluginTests(unittest.TestCase):
     def setUp(self):
@@ -99,7 +104,7 @@ class HermesReviewPluginTests(unittest.TestCase):
         records = [json.loads(line) for line in self.diagnostic_path.read_text().splitlines()]
         self.assertEqual(records[-1]["event"], "PLUGIN_REGISTERED")
 
-    def test_review_sessions_are_stickily_distributed_across_unique_sockets(self):
+    def test_pre_llm_capture_binds_each_hermes_session_to_its_originating_ssh_instance(self):
         registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
         registry.mkdir(mode=0o700, parents=True)
         instance_ids = ["a1", "b2", "c3"]
@@ -117,49 +122,63 @@ class HermesReviewPluginTests(unittest.TestCase):
             )
             workers.append(worker)
             server_error_lists.append(listener_errors)
-            manifest = {
+            manifest_path = registry / f"{instance_id}.json"
+            manifest_path.write_text(json.dumps({
                 "version": 1,
                 "instance_id": instance_id,
                 "socket_path": str(socket_path),
                 "pid": os.getpid(),
-            }
-            manifest_path = registry / f"{instance_id}.json"
-            manifest_path.write_text(json.dumps(manifest))
+            }))
             os.chmod(manifest_path, 0o600)
+
+        # This is the same helper called by the existing pre_llm_call capture
+        # hook in each STREENOTE-managed PTY.
+        session_a = "hermes-session-origin-a"
+        session_b = "hermes-session-origin-b"
+        CAPTURE.write_review_session_route(registry, session_a, "a1")
+        CAPTURE.write_review_session_route(registry, session_b, "c3")
 
         routes, directory = PLUGIN._load_review_routes()
         self.assertEqual({route["instance_id"] for route in routes}, set(instance_ids))
+        self.assertEqual(
+            PLUGIN._select_review_route(session_a, routes, directory)["instance_id"],
+            "a1",
+        )
+        self.assertEqual(
+            PLUGIN._select_review_route(session_b, routes, directory)["instance_id"],
+            "c3",
+        )
 
-        sessions = {}
-        for index in range(500):
-            session_id = f"hermes-session-{index}"
-            selected = PLUGIN._select_review_route(session_id, routes, directory)
-            sessions.setdefault(selected["instance_id"], session_id)
-            if len(sessions) >= 2:
-                break
-        self.assertGreaterEqual(len(sessions), 2)
+        self.assertEqual(
+            PLUGIN.review_response(
+                "Unreviewed response A",
+                session_id=session_a,
+                model="qwen3.5:latest",
+                platform="api_server",
+            ),
+            "routed:a1",
+        )
+        self.assertEqual(
+            PLUGIN.review_response(
+                "Unreviewed response B",
+                session_id=session_b,
+                model="qwen3.5:latest",
+                platform="api_server",
+            ),
+            "routed:c3",
+        )
 
-        for instance_id, session_id in list(sessions.items())[:2]:
-            self.assertEqual(
-                PLUGIN._select_review_route(session_id, routes, directory)["instance_id"],
-                instance_id,
-            )
-            self.assertEqual(
-                PLUGIN.review_response(
-                    "Unreviewed response",
-                    session_id=session_id,
-                    model="qwen3.5:latest",
-                    platform="api_server",
-                ),
-                f"routed:{instance_id}",
-            )
-
+        # Existing session affinity is stable even after the active set changes.
+        self.assertEqual(
+            PLUGIN._select_review_route(session_a, routes, directory)["instance_id"],
+            "a1",
+        )
         for worker in workers:
             worker.join(timeout=5)
             self.assertFalse(worker.is_alive())
         self.assertFalse(any(server_error_lists))
 
-    def test_multiple_review_sessions_require_hermes_session_id(self):
+    def test_multiple_review_sessions_without_origin_affinity_are_not_misrouted(self):
         registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
         registry.mkdir(mode=0o700, parents=True)
         sockets = []
@@ -179,16 +198,17 @@ class HermesReviewPluginTests(unittest.TestCase):
             os.chmod(manifest_path, 0o600)
         try:
             with patch.dict(os.environ, {"STREENOTE_HERMES_REVIEW_REQUIRED": "1"}):
-                with self.assertRaisesRegex(RuntimeError, "multiple STREENOTE review sessions"):
+                with self.assertRaisesRegex(RuntimeError, "No STREENOTE SSH-session affinity"):
                     PLUGIN.review_response(
                         "Unreviewed response",
-                        session_id="",
+                        session_id="session-without-origin-affinity",
                         model="qwen3.5:latest",
                         platform="api_server",
                     )
         finally:
             for listener in sockets:
                 listener.close()
+
 
     def test_runtime_socket_path_is_shared_by_processes_with_different_home_values(self):
         with tempfile.TemporaryDirectory(prefix="streenote-runtime-") as runtime:

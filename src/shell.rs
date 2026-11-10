@@ -67,6 +67,17 @@ impl ShellSession {
             crate::hermes_bridge::HERMES_INBOX_ENV,
             crate::hermes_bridge::default_inbox_path(),
         );
+        // Bind Hermes' pre_llm_call capture events to this exact SSH-launched
+        // STREENOTE instance. The shared gateway uses that session association
+        // to return final answers to the originating terminal.
+        for variable in [
+            "STREENOTE_HERMES_REVIEW_INSTANCE_ID",
+            "STREENOTE_HERMES_REVIEW_SESSION_DIR",
+        ] {
+            if let Some(value) = env::var_os(variable) {
+                command.env(variable, value);
+            }
+        }
         // Keep subprocesses and shell startup files pointed at the real shell,
         // not at STREENOTE when it is the account's configured login shell.
         command.env("SHELL", &shell);

@@ -7,6 +7,7 @@ emits a Hermes hook-protocol directive on stdout.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -37,6 +38,70 @@ SECRET_FLAG = re.compile(
 def event_value(payload: dict, extra: dict, key: str):
     value = extra.get(key)
     return payload.get(key) if value is None else value
+
+
+def write_review_session_route(
+    registry_dir: str | Path, session_id: str, instance_id: str
+) -> Path:
+    """Bind a Hermes session to the STREENOTE SSH instance that submitted it.
+
+    The file contains only a SHA-256 session digest and the non-secret instance
+    ID. It is atomically replaced and protected by a per-session advisory lock.
+    """
+    if not isinstance(session_id, str) or not session_id or len(session_id) > 1024:
+        raise ValueError("invalid Hermes session_id for review routing")
+    if not isinstance(instance_id, str) or not re.fullmatch(r"[a-f0-9-]{1,64}", instance_id):
+        raise ValueError("invalid STREENOTE review instance ID")
+    registry = Path(registry_dir).expanduser()
+    if not registry.is_absolute():
+        raise ValueError("STREENOTE review registry path must be absolute")
+
+    routes = registry / "routes"
+    routes.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        os.chmod(registry, 0o700)
+        os.chmod(routes, 0o700)
+    except OSError:
+        pass
+
+    registry_stat = registry.stat()
+    if registry_stat.st_uid != os.getuid() or (registry_stat.st_mode & 0o077):
+        raise PermissionError("STREENOTE review registry is not private to this Unix user")
+
+    session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    assignment = routes / f"{session_hash}.json"
+    lock_path = routes / f"{session_hash}.lock"
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.fchmod(lock_fd, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        record = {
+            "version": 1,
+            "session_hash": session_hash,
+            "instance_id": instance_id,
+        }
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{session_hash}.", suffix=".tmp", dir=routes
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as temporary:
+                os.fchmod(temporary.fileno(), 0o600)
+                json.dump(record, temporary, separators=(",", ":"))
+                temporary.write("\\n")
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_name, assignment)
+            os.chmod(assignment, 0o600)
+        except Exception:
+            try:
+                os.unlink(temporary_name)
+            except OSError:
+                pass
+            raise
+        return assignment
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 def make_event_id(event_name: str, session_id: object, identity_id: object) -> str:
@@ -345,6 +410,24 @@ def main() -> int:
         extra = payload.get("extra")
         if not isinstance(extra, dict):
             extra = {}
+
+        # Register routing as soon as Hermes identifies the session, before
+        # inspecting or size-limiting prompt content. This is the origin link
+        # used later by transform_llm_output in the shared gateway process.
+        if event_name == "pre_llm_call":
+            route_session_id = event_value(payload, extra, "session_id")
+            instance_id = os.environ.get("STREENOTE_HERMES_REVIEW_INSTANCE_ID")
+            registry_dir = os.environ.get("STREENOTE_HERMES_REVIEW_SESSION_DIR")
+            if route_session_id and instance_id and registry_dir:
+                try:
+                    write_review_session_route(
+                        registry_dir, str(route_session_id), instance_id
+                    )
+                except Exception as exc:
+                    print(
+                        f"STREENOTE Hermes review route registration failed: {exc}",
+                        file=sys.stderr,
+                    )
 
         if event_name == "pre_llm_call":
             kind = "hermes_user"

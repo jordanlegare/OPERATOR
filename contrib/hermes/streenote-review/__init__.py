@@ -238,7 +238,7 @@ def _write_route_assignment(path: Path, session_hash: str, instance_id: str) -> 
 def _select_review_route(
     session_id: str, routes: list[dict[str, Any]], registry_dir: Path
 ) -> dict[str, Any]:
-    """Persist a sticky Hermes-session-to-TUI assignment across SSH sessions."""
+    """Use the source PTY's captured affinity; rebalance only after that TUI exits."""
     if not session_id:
         if len(routes) == 1:
             return routes[0]
@@ -262,19 +262,41 @@ def _select_review_route(
     try:
         os.fchmod(descriptor, 0o600)
         fcntl.flock(descriptor, fcntl.LOCK_EX)
+        assigned_id = None
         try:
-            assignment = json.loads(assignment_path.read_text(encoding="utf-8"))
-            assigned_id = assignment.get("instance_id")
-            if assignment.get("session_hash") == session_hash:
-                for route in routes:
-                    if route["instance_id"] == assigned_id:
-                        return route
+            metadata = assignment_path.lstat()
+            if (
+                stat.S_ISREG(metadata.st_mode)
+                and metadata.st_uid == os.getuid()
+                and not (stat.S_IMODE(metadata.st_mode) & 0o077)
+                and metadata.st_size <= 4096
+            ):
+                assignment = json.loads(assignment_path.read_text(encoding="utf-8"))
+                if assignment.get("version") == 1 and assignment.get("session_hash") == session_hash:
+                    assigned_id = assignment.get("instance_id")
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             pass
 
-        selected = _rendezvous_route(session_id, routes)
-        _write_route_assignment(assignment_path, session_hash, selected["instance_id"])
-        return selected
+        if assigned_id:
+            for route in routes:
+                if route["instance_id"] == assigned_id:
+                    return route
+            # The originating SSH session has exited. Reassign only now,
+            # using rendezvous hashing across the remaining live listeners.
+            selected = _rendezvous_route(session_id, routes)
+            _write_route_assignment(assignment_path, session_hash, selected["instance_id"])
+            return selected
+
+        if len(routes) == 1:
+            selected = routes[0]
+            _write_route_assignment(assignment_path, session_hash, selected["instance_id"])
+            return selected
+
+        raise RuntimeError(
+            "No STREENOTE SSH-session affinity was captured for this Hermes session. "
+            "The capture hook must run in the originating STREENOTE PTY; refusing to "
+            "route the answer to another SSH terminal."
+        )
     finally:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)

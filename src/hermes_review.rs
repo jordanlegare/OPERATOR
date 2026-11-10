@@ -82,11 +82,32 @@ pub fn diagnostics_summary() -> String {
         .and_then(|r| r.get("timestamp").and_then(|v| v.as_str())).unwrap_or("never");
     let callback = latest_diagnostic(&records, "CALLBACK_INVOKED")
         .and_then(|r| r.get("timestamp").and_then(|v| v.as_str())).unwrap_or("never");
-    let socket = latest_diagnostic(&records, "SOCKET_PATH_RESOLVED").map(|r| {
-        let resolved = r.get("socket_path").and_then(|v| v.as_str()).unwrap_or("unknown path");
-        let exists = r.get("exists").and_then(|v| v.as_bool()).unwrap_or(false);
-        format!("{} ({})", resolved, if exists { "exists" } else { "missing" })
-    }).unwrap_or_else(|| "not checked".to_string());
+    let socket = latest_diagnostic(&records, "SOCKET_ROUTES_RESOLVED")
+        .map(|record| {
+            let details = record.get("details");
+            let count = details
+                .and_then(|value| value.get("route_count"))
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let directory = details
+                .and_then(|value| value.get("registry_dir"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown registry");
+            format!("{count} active listener(s) in {directory}")
+        })
+        .or_else(|| latest_diagnostic(&records, "SOCKET_PATH_RESOLVED").map(|record| {
+            let resolved = record.get("socket_path").and_then(|v| v.as_str()).unwrap_or("unknown path");
+            let exists = record.get("exists").and_then(|v| v.as_bool()).unwrap_or(false);
+            format!("{} ({})", resolved, if exists { "exists" } else { "missing" })
+        }))
+        .unwrap_or_else(|| "not checked".to_string());
+    let route = latest_diagnostic(&records, "SESSION_ROUTE_SELECTED")
+        .map(|record| {
+            let session = record.get("session_hash").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let instance = record.get("instance_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+            format!("session {session} -> {instance}")
+        })
+        .unwrap_or_else(|| "none".to_string());
     let connected = latest_diagnostic(&records, "SOCKET_CONNECT_OK")
         .and_then(|r| r.get("timestamp").and_then(|v| v.as_str())).unwrap_or("never");
     let request = latest_diagnostic(&records, "REVIEW_REQUEST_RECEIVED")
@@ -98,7 +119,7 @@ pub fn diagnostics_summary() -> String {
     let error = latest_diagnostic(&records, "REVIEW_ERROR")
         .and_then(|r| r.get("error").or_else(|| r.get("details").and_then(|d| d.get("error"))))
         .and_then(|v| v.as_str()).unwrap_or("none");
-    format!("plugin registered: {plugin}; callback: {callback}; socket: {socket}; connected: {connected}; STREENOTE request: {request}; last decision: {decision}; last error: {error}; log: {}", path.display())
+    format!("plugin registered: {plugin}; callback: {callback}; listeners: {socket}; route: {route}; connected: {connected}; STREENOTE request: {request}; last decision: {decision}; last error: {error}; log: {}", path.display())
 }
 
 #[derive(Debug)]
@@ -309,6 +330,19 @@ impl HermesReviewServer {
             io::ErrorKind::Unsupported,
             "Hermes answer review currently requires a Unix-domain socket",
         ))
+    }
+
+    /// Unique identity for this STREENOTE process, used to bind Hermes
+    /// sessions originating in its PTY to this review listener.
+    pub fn instance_id(&self) -> Option<&str> {
+        self.instance_id.as_deref()
+    }
+
+    /// Registry directory shared with the Hermes capture hook and gateway.
+    pub fn session_registry_dir(&self) -> Option<PathBuf> {
+        self.registration_path
+            .as_ref()
+            .and_then(|path| path.parent().map(PathBuf::from))
     }
 
     pub fn set_enabled(&self, enabled: bool) {
