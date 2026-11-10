@@ -1377,6 +1377,7 @@ fn run_terminal_workspace_loop(
     loop {
         app.expire_hermes_review_if_needed();
         review_server.set_enabled(app.review_hermes_responses);
+        drain_review_broadcasts(app, review_server);
         if app.pending_review.is_none() {
             if let Some(request) = review_server.try_recv() {
                 app.begin_hermes_review(request);
