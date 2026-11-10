@@ -546,6 +546,11 @@ def review_response(
                     route for route in routes
                     if route["instance_id"] != selected_route["instance_id"]
                 ]
+                if not routes:
+                    raise RuntimeError(
+                        "All registered STREENOTE review sockets are stale or unavailable; "
+                        "the Hermes response was withheld."
+                    ) from error
                 continue
             break
         except (TimeoutError, socket.timeout) as error:
