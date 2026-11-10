@@ -404,10 +404,19 @@ def review_response(
     try:
         route = _select_review_route(str(session_id or ""), routes, registry_dir)
     except RuntimeError as error:
-        _log_event("REVIEW_ROUTE_ERROR", error=str(error), required=required)
-        if required:
-            raise
-        return None
+        # Multiple live SSH listeners with no trustworthy affinity is never
+        # a pass-through condition. Returning None here silently releases an
+        # unreviewed answer, which defeats /review on in every active TUI.
+        _log_event(
+            "REVIEW_ROUTE_ERROR",
+            error=str(error),
+            required=required,
+            fail_closed=True,
+        )
+        raise RuntimeError(
+            f"STREENOTE could not resolve the originating SSH review session; "
+            f"the Hermes response was withheld: {error}"
+        ) from error
 
     session_hash = hashlib.sha256(str(session_id or "").encode("utf-8")).hexdigest()[:16]
     _log_event(

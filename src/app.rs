@@ -1303,7 +1303,9 @@ impl App {
         }
 
         self.review_text = sanitize_multiline(&request.response_text);
-        self.review_cursor = self.review_text.len();
+        // Open at the beginning. Starting at the end made the renderer
+        // horizontally scroll a long first line, hiding its initial text.
+        self.review_cursor = 0;
         self.review_vertical_scroll = 0;
         self.review_horizontal_scroll = 0;
         self.status = format!(
@@ -2082,6 +2084,8 @@ mod tests {
 
         assert!(app.pending_review.is_some());
         assert_eq!(app.review_text, "Original draft");
+        assert_eq!(app.review_cursor, 0, "review editor must open at the beginning");
+        app.review_cursor_document_end();
         for _ in 0..5 {
             app.review_backspace();
         }

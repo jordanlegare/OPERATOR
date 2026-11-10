@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 import time
@@ -38,6 +39,39 @@ SECRET_FLAG = re.compile(
 def event_value(payload: dict, extra: dict, key: str):
     value = extra.get(key)
     return payload.get(key) if value is None else value
+
+
+def _review_instance_is_active(registry: Path, instance_id: str) -> bool:
+    """Return True only when the named STREENOTE listener is still registered and live."""
+    if not isinstance(instance_id, str) or not re.fullmatch(r"[a-f0-9-]{1,64}", instance_id):
+        return False
+    manifest = registry / f"{instance_id}.json"
+    socket_path = registry / f"{instance_id}.sock"
+    try:
+        manifest_stat = manifest.lstat()
+        if (
+            not stat.S_ISREG(manifest_stat.st_mode)
+            or manifest_stat.st_uid != os.getuid()
+            or stat.S_IMODE(manifest_stat.st_mode) & 0o077
+            or manifest_stat.st_size > 4096
+        ):
+            return False
+        registration = json.loads(manifest.read_text(encoding="utf-8"))
+        if not isinstance(registration, dict) or registration.get("version") != 1:
+            return False
+        if registration.get("instance_id") != instance_id:
+            return False
+        registered_socket = registration.get("socket_path")
+        if registered_socket and Path(registered_socket) != socket_path:
+            return False
+        socket_stat = socket_path.lstat()
+        return (
+            stat.S_ISSOCK(socket_stat.st_mode)
+            and socket_stat.st_uid == os.getuid()
+            and not (stat.S_IMODE(socket_stat.st_mode) & 0o077)
+        )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
 
 
 def write_review_session_route(
@@ -75,6 +109,30 @@ def write_review_session_route(
     try:
         os.fchmod(lock_fd, 0o600)
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        # A Hermes session is an ownership unit. Two SSH-launched clients
+        # can submit turns close together; the first live origin must remain
+        # authoritative rather than allowing a later hook to steal the route.
+        try:
+            existing_stat = assignment.lstat()
+            if (
+                stat.S_ISREG(existing_stat.st_mode)
+                and existing_stat.st_uid == os.getuid()
+                and not (stat.S_IMODE(existing_stat.st_mode) & 0o077)
+                and existing_stat.st_size <= 4096
+            ):
+                existing = json.loads(assignment.read_text(encoding="utf-8"))
+                if isinstance(existing, dict):
+                    owner = existing.get("instance_id")
+                    if (
+                        existing.get("version") == 1
+                        and existing.get("session_hash") == session_hash
+                        and isinstance(owner, str)
+                        and _review_instance_is_active(registry, owner)
+                    ):
+                        return assignment
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+
         record = {
             "version": 1,
             "session_hash": session_hash,
