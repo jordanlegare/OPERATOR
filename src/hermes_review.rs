@@ -84,13 +84,13 @@ pub fn diagnostics_summary() -> String {
         .and_then(|r| r.get("timestamp").and_then(|v| v.as_str())).unwrap_or("never");
     let socket = latest_diagnostic(&records, "SOCKET_ROUTES_RESOLVED")
         .map(|record| {
-            let details = record.get("details");
+            let details = record.get("details").unwrap_or(record);
             let count = details
-                .and_then(|value| value.get("route_count"))
+                .get("route_count")
                 .and_then(|value| value.as_u64())
                 .unwrap_or(0);
             let directory = details
-                .and_then(|value| value.get("registry_dir"))
+                .get("registry_dir")
                 .and_then(|value| value.as_str())
                 .unwrap_or("unknown registry");
             format!("{count} active listener(s) in {directory}")
@@ -101,11 +101,19 @@ pub fn diagnostics_summary() -> String {
             format!("{} ({})", resolved, if exists { "exists" } else { "missing" })
         }))
         .unwrap_or_else(|| "not checked".to_string());
-    let route = latest_diagnostic(&records, "SESSION_ROUTE_SELECTED")
+    let route = latest_diagnostic(&records, "SESSION_REVIEW_ASSIGNED")
+        .or_else(|| latest_diagnostic(&records, "SESSION_ROUTE_SELECTED"))
         .map(|record| {
-            let session = record.get("session_hash").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let session = record.get("session_hash").and_then(|v| v.as_str()).unwrap_or("not pinned");
             let instance = record.get("instance_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-            format!("session {session} -> {instance}")
+            format!("reviewer {instance} (session {session})")
+        })
+        .unwrap_or_else(|| "none".to_string());
+    let broadcast = latest_diagnostic(&records, "REVIEW_RESULT_BROADCAST")
+        .map(|record| {
+            let decision = record.get("decision").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let instance = record.get("instance_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+            format!("{decision} -> {instance}")
         })
         .unwrap_or_else(|| "none".to_string());
     let connected = latest_diagnostic(&records, "SOCKET_CONNECT_OK")
@@ -119,7 +127,7 @@ pub fn diagnostics_summary() -> String {
     let error = latest_diagnostic(&records, "REVIEW_ERROR")
         .and_then(|r| r.get("error").or_else(|| r.get("details").and_then(|d| d.get("error"))))
         .and_then(|v| v.as_str()).unwrap_or("none");
-    format!("plugin registered: {plugin}; callback: {callback}; listeners: {socket}; route: {route}; connected: {connected}; STREENOTE request: {request}; last decision: {decision}; last error: {error}; log: {}", path.display())
+    format!("plugin registered: {plugin}; callback: {callback}; listeners: {socket}; reviewer: {route}; final broadcast: {broadcast}; connected: {connected}; STREENOTE request: {request}; last decision: {decision}; last error: {error}; log: {}", path.display())
 }
 
 #[derive(Debug)]
