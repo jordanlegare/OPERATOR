@@ -93,6 +93,58 @@ def redact_inline(value: str) -> str:
     return value
 
 
+def render_user_message(value) -> str | None:
+    """Capture the original user text without persisting multimodal payload bytes.
+
+    Hermes supplies a string for text-only turns and a list of content parts for
+    multimodal turns. Preserve every text part in order, while representing
+    image/audio/file parts with safe placeholders instead of storing data URLs,
+    base64, or provider-specific binary payloads.
+    """
+    if isinstance(value, str):
+        return redact_inline(value)
+
+    if isinstance(value, dict):
+        if isinstance(value.get("text"), str):
+            return redact_inline(value["text"])
+        if "content" in value:
+            return render_user_message(value["content"])
+        part_type = str(value.get("type") or "").lower()
+        if "image" in part_type or "image_url" in value:
+            return "[image attachment]"
+        if "audio" in part_type:
+            return "[audio attachment]"
+        if "file" in part_type:
+            return "[file attachment]"
+        return None
+
+    if isinstance(value, list):
+        rendered_parts = []
+        for part in value:
+            if isinstance(part, str):
+                rendered_parts.append(redact_inline(part))
+                continue
+            if not isinstance(part, dict):
+                continue
+
+            part_type = str(part.get("type") or "").lower()
+            text_value = part.get("text")
+            if isinstance(text_value, str) and (
+                part_type in {"text", "input_text", "output_text"} or not part_type
+            ):
+                rendered_parts.append(redact_inline(text_value))
+            elif "image" in part_type or "image_url" in part:
+                rendered_parts.append("[image attachment]")
+            elif "audio" in part_type:
+                rendered_parts.append("[audio attachment]")
+            elif "file" in part_type:
+                rendered_parts.append("[file attachment]")
+
+        return "\\n".join(rendered_parts) if rendered_parts else None
+
+    return None
+
+
 def redact_value(value):
     if isinstance(value, dict):
         cleaned = {}
@@ -452,7 +504,9 @@ def main() -> int:
 
         if event_name == "pre_llm_call":
             kind = "hermes_user"
-            text = event_value(payload, extra, "user_message")
+            # Hermes exposes the user's original input at pre_llm_call, before
+            # plugin/skill context injection. Keep only readable text parts.
+            text = render_user_message(event_value(payload, extra, "user_message"))
         elif event_name == "post_llm_call":
             kind = "hermes_assistant"
             text = event_value(payload, extra, "assistant_response")
