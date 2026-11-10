@@ -828,6 +828,11 @@ mod tests {
         assert!(second_socket.exists());
         assert!(first_registration.exists());
         assert!(second_registration.exists());
+        first.set_enabled(true);
+        let first_manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(&first_registration).expect("read registration manifest"),
+        ).expect("parse registration manifest");
+        assert_eq!(first_manifest["review_enabled"], true);
         assert_eq!(
             fs::read_dir(&root).expect("read session registry").count(),
             4
@@ -881,6 +886,49 @@ mod tests {
             ),
             PathBuf::from("/custom/review.sock")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observer_broadcast_is_delivered_read_only_without_creating_a_review_request() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+
+        let root = test_root();
+        let socket = root.join("review.sock");
+        let server = HermesReviewServer::start_at_for_test(socket.clone())
+            .expect("start listener");
+
+        let client_socket = socket.clone();
+        let client = thread::spawn(move || {
+            let mut stream = UnixStream::connect(client_socket).expect("connect observer");
+            let request = json!({
+                "version": 1,
+                "request_id": "broadcast-001",
+                "session_id": "session-shared",
+                "model": "qwen3.5:latest",
+                "platform": "api_server",
+                "observe_only": true,
+                "response_text": "Visible in every connected terminal",
+            });
+            writeln!(stream, "{request}").expect("send observer broadcast");
+            let mut response = String::new();
+            BufReader::new(stream)
+                .read_line(&mut response)
+                .expect("read observer acknowledgment");
+            let response: serde_json::Value =
+                serde_json::from_str(&response).expect("decode observer acknowledgment");
+            assert_eq!(response["decision"], "observed");
+        });
+
+        client.join().expect("observer client completes");
+        let broadcast = server.try_recv_broadcast().expect("TUI receives broadcast copy");
+        assert_eq!(broadcast.request_id, "broadcast-001");
+        assert_eq!(broadcast.session_id, "session-shared");
+        assert_eq!(broadcast.response_text, "Visible in every connected terminal");
+        assert!(server.try_recv().is_none(), "observer copy must not open an editable review");
+        drop(server);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]
