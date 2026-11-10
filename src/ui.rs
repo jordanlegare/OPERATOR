@@ -567,12 +567,17 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     };
     let mode = if app.follow_tail { "LIVE" } else { "SCROLLBACK" };
     let privacy_hint = if app.secret_input { "  ·  HIDDEN INPUT" } else { "" };
+    let reviewer_label = if app.active_reviewer_count == 1 {
+        "reviewer"
+    } else {
+        "reviewers"
+    };
     let status = Line::from(vec![
         Span::styled(" ● ", Style::default().fg(mode_color)),
         Span::styled(mode, Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
         Span::styled(
             format!(
-                "  {}{}  ·  theme {}/9: {}  ·  {} entries  ·  {} B cached  ·  {} active reviewer(s)  ·  {} hit(s)  │  ",
+                "  {}{}  ·  theme {}/9: {}  ·  {} entries  ·  {} B cached  ·  {} {} active  ·  {} hit(s)  │  ",
                 app.input_mode.label(),
                 privacy_hint,
                 app.theme_index,
@@ -580,6 +585,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
                 app.journal.entries.len(),
                 app.journal.total_text_bytes,
                 app.active_reviewer_count,
+                reviewer_label,
                 app.matches.len()
             ),
             Style::default().fg(theme.muted),
