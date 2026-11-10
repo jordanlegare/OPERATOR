@@ -239,8 +239,7 @@ In STREENOTE, run:
 /review on
 ```
 Review mode is a shared per-user preference synchronized by all running STREENOTE instances. Running `/review on` in any terminal turns it on in every connected window and makes all of them eligible reviewers; `/review off` turns it off globally. Each pending answer is assigned to one available terminal, while every other terminal receives a read-only copy:
-Review is disabled by default and its setting is saved independently by each STREENOTE instance. A terminal with `/review on` is eligible to receive the review assignment; a terminal with `/review off` remains a read-only observer. While one response is held, the assigned review editor takes control of that STREENOTE terminal:
-
+Use the arrow keys, Home/End, Backspace/Delete, Enter for a newline, and Ctrl+V or terminal paste to edit. Escape does not dismiss or release a held answer. Other connected terminals show the pending response read-only while the selected reviewer works. After F2 or F3, every terminal updates to the exact final delivered answer; after F4, every terminal shows that it was withheld. Because review mode is shared, `/review off` in any terminal disables new reviews across all connected sessions; an already pending review still needs an explicit decision.
 - **F2** releases the exact original answer.
 - **F3** releases the edited text.
 - **F4** withholds the answer. This does not automatically ask Hermes to regenerate; send a follow-up instruction as a new turn when appropriate.
