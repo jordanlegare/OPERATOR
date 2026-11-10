@@ -1312,11 +1312,8 @@ impl App {
         }) {
             *existing = broadcast;
         } else {
-            // Bound memory use if many final answers arrive while this terminal
-            // is unattended. The review terminal remains the only release authority.
-            if self.review_broadcasts.len() >= 32 {
-                self.review_broadcasts.pop_front();
-            }
+            // Retain every response notification until the operator dismisses
+            // it; silently dropping an older answer would break terminal fan-out.
             self.review_broadcasts.push_back(broadcast);
         }
         if self.pending_review.is_none() {
