@@ -226,7 +226,7 @@ class HermesReviewPluginTests(unittest.TestCase):
 
     def test_required_review_fails_closed_when_socket_is_missing(self):
         with patch.dict(os.environ, {"STREENOTE_HERMES_REVIEW_REQUIRED": "1"}):
-            with self.assertRaisesRegex(RuntimeError, "socket is missing.*withheld"):
+            with self.assertRaisesRegex(RuntimeError, "no active review socket.*withheld"):
                 self._call()
 
     def test_required_review_allows_explicit_listener_bypass_when_review_is_off(self):

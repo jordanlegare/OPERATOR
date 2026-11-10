@@ -131,60 +131,63 @@ def _owned_unix_socket(path: Path) -> bool:
 
 
 def _load_review_routes() -> tuple[list[dict[str, Any]], Path]:
-    """Load only same-UID socket registrations from the private registry."""
+    """Load registered per-instance sockets plus the legacy single socket."""
     directory = review_session_registry_dir()
     routes: list[dict[str, Any]] = []
+    registry_is_private = False
     try:
         directory_stat = directory.lstat()
-        if (
-            not stat.S_ISDIR(directory_stat.st_mode)
-            or directory_stat.st_uid != os.getuid()
-            or stat.S_IMODE(directory_stat.st_mode) & 0o077
-        ):
-            return [], directory
+        registry_is_private = (
+            stat.S_ISDIR(directory_stat.st_mode)
+            and directory_stat.st_uid == os.getuid()
+            and not (stat.S_IMODE(directory_stat.st_mode) & 0o077)
+        )
     except OSError:
-        return [], directory
+        pass
 
-    for manifest in sorted(directory.glob("*.json")):
-        try:
-            metadata = manifest.lstat()
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_uid != os.getuid()
-                or stat.S_IMODE(metadata.st_mode) & 0o077
-            ):
+    if registry_is_private:
+        for manifest in sorted(directory.glob("*.json")):
+            try:
+                metadata = manifest.lstat()
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != os.getuid()
+                    or stat.S_IMODE(metadata.st_mode) & 0o077
+                    or metadata.st_size > 4096
+                ):
+                    continue
+                registration = json.loads(manifest.read_text(encoding="utf-8"))
+                if not isinstance(registration, dict):
+                    continue
+                instance_id = registration.get("instance_id")
+                if (
+                    registration.get("version") != 1
+                    or not isinstance(instance_id, str)
+                    or not re.fullmatch(r"[a-f0-9-]{1,64}", instance_id)
+                    or manifest.name != f"{instance_id}.json"
+                ):
+                    continue
+                socket_path = directory / f"{instance_id}.sock"
+                if not _owned_unix_socket(socket_path):
+                    # A dead process may have exited before it could unregister.
+                    try:
+                        manifest.unlink()
+                    except OSError:
+                        pass
+                    continue
+                registered_path = registration.get("socket_path")
+                if registered_path and Path(registered_path) != socket_path:
+                    continue
+                routes.append({
+                    "instance_id": instance_id,
+                    "socket_path": socket_path,
+                    "manifest_path": manifest,
+                })
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 continue
-            if metadata.st_size > 4096:
-                continue
-            registration = json.loads(manifest.read_text(encoding="utf-8"))
-            instance_id = registration.get("instance_id")
-            if (
-                registration.get("version") != 1
-                or not isinstance(instance_id, str)
-                or not re.fullmatch(r"[a-f0-9-]{1,64}", instance_id)
-                or manifest.name != f"{instance_id}.json"
-            ):
-                continue
-            socket_path = directory / f"{instance_id}.sock"
-            if not _owned_unix_socket(socket_path):
-                # A dead process may have exited before it could unregister.
-                try:
-                    manifest.unlink()
-                except OSError:
-                    pass
-                continue
-            registered_path = registration.get("socket_path")
-            if registered_path and Path(registered_path) != socket_path:
-                continue
-            routes.append({
-                "instance_id": instance_id,
-                "socket_path": socket_path,
-                "manifest_path": manifest,
-            })
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            continue
 
-    # Preserve compatibility while old STREENOTE binaries are still running.
+    # Preserve compatibility with older STREENOTE binaries and single-socket
+    # unit-test/standalone deployments, even when no new registry exists yet.
     legacy_path = review_socket_path()
     if _owned_unix_socket(legacy_path) and all(
         route["socket_path"] != legacy_path for route in routes
