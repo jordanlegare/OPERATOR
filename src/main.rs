@@ -1285,7 +1285,7 @@ fn run(
             },
             Event::Paste(text) => {
                 if app.pending_review.is_some() {
-                    app.review_insert_text(&text);
+                    insert_review_terminal_paste(app, &text);
                 } else {
                     paste_clipboard_text(app, &text, "terminal paste event");
                 }
@@ -1492,7 +1492,7 @@ fn run_workspace_review_overlay(
                 {
                     handle_review_key(key.code, key.modifiers, app);
                 }
-                Event::Paste(text) => app.review_insert_text(&text),
+                Event::Paste(text) => insert_review_terminal_paste(app, &text),
                 Event::Resize(_, _) => {}
                 _ => {}
             }
@@ -1515,9 +1515,27 @@ fn run_workspace_review_overlay(
     Ok(())
 }
 
+/// Paste shortcuts supported inside the review editor.
+///
+/// Ctrl+V/Ctrl+Shift+V request the SSH client's clipboard through OSC 52.
+/// Shift+Insert is a terminal-native alternative. Some older terminal
+/// emulators expose Ctrl+V as the raw control byte instead of a modified key.
 fn is_clipboard_paste_shortcut(code: KeyCode, modifiers: KeyModifiers) -> bool {
-    modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(code, KeyCode::Char('v' | 'V'))
+    (modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(code, KeyCode::Char('v' | 'V')))
+        || (code == KeyCode::Insert && modifiers.contains(KeyModifiers::SHIFT))
+        || code == KeyCode::Char('\u{16}')
+}
+
+/// Insert text delivered by the terminal's bracketed-paste protocol. The
+/// application model replaces an active Ctrl+A selection on the first paste.
+fn insert_review_terminal_paste(app: &mut App, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let count = text.chars().count();
+    app.review_insert_text(text);
+    app.status = format!("Pasted {count} characters from the SSH client terminal into the held answer.");
 }
 
 fn handle_review_key(code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
@@ -1580,39 +1598,47 @@ fn handle_review_key(code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
 }
 
 fn paste_review_from_system_clipboard(app: &mut App) {
+    // Prefer the attached SSH client's clipboard. Some terminal emulators
+    // permit OSC 52 writes but deny clipboard reads, so continue through the
+    // server-side fallbacks rather than silently doing nothing.
     match read_osc52_terminal_clipboard() {
         Ok(Some(text)) if !text.is_empty() => {
             let count = text.chars().count();
             app.review_insert_text(&text);
-            app.status = format!("Inserted {count} characters from the client clipboard into the held answer.");
+            app.status = format!("Pasted {count} characters from the SSH client clipboard into the held answer.");
             return;
         }
-        Ok(Some(_)) => {
-            app.status = "Client terminal clipboard is empty.".to_string();
-            return;
-        }
-        Ok(None) | Err(_) => {}
+        Ok(Some(_)) | Ok(None) | Err(_) => {}
     }
 
     match read_server_clipboard_cache() {
         Ok(text) if !text.is_empty() => {
             let count = text.chars().count();
             app.review_insert_text(&text);
-            app.status = format!("Inserted {count} characters from the STREENOTE server clipboard into the held answer.");
+            app.status = format!("Pasted {count} characters from the STREENOTE server clipboard into the held answer.");
+            return;
         }
-        Ok(_) => app.status = "STREENOTE server clipboard cache is empty.".to_string(),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            match read_system_clipboard() {
-                Ok(text) if !text.is_empty() => {
-                    let count = text.chars().count();
-                    app.review_insert_text(&text);
-                    app.status = format!("Inserted {count} characters from the server clipboard into the held answer.");
-                }
-                Ok(_) => app.status = "No clipboard text is available to paste.".to_string(),
-                Err(error) => app.status = format!("Could not read clipboard for answer review: {error}"),
-            }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            app.status = format!("Could not read STREENOTE clipboard cache: {error}");
         }
-        Err(error) => app.status = format!("Could not read STREENOTE clipboard cache: {error}"),
+    }
+
+    match read_system_clipboard() {
+        Ok(text) if !text.is_empty() => {
+            let count = text.chars().count();
+            app.review_insert_text(&text);
+            app.status = format!("Pasted {count} characters from the server clipboard into the held answer.");
+        }
+        Ok(_) => {
+            app.status = "No clipboard text found. Use your SSH terminal's Paste command (usually Ctrl+Shift+V) to send text into this editor.".to_string();
+        }
+        Err(error) => {
+            app.status = format!(
+                "Clipboard read unavailable. Use the SSH terminal's Paste command (usually Ctrl+Shift+V); {error}"
+            );
+        }
     }
 }
 
@@ -2171,7 +2197,7 @@ fn read_osc52_terminal_clipboard() -> io::Result<Option<String>> {
 
     // Query the clipboard selection ("c"). The response is ESC ] 52 ; c ; BASE64 BEL/ST.
     let mut output = stdout();
-    output.write_all(b"\x1b]52;c;?\x07")?;
+    output.write_all(b"\x1b]52;c;?\x1b\\")?;
     output.flush()?;
 
     let prefix = b"\x1b]52;c;";
@@ -2451,6 +2477,22 @@ mod clipboard_paste_shortcut_tests {
     }
 
     #[test]
+    fn shift_insert_is_supported_as_terminal_paste_shortcut() {
+        assert!(is_clipboard_paste_shortcut(
+            KeyCode::Insert,
+            KeyModifiers::SHIFT
+        ));
+    }
+
+    #[test]
+    fn raw_control_v_byte_is_supported() {
+        assert!(is_clipboard_paste_shortcut(
+            KeyCode::Char('\u{16}'),
+            KeyModifiers::NONE
+        ));
+    }
+
+    #[test]
     fn ordinary_v_is_not_treated_as_a_clipboard_shortcut() {
         assert!(!is_clipboard_paste_shortcut(
             KeyCode::Char('v'),
@@ -2459,6 +2501,10 @@ mod clipboard_paste_shortcut_tests {
         assert!(!is_clipboard_paste_shortcut(
             KeyCode::Char('x'),
             KeyModifiers::CONTROL
+        ));
+        assert!(!is_clipboard_paste_shortcut(
+            KeyCode::Insert,
+            KeyModifiers::NONE
         ));
     }
 }
