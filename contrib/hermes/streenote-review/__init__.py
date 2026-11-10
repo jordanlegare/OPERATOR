@@ -14,6 +14,7 @@ import os
 import re
 import socket
 import stat
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
@@ -24,6 +25,15 @@ MAX_REVIEW_BYTES = 8 * 1024 * 1024
 MAX_REPLY_WIRE_BYTES = (MAX_REVIEW_BYTES * 2) + 4096
 SOCKET_TIMEOUT_SECONDS = 550
 MAX_METADATA_CHARS = 1024
+MAX_PROMPT_BYTES = 8 * 1024 * 1024
+
+_PROMPT_SECRET_ASSIGNMENT = re.compile(
+    r"""(?i)\\b(api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|authorization|credential)\\b(\\s*[:=]\\s*)(?:"[^"]*"|'[^']*'|[^\\s,;]+)"""
+)
+_PROMPT_BEARER_VALUE = re.compile(r"(?i)\\bBearer\\s+[A-Za-z0-9._~+/\\-=]+")
+_PROMPT_SECRET_FLAG = re.compile(
+    r"""(?i)(--(?:api[-_]key|token|password|secret)(?:=|\\s+))(?: "[^"]*"|'[^']*'|[^\\s]+)"""
+)
 
 
 def _diagnostic_log_path() -> Path:
@@ -415,6 +425,197 @@ def _broadcast_review_result(
             )
 
 
+
+def _render_prompt_text(value: Any) -> str | None:
+    """Render original user text while replacing multimodal payloads with labels."""
+    def redact(text: str) -> str:
+        text = _PROMPT_SECRET_ASSIGNMENT.sub(
+            lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", text
+        )
+        text = _PROMPT_BEARER_VALUE.sub("Bearer [REDACTED]", text)
+        return _PROMPT_SECRET_FLAG.sub(lambda match: f"{match.group(1)}[REDACTED]", text)
+
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        if isinstance(value.get("text"), str):
+            return redact(value["text"])
+        if "content" in value:
+            return _render_prompt_text(value["content"])
+        kind = str(value.get("type") or "").lower()
+        if "image" in kind or "image_url" in value:
+            return "[image attachment]"
+        if "audio" in kind:
+            return "[audio attachment]"
+        if "file" in kind:
+            return "[file attachment]"
+        return None
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(redact(item))
+                continue
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("type") or "").lower()
+            text_value = item.get("text")
+            if isinstance(text_value, str) and (
+                kind in {"text", "input_text", "output_text"} or not kind
+            ):
+                parts.append(redact(text_value))
+            elif "image" in kind or "image_url" in item:
+                parts.append("[image attachment]")
+            elif "audio" in kind:
+                parts.append("[audio attachment]")
+            elif "file" in kind:
+                parts.append("[file attachment]")
+        return "\n".join(parts) if parts else None
+    return None
+
+
+def _default_prompt_inbox() -> Path:
+    explicit = os.environ.get("STREENOTE_HERMES_INBOX")
+    if explicit and Path(explicit).expanduser().is_absolute():
+        return Path(explicit).expanduser()
+    data_home = os.environ.get("XDG_DATA_HOME")
+    if data_home and Path(data_home).expanduser().is_absolute():
+        return Path(data_home).expanduser() / "streenote" / "hermes-inbox"
+    return Path.home() / ".local" / "share" / "streenote" / "hermes-inbox"
+
+
+def _write_prompt_event(inbox: Path, event: dict[str, Any]) -> None:
+    ready = inbox / "ready"
+    ready.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        os.chmod(inbox, 0o700)
+        os.chmod(ready, 0o700)
+    except OSError:
+        pass
+
+    final_path = ready / f"{time.time_ns():020d}-{event['event_id']}.json"
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".streenote-prompt-", suffix=".tmp", dir=ready
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as temporary:
+            os.fchmod(temporary.fileno(), 0o600)
+            temporary.write(
+                json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            )
+            temporary.write(b"\n")
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_name, final_path)
+    except Exception:
+        try:
+            os.unlink(temporary_name)
+        except OSError:
+            pass
+        raise
+
+
+def capture_user_prompt(
+    session_id: str = "",
+    user_message: Any = None,
+    turn_id: str | None = None,
+    **kwargs: Any,
+) -> None:
+    """Fan the original pre-LLM user message to every connected STREENOTE inbox.
+
+    This runs inside the already-loaded review plugin, not as a shell-hook
+    subprocess. That avoids losing the first prompt to gateway hook startup or
+    environment inheritance differences. The shell capture hook remains a
+    redundant path and continues to stage history snapshots and other events.
+    """
+    try:
+        rendered = _render_prompt_text(user_message)
+        if not isinstance(rendered, str) or not rendered.strip():
+            return
+        if len(rendered.encode("utf-8")) > MAX_PROMPT_BYTES:
+            _log_event(
+                "PROMPT_CAPTURE_SKIPPED",
+                reason="prompt_exceeds_size_limit",
+                prompt_bytes=len(rendered.encode("utf-8")),
+            )
+            return
+
+        session_id = str(session_id or "")
+        turn_id = str(turn_id) if turn_id is not None else None
+        conversation_id = kwargs.get("conversation_id")
+        if conversation_id is not None:
+            conversation_id = str(conversation_id)
+
+        if turn_id:
+            identity = f"pre_llm_call\0{session_id}\0{turn_id}"
+            event_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        else:
+            # Hermes normally supplies turn_id. Preserve capture for older
+            # hook payloads where it is absent; the observer must never block.
+            event_id = uuid.uuid4().hex
+
+        event = {
+            "version": 1,
+            "event_id": event_id,
+            "kind": "hermes_user",
+            "timestamp": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+            "text": rendered,
+            "conversation_id": conversation_id,
+            "session_id": session_id or None,
+            "old_session_id": None,
+            "turn_id": turn_id,
+            "tool_call_id": None,
+            "iteration": None,
+        }
+
+        routes, registry_dir = _load_review_routes()
+        recipients: dict[Path, Path] = {}
+        fallback = _default_prompt_inbox()
+        for route in routes:
+            instance_id = route.get("instance_id")
+            if instance_id == "legacy" or route.get("manifest_path") is None:
+                recipient = fallback
+            else:
+                recipient = registry_dir / "inboxes" / str(instance_id)
+            normalized = recipient.expanduser().resolve(strict=False)
+            recipients.setdefault(normalized, normalized)
+
+        # A direct CLI invocation may have an inbox configured even when the
+        # legacy single socket is not represented in the instance registry.
+        if not recipients and fallback.is_absolute():
+            recipients[fallback.resolve(strict=False)] = fallback.resolve(strict=False)
+
+        if not recipients:
+            _log_event(
+                "PROMPT_CAPTURE_SKIPPED",
+                reason="no_live_terminal_inboxes",
+                session_hash=hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16],
+            )
+            return
+
+        delivered = 0
+        failures = []
+        for inbox in recipients.values():
+            try:
+                _write_prompt_event(inbox, event)
+                delivered += 1
+            except Exception as error:
+                failures.append(str(error)[:300])
+
+        _log_event(
+            "PROMPT_FANOUT",
+            event_id=event_id,
+            delivered=delivered,
+            recipients=len(recipients),
+            session_hash=hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16],
+            turn_id=turn_id or "",
+            failures=failures,
+        )
+    except Exception as error:
+        # Prompt capture is observational only and must never alter model flow.
+        _log_event("PROMPT_CAPTURE_FAILED", error=str(error)[:300])
+
+
 def review_response(
     response_text: str,
     session_id: str = "",
@@ -659,7 +860,14 @@ def review_response(
 
 
 def register(ctx: Any) -> None:
+    # Capture the user's original input inside the already-loaded plugin so
+    # the first pre-LLM prompt is not dependent on a detached shell-hook process.
+    ctx.register_hook("pre_llm_call", capture_user_prompt)
     # hold_stream is essential: without it, Hermes could display the original
     # draft before STREENOTE has had a chance to review or replace it.
     ctx.register_hook("transform_llm_output", review_response, hold_stream=True)
-    _log_event("PLUGIN_REGISTERED", hook="transform_llm_output", hold_stream=True)
+    _log_event(
+        "PLUGIN_REGISTERED",
+        hooks=["pre_llm_call", "transform_llm_output"],
+        hold_stream=True,
+    )
