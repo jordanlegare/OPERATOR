@@ -68,12 +68,52 @@ fn draw_hermes_broadcast(frame: &mut Frame, app: &App, theme: Theme) {
     };
     let popup = centered_rect(92, 88, frame.area());
     frame.render_widget(Clear, popup);
+    let (title, status_text, response_text, status_color) = match broadcast.phase.as_str() {
+        "result" => match broadcast.decision.as_deref() {
+            Some("approve") => (
+                " HERMES RESPONSE · APPROVED UNCHANGED · SHARED ",
+                "The original answer was approved and is now the delivered answer on every terminal.",
+                broadcast.response_text.as_str(),
+                theme.success,
+            ),
+            Some("replace") => (
+                " HERMES RESPONSE · EDITED & APPROVED · SHARED ",
+                "The edited answer below is the delivered answer on every terminal.",
+                broadcast.response_text.as_str(),
+                theme.success,
+            ),
+            Some("bypass") => (
+                " HERMES RESPONSE · REVIEW BYPASSED · SHARED ",
+                "Review was disabled in all connected terminals; the original answer was delivered.",
+                broadcast.response_text.as_str(),
+                theme.warning,
+            ),
+            Some("reject") => (
+                " HERMES RESPONSE · WITHHELD · SHARED STATUS ",
+                "The reviewer withheld this answer. No answer text was released to Hermes.",
+                "The response was rejected and withheld.",
+                theme.error,
+            ),
+            _ => (
+                " HERMES RESPONSE · REVIEW RESULT · SHARED ",
+                "A final review status was received.",
+                broadcast.response_text.as_str(),
+                theme.info,
+            ),
+        },
+        _ => (
+            " HERMES RESPONSE · SHARED TO CONNECTED TERMINALS · READ ONLY ",
+            "Another connected terminal is currently reviewing this answer.",
+            broadcast.response_text.as_str(),
+            theme.info,
+        ),
+    };
     let outer = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.info))
+        .border_style(Style::default().fg(status_color))
         .title(Span::styled(
-            " HERMES RESPONSE · SHARED TO CONNECTED TERMINALS · READ ONLY ",
-            Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
+            title,
+            Style::default().fg(status_color).add_modifier(Modifier::BOLD),
         ))
         .style(Style::default().bg(theme.panel));
     let inner = outer.inner(popup);
@@ -101,7 +141,7 @@ fn draw_hermes_broadcast(frame: &mut Frame, app: &App, theme: Theme) {
         Line::from(vec![
             Span::styled(" REVIEW ID ", Style::default().fg(theme.muted).add_modifier(Modifier::BOLD)),
             Span::styled(broadcast.request_id.clone(), Style::default().fg(theme.muted)),
-            Span::styled("   Another connected terminal owns the review decision.", Style::default().fg(theme.warning)),
+            Span::styled(format!("   {status_text}"), Style::default().fg(status_color)),
         ]),
     ];
     frame.render_widget(
@@ -109,15 +149,15 @@ fn draw_hermes_broadcast(frame: &mut Frame, app: &App, theme: Theme) {
         sections[0],
     );
     frame.render_widget(
-        Paragraph::new(broadcast.response_text.clone())
+        Paragraph::new(response_text)
             .style(Style::default().fg(theme.text).bg(theme.panel))
             .wrap(Wrap { trim: false })
             .scroll((app.review_broadcast_scroll, 0)),
         sections[1],
     );
     frame.render_widget(
-        Paragraph::new(" READ ONLY · ↑/↓ or PageUp/PageDown to scroll · ENTER/ESC to dismiss ")
-            .style(Style::default().fg(theme.info).bg(theme.panel)),
+        Paragraph::new(" SHARED STATUS · ↑/↓ or PageUp/PageDown to scroll · ENTER/ESC to dismiss ")
+            .style(Style::default().fg(status_color).bg(theme.panel)),
         sections[2],
     );
 }
