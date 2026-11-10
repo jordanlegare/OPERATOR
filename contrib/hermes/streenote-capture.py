@@ -316,20 +316,27 @@ def _write_inbox_event_one(inbox: Path, event: dict) -> None:
         raise
 
 
-def default_review_session_dir() -> Path:
-    """Mirror Rust's default review registry resolution for detached gateways."""
+def review_session_registry_candidates() -> list[Path]:
+    """Mirror Rust registry resolution and retain safe fallbacks.
+
+    A stale environment override must not hide the live per-user runtime
+    registry. This matters when the gateway service and SSH PTYs were started
+    with different environment snapshots.
+    """
+    candidates = []
+
     configured = os.environ.get("STREENOTE_HERMES_REVIEW_SESSION_DIR")
     if configured:
         path = Path(configured).expanduser()
         if path.is_absolute():
-            return path
+            candidates.append(path)
 
     uid = os.getuid()
     runtime_root = Path(f"/run/user/{uid}")
     try:
         runtime_stat = runtime_root.stat()
         if runtime_stat.is_dir() and runtime_stat.st_uid == uid:
-            return runtime_root / "streenote" / "review-sessions"
+            candidates.append(runtime_root / "streenote" / "review-sessions")
     except OSError:
         pass
 
@@ -337,14 +344,22 @@ def default_review_session_dir() -> Path:
     if legacy_socket:
         path = Path(legacy_socket).expanduser()
         if path.is_absolute():
-            return path.parent / "review-sessions"
+            candidates.append(path.parent / "review-sessions")
 
     data_home = os.environ.get("XDG_DATA_HOME")
     if data_home and Path(data_home).expanduser().is_absolute():
-        return Path(data_home).expanduser() / "streenote" / "review-sessions"
+        candidates.append(Path(data_home).expanduser() / "streenote" / "review-sessions")
 
-    home = Path.home()
-    return home / ".local" / "share" / "streenote" / "review-sessions"
+    candidates.append(Path.home() / ".local" / "share" / "streenote" / "review-sessions")
+
+    unique = []
+    seen = set()
+    for candidate in candidates:
+        normalized = candidate.resolve(strict=False)
+        if normalized not in seen:
+            seen.add(normalized)
+            unique.append(normalized)
+    return unique
 
 
 def _connected_instance_inboxes(registry: Path) -> list[Path]:
@@ -400,15 +415,20 @@ def write_inbox_event(inbox: Path, event: dict) -> None:
     silently falling back to the originating terminal when the registry
     variable was not inherited. Each TUI still receives a private queue.
     """
-    registry = default_review_session_dir()
-    recipients = _connected_instance_inboxes(registry)
+    registry = None
+    recipients = []
+    for candidate in review_session_registry_candidates():
+        candidate_recipients = _connected_instance_inboxes(candidate)
+        if candidate_recipients:
+            registry = candidate
+            recipients = candidate_recipients
+            break
 
-    # Retain the source inbox as a safety recipient. This guarantees that the
-    # originating TUI does not lose its event during registration races or
-    # when a custom registry is temporarily unavailable.
+    # A registered source is already included in the recipient list. Use its
+    # private inbox as a fallback only when no live registry can be discovered.
     source = inbox.expanduser()
-    if source not in recipients:
-        recipients.append(source)
+    if not recipients:
+        recipients = [source]
 
     failures = []
     delivered = 0
@@ -429,9 +449,10 @@ def write_inbox_event(inbox: Path, event: dict) -> None:
         )
 
     if os.environ.get("STREENOTE_HERMES_CAPTURE_DEBUG") == "1":
+        route = str(registry) if registry is not None else "origin-inbox fallback"
         print(
             f"STREENOTE Hermes capture: fanned event {event.get('event_id', 'unknown')} "
-            f"to {delivered} terminal inbox(es) via {registry}",
+            f"to {delivered} terminal inbox(es) via {route}",
             file=sys.stderr,
         )
 
