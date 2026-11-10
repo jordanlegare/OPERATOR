@@ -14,6 +14,7 @@ import os
 import re
 import socket
 import stat
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -182,6 +183,7 @@ def _load_review_routes() -> tuple[list[dict[str, Any]], Path]:
                     "instance_id": instance_id,
                     "socket_path": socket_path,
                     "manifest_path": manifest,
+                    "review_enabled": bool(registration.get("review_enabled", True)),
                 })
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 continue
@@ -196,6 +198,7 @@ def _load_review_routes() -> tuple[list[dict[str, Any]], Path]:
             "instance_id": "legacy",
             "socket_path": legacy_path,
             "manifest_path": None,
+            "review_enabled": True,
         })
     return routes, directory
 
@@ -208,6 +211,102 @@ def _route_score(session_id: str, instance_id: str) -> bytes:
 def _rendezvous_route(session_id: str, routes: list[dict[str, Any]]) -> dict[str, Any]:
     """Select a stable owner using highest-score rendezvous hashing."""
     return max(routes, key=lambda route: _route_score(session_id, route["instance_id"]))
+
+
+def _write_dispatch_cursor(path: Path, instance_id: str) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(descriptor, (instance_id + "\\n").encode("utf-8"))
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, path)
+    os.chmod(path, 0o600)
+
+
+def _acquire_review_slot(
+    routes: list[dict[str, Any]],
+    registry_dir: Path,
+    timeout: float = SOCKET_TIMEOUT_SECONDS,
+    excluded: set[str] | None = None,
+) -> tuple[dict[str, Any], int]:
+    """Acquire one enabled listener's process-wide slot, round-robin.
+
+    flock is automatically released if the Hermes gateway dies, so a crashed
+    callback cannot permanently consume a reviewer's capacity. Each listener
+    handles one active review at a time; concurrent answers wait for a free
+    listener instead of failing because every TUI is momentarily occupied.
+    """
+    excluded = excluded or set()
+    candidates = sorted(
+        (
+            route for route in routes
+            if route.get("review_enabled", True)
+            and route["instance_id"] not in excluded
+        ),
+        key=lambda route: route["instance_id"],
+    )
+    if not candidates:
+        raise RuntimeError("No connected STREENOTE terminal currently has /review on.")
+
+    dispatch_dir = registry_dir / "dispatch"
+    dispatch_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        os.chmod(dispatch_dir, 0o700)
+    except OSError:
+        pass
+    scheduler_path = dispatch_dir / "scheduler.lock"
+    cursor_path = dispatch_dir / "round-robin"
+    deadline = time.monotonic() + max(0.0, timeout)
+
+    while True:
+        scheduler_fd = os.open(scheduler_path, os.O_CREAT | os.O_RDWR, 0o600)
+        selected: tuple[dict[str, Any], int] | None = None
+        try:
+            os.fchmod(scheduler_fd, 0o600)
+            fcntl.flock(scheduler_fd, fcntl.LOCK_EX)
+            try:
+                last_id = cursor_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                last_id = ""
+            start = 0
+            for index, route in enumerate(candidates):
+                if route["instance_id"] == last_id:
+                    start = (index + 1) % len(candidates)
+                    break
+            ordered = candidates[start:] + candidates[:start]
+
+            for route in ordered:
+                lock_path = dispatch_dir / f"{route['instance_id']}.lock"
+                lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+                try:
+                    os.fchmod(lock_fd, 0o600)
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    os.close(lock_fd)
+                    continue
+                _write_dispatch_cursor(cursor_path, route["instance_id"])
+                selected = (route, lock_fd)
+                break
+        finally:
+            fcntl.flock(scheduler_fd, fcntl.LOCK_UN)
+            os.close(scheduler_fd)
+
+        if selected is not None:
+            return selected
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "All connected STREENOTE reviewers are busy; the Hermes response was withheld."
+            )
+        time.sleep(0.05)
+
+
+def _release_review_slot(lock_fd: int) -> None:
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
 
 
 def _write_route_assignment(path: Path, session_hash: str, instance_id: str) -> None:
@@ -334,9 +433,16 @@ class _ReviewSocketUnavailable(Exception):
     """A route disappeared before a connection was established."""
 
 
-def _exchange(path: Path, request: dict[str, Any], instance_id: str) -> dict[str, Any]:
+def _exchange(
+    path: Path,
+    request: dict[str, Any],
+    instance_id: str,
+    observe_only: bool = False,
+) -> dict[str, Any]:
+    payload = dict(request)
+    payload["observe_only"] = observe_only
     encoded = json.dumps(
-        request, ensure_ascii=False, separators=(",", ":")
+        payload, ensure_ascii=False, separators=(",", ":")
     ).encode("utf-8")
     if len(encoded) > MAX_REVIEW_BYTES:
         raise RuntimeError("Hermes final response exceeds STREENOTE's 8 MiB review limit")
@@ -357,7 +463,14 @@ def _exchange(path: Path, request: dict[str, Any], instance_id: str) -> dict[str
         with connection:
             connection.sendall(encoded + b"\n")
             _log_event("REQUEST_SENT", request_id=request.get("request_id", ""), instance_id=instance_id)
+            try:
             return _read_json_line(connection)
+        except RuntimeError as error:
+            if "closed the review channel without a decision" in str(error):
+                raise _ReviewSocketUnavailable(str(error)) from error
+            raise
+    except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError) as error:
+        raise _ReviewSocketUnavailable(str(error)) from error
     except Exception:
         connection.close()
         raise
@@ -370,7 +483,7 @@ def review_response(
     platform: str = "",
     **kwargs: Any,
 ) -> str | None:
-    """Hold the final reply at the STREENOTE instance assigned to this Hermes session."""
+    """Broadcast each final reply to every terminal and assign one reviewer."""
     del kwargs
     required = _review_required()
     _log_event(
@@ -389,6 +502,7 @@ def review_response(
         registry_dir=str(registry_dir),
         route_count=len(routes),
         instance_ids=[route["instance_id"] for route in routes],
+        enabled_reviewers=[route["instance_id"] for route in routes if route.get("review_enabled", True)],
         required=required,
     )
     if not routes:
@@ -401,31 +515,6 @@ def review_response(
             )
         return None
 
-    try:
-        route = _select_review_route(str(session_id or ""), routes, registry_dir)
-    except RuntimeError as error:
-        # Multiple live SSH listeners with no trustworthy affinity is never
-        # a pass-through condition. Returning None here silently releases an
-        # unreviewed answer, which defeats /review on in every active TUI.
-        _log_event(
-            "REVIEW_ROUTE_ERROR",
-            error=str(error),
-            required=required,
-            fail_closed=True,
-        )
-        raise RuntimeError(
-            f"STREENOTE could not resolve the originating SSH review session; "
-            f"the Hermes response was withheld: {error}"
-        ) from error
-
-    session_hash = hashlib.sha256(str(session_id or "").encode("utf-8")).hexdigest()[:16]
-    _log_event(
-        "SESSION_ROUTE_SELECTED",
-        session_hash=session_hash,
-        instance_id=route["instance_id"],
-        socket_path=str(route["socket_path"]),
-    )
-
     request_id = uuid.uuid4().hex
     request = {
         "version": 1,
@@ -436,53 +525,89 @@ def review_response(
         "response_text": response_text,
     }
 
-    # Retry only when connect() proves the selected process is already gone.
-    # Once connected, never send the same request to another TUI: the first
-    # listener may already have displayed it to its operator.
-    remaining = list(routes)
-    reply = None
-    selected_route = route
-    while remaining:
+    # Only terminals with /review on are eligible to make the release
+    # decision. Every other connected terminal still receives a read-only
+    # copy, so the shared conversation remains visible across SSH windows.
+    excluded: set[str] = set()
+    reply: dict[str, Any] | None = None
+    selected_route: dict[str, Any] | None = None
+    max_attempts = max(1, len(routes))
+    for _ in range(max_attempts):
         try:
-            reply = _exchange(
-                selected_route["socket_path"],
-                request,
-                selected_route["instance_id"],
+            selected_route, slot_fd = _acquire_review_slot(
+                routes, registry_dir, excluded=excluded
             )
-            route = selected_route
+        except RuntimeError as error:
+            _log_event("REVIEW_POOL_UNAVAILABLE", error=str(error), required=required)
+            if required:
+                raise
+            if any(route.get("review_enabled", True) for route in routes):
+                raise
+            selected_route = None
             break
-        except _ReviewSocketUnavailable as error:
-            _log_event(
-                "SOCKET_CONNECT_ERROR",
-                socket_path=str(selected_route["socket_path"]),
-                instance_id=selected_route["instance_id"],
-                error=str(error),
-                request_id=request_id,
-            )
-            manifest = selected_route.get("manifest_path")
-            if manifest is not None:
+
+        try:
+            for observer in routes:
+                if observer["instance_id"] == selected_route["instance_id"]:
+                    continue
                 try:
-                    manifest.unlink()
+                    observed = _exchange(
+                        observer["socket_path"],
+                        request,
+                        observer["instance_id"],
+                        observe_only=True,
+                    )
+                    if observed.get("decision") != "observed":
+                        _log_event(
+                            "BROADCAST_DELIVERY_ERROR",
+                            request_id=request_id,
+                            instance_id=observer["instance_id"],
+                            error="observer did not acknowledge broadcast",
+                        )
+                    else:
+                        _log_event(
+                            "BROADCAST_DELIVERED",
+                            request_id=request_id,
+                            instance_id=observer["instance_id"],
+                        )
+                except Exception as error:
+                    _log_event(
+                        "BROADCAST_DELIVERY_ERROR",
+                        request_id=request_id,
+                        instance_id=observer["instance_id"],
+                        error=str(error),
+                    )
+
+            try:
+                reply = _exchange(
+                    selected_route["socket_path"],
+                    request,
+                    selected_route["instance_id"],
+                )
+            except _ReviewSocketUnavailable as error:
+                _log_event(
+                    "REVIEWER_UNAVAILABLE",
+                    request_id=request_id,
+                    instance_id=selected_route["instance_id"],
+                    error=str(error),
+                )
+                excluded.add(selected_route["instance_id"])
+                manifest = selected_route.get("manifest_path")
+                if manifest is not None:
+                    try:
+                        manifest.unlink()
+                    except OSError:
+                        pass
+                try:
+                    selected_route["socket_path"].unlink()
                 except OSError:
                     pass
-            # A refused connection proves the same-UID legacy socket file is
-            # stale too; remove it so future calls do not keep selecting it.
-            try:
-                selected_route["socket_path"].unlink()
-            except OSError:
-                pass
-            remaining = [
-                candidate for candidate in remaining
-                if candidate["instance_id"] != selected_route["instance_id"]
-            ]
-            if not remaining:
-                raise RuntimeError(
-                    "All registered STREENOTE review sockets are stale or unavailable; "
-                    "the Hermes response was withheld."
-                ) from error
-            selected_route = _select_review_route(
-                str(session_id or ""), remaining, registry_dir
-            )
+                routes = [
+                    route for route in routes
+                    if route["instance_id"] != selected_route["instance_id"]
+                ]
+                continue
+            break
         except (TimeoutError, socket.timeout) as error:
             _log_event("REVIEW_ERROR", request_id=request_id, error="socket timeout")
             raise RuntimeError(
@@ -493,12 +618,27 @@ def review_response(
             raise RuntimeError(
                 f"STREENOTE review channel failed; the Hermes response was withheld: {error}"
             ) from error
-        except RuntimeError as error:
-            _log_event("REVIEW_ERROR", request_id=request_id, error=str(error))
-            raise
+        finally:
+            _release_review_slot(slot_fd)
 
+    if selected_route is None:
+        # All terminals are connected but have deliberately disabled review.
+        # This is equivalent to the existing explicit /review off override.
+        _log_event("REVIEW_BYPASS", request_id=request_id, required=required, reason="no enabled reviewers")
+        return None
     if reply is None:
-        raise RuntimeError("STREENOTE did not return a review decision; the response was withheld.")
+        raise RuntimeError(
+            "No connected STREENOTE reviewer was available; the Hermes response was withheld."
+        )
+
+    session_hash = hashlib.sha256(str(session_id or "").encode("utf-8")).hexdigest()[:16]
+    _log_event(
+        "SESSION_REVIEW_ASSIGNED",
+        request_id=request_id,
+        session_hash=session_hash,
+        instance_id=selected_route["instance_id"],
+        socket_path=str(selected_route["socket_path"]),
+    )
 
     if reply.get("version") != 1:
         _log_event("REVIEW_ERROR", request_id=request_id, error="unsupported protocol version")
@@ -509,7 +649,7 @@ def review_response(
         "DECISION_RECEIVED",
         request_id=request_id,
         decision=str(decision),
-        instance_id=route["instance_id"],
+        instance_id=selected_route["instance_id"],
     )
     if decision == "bypass":
         # An explicit operator choice (/review off) overrides fail-closed mode.
