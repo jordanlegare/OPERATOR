@@ -572,12 +572,17 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     } else {
         "reviewers"
     };
+    let handled_label = if app.reviews_handled == 1 {
+        "review handled here"
+    } else {
+        "reviews handled here"
+    };
     let status = Line::from(vec![
         Span::styled(" ● ", Style::default().fg(mode_color)),
         Span::styled(mode, Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
         Span::styled(
             format!(
-                "  {}{}  ·  theme {}/9: {}  ·  {} entries  ·  {} B cached  ·  {} {} active  ·  {} hit(s)  │  ",
+                "  {}{}  ·  theme {}/9: {}  ·  {} entries  ·  {} B cached  ·  {} {} active  ·  {} {}  │  ",
                 app.input_mode.label(),
                 privacy_hint,
                 app.theme_index,
@@ -586,7 +591,8 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
                 app.journal.total_text_bytes,
                 app.active_reviewer_count,
                 reviewer_label,
-                app.matches.len()
+                app.reviews_handled,
+                handled_label
             ),
             Style::default().fg(theme.muted),
         ),
