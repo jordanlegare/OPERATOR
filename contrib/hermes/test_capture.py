@@ -27,8 +27,8 @@ class CapturePromptFanoutTests(unittest.TestCase):
         self.registry = self.root / "review-sessions"
         self.registry.mkdir(mode=0o700)
         self.inboxes = {
-            "terminal-a": self.registry / "inboxes" / "terminal-a",
-            "terminal-b": self.registry / "inboxes" / "terminal-b",
+            "a1": self.registry / "inboxes" / "a1",
+            "b2": self.registry / "inboxes" / "b2",
         }
         self.sockets = []
         for instance_id in self.inboxes:
@@ -54,7 +54,7 @@ class CapturePromptFanoutTests(unittest.TestCase):
 
     def _run_hook(self, payload):
         environment = {
-            "STREENOTE_HERMES_INBOX": str(self.inboxes["terminal-a"]),
+            "STREENOTE_HERMES_INBOX": str(self.inboxes["a1"]),
             "STREENOTE_HERMES_REVIEW_SESSION_DIR": str(self.registry),
         }
         with patch.dict(CAPTURE.os.environ, environment):
