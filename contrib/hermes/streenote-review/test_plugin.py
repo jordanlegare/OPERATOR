@@ -96,17 +96,18 @@ class HermesReviewPluginTests(unittest.TestCase):
     def test_register_installs_held_transform_and_logs_registration(self):
         class Context:
             def __init__(self):
-                self.hook = None
+                self.hooks = {}
 
             def register_hook(self, name, callback, **kwargs):
-                self.hook = (name, callback, kwargs)
+                self.hooks[name] = (callback, kwargs)
 
         context = Context()
         PLUGIN.register(context)
-        self.assertIsNotNone(context.hook)
-        self.assertEqual(context.hook[0], "transform_llm_output")
-        self.assertIs(context.hook[1], PLUGIN.review_response)
-        self.assertTrue(context.hook[2]["hold_stream"])
+        self.assertEqual(set(context.hooks), {"pre_llm_call", "transform_llm_output"})
+        self.assertIs(context.hooks["pre_llm_call"][0], PLUGIN.capture_user_prompt)
+        self.assertEqual(context.hooks["pre_llm_call"][1], {})
+        self.assertIs(context.hooks["transform_llm_output"][0], PLUGIN.review_response)
+        self.assertTrue(context.hooks["transform_llm_output"][1]["hold_stream"])
         records = [json.loads(line) for line in self.diagnostic_path.read_text().splitlines()]
         self.assertEqual(records[-1]["event"], "PLUGIN_REGISTERED")
 
@@ -262,6 +263,59 @@ class HermesReviewPluginTests(unittest.TestCase):
             PLUGIN._release_review_slot(third_fd)
             if second_fd >= 0:
                 PLUGIN._release_review_slot(second_fd)
+
+
+    def test_pre_llm_plugin_hook_fans_first_prompt_to_every_live_terminal_inbox(self):
+        registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
+        registry.mkdir(mode=0o700, parents=True)
+        listeners = []
+        instance_ids = ("a1", "b2", "c3")
+        for instance_id in instance_ids:
+            socket_path = registry / f"{instance_id}.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(socket_path))
+            os.chmod(socket_path, 0o600)
+            listener.listen(1)
+            listeners.append(listener)
+            manifest = registry / f"{instance_id}.json"
+            manifest.write_text(json.dumps({
+                "version": 1,
+                "instance_id": instance_id,
+                "socket_path": str(socket_path),
+                "review_enabled": True,
+            }))
+            os.chmod(manifest, 0o600)
+
+        PLUGIN.capture_user_prompt(
+            session_id="first-prompt-session",
+            turn_id="first-turn-001",
+            user_message="Inspect the gateway; api_key=do-not-store-this",
+            platform="cli",
+        )
+
+        expected_event_id = CAPTURE.make_event_id(
+            "pre_llm_call", "first-prompt-session", "first-turn-001"
+        )
+        for instance_id in instance_ids:
+            inbox = registry / "inboxes" / instance_id / "ready"
+            records = list(inbox.glob("*.json"))
+            self.assertEqual(len(records), 1, f"{instance_id} must receive the first prompt")
+            event = json.loads(records[0].read_text(encoding="utf-8"))
+            self.assertEqual(event["kind"], "hermes_user")
+            self.assertEqual(event["event_id"], expected_event_id)
+            self.assertEqual(
+                event["text"],
+                "Inspect the gateway; api_key=[REDACTED]",
+            )
+
+        records = [json.loads(line) for line in self.diagnostic_path.read_text().splitlines()]
+        prompt_events = [record for record in records if record["event"] == "PROMPT_FANOUT"]
+        self.assertEqual(len(prompt_events), 1)
+        self.assertEqual(prompt_events[0]["delivered"], 3)
+        self.assertEqual(prompt_events[0]["recipients"], 3)
+
+        for listener in listeners:
+            listener.close()
 
     def test_capture_fans_each_hook_event_out_to_each_live_terminal_inbox(self):
         registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
