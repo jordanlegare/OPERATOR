@@ -2183,7 +2183,6 @@ mod tests {
         use crate::hermes_review::ReviewBroadcast;
 
         let (mut app, path) = test_app();
-        app.status = "Keep the normal terminal status.".to_string();
         app.receive_hermes_broadcast(ReviewBroadcast {
             request_id: "shared-review-001".to_string(),
             session_id: "session-1".to_string(),
@@ -2195,6 +2194,7 @@ mod tests {
         });
         assert_eq!(app.review_broadcasts.len(), 1);
         assert_eq!(app.review_broadcasts[0].response_text, "Original draft");
+        app.status = "Keep the normal terminal status.".to_string();
 
         app.review_broadcast_scroll = 12;
         app.receive_hermes_broadcast(ReviewBroadcast {
@@ -2224,6 +2224,7 @@ mod tests {
 
         let _ = fs::remove_file(path);
     }
+
     #[test]
     fn expired_review_is_closed_and_returns_a_rejection() {
         use crate::hermes_review::{ReviewDecision, ReviewRequest};
