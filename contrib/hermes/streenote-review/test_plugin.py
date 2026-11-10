@@ -123,7 +123,6 @@ class HermesReviewPluginTests(unittest.TestCase):
         registry.mkdir(mode=0o700, parents=True)
         instance_ids = ("a1", "b2", "c3")
         workers = []
-        listeners = {}
         requests_by_instance = {}
         errors_by_instance = {}
 
@@ -135,10 +134,6 @@ class HermesReviewPluginTests(unittest.TestCase):
                 accept_count=1,
             )
             workers.append(worker)
-            listeners[instance_id] = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            listeners[instance_id].settimeout(0.15)
-            # The worker owns this socket for all instances; this mapping keeps
-            # the test's intended eligibility explicit below.
             requests_by_instance[instance_id] = requests
             errors_by_instance[instance_id] = errors
             manifest = registry / f"{instance_id}.json"
@@ -246,6 +241,66 @@ class HermesReviewPluginTests(unittest.TestCase):
         with self.assertRaises(socket.timeout):
             listener.accept()
         listener.close()
+
+    def test_scheduler_adds_rejoined_operator_while_another_reviewer_is_busy(self):
+        registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
+        registry.mkdir(mode=0o700, parents=True)
+        sockets = {}
+        manifests = {}
+        for instance_id, enabled in (("a1", True), ("b2", False)):
+            socket_path = registry / f"{instance_id}.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(socket_path))
+            os.chmod(socket_path, 0o600)
+            listener.listen(1)
+            sockets[instance_id] = listener
+            manifest = registry / f"{instance_id}.json"
+            manifest.write_text(json.dumps({
+                "version": 1,
+                "instance_id": instance_id,
+                "socket_path": str(socket_path),
+                "review_enabled": enabled,
+            }))
+            os.chmod(manifest, 0o600)
+            manifests[instance_id] = manifest
+
+        routes, registry_dir = PLUGIN._load_review_routes()
+        lock_path = registry / "dispatch" / "a1.lock"
+        lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        PLUGIN.fcntl.flock(lock_fd, PLUGIN.fcntl.LOCK_EX | PLUGIN.fcntl.LOCK_NB)
+        outcome = []
+        worker = threading.Thread(
+            target=lambda: outcome.append(
+                PLUGIN._acquire_review_slot(routes, registry_dir, timeout=1.5)
+            ),
+            daemon=True,
+        )
+        worker.start()
+        selected_fd = None
+        try:
+            time.sleep(0.15)
+            temporary = manifests["b2"].with_suffix(".json.tmp")
+            temporary.write_text(json.dumps({
+                "version": 1,
+                "instance_id": "b2",
+                "socket_path": str(sockets["b2"].getsockname() or registry / "b2.sock"),
+                "review_enabled": True,
+            }))
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, manifests["b2"])
+            worker.join(timeout=1)
+            self.assertFalse(worker.is_alive(), "dispatcher should notice /review on promptly")
+            self.assertIsNotNone(outcome[0])
+            selected_route, selected_fd = outcome[0]
+            self.assertEqual(selected_route["instance_id"], "b2")
+        finally:
+            if selected_fd is not None:
+                PLUGIN._release_review_slot(selected_fd)
+            PLUGIN.fcntl.flock(lock_fd, PLUGIN.fcntl.LOCK_UN)
+            os.close(lock_fd)
+            for listener in sockets.values():
+                listener.close()
 
     def test_scheduler_refreshes_live_registration_when_operator_opts_out_while_queued(self):
         registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
