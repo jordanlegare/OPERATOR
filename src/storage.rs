@@ -3,6 +3,8 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use chrono::{DateTime, Local, SecondsFormat};
@@ -39,6 +41,9 @@ pub struct Entry {
     #[serde(default)]
     pub kind: EntryKind,
     pub text: String,
+    /// Stable identity for this journal row, used for cross-terminal replication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_id: Option<String>,
     /// Stable ID for externally imported events; used only for deduplication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_id: Option<String>,
@@ -62,12 +67,26 @@ pub struct Entry {
     pub iteration: Option<u32>,
 }
 
+fn new_record_id() -> String {
+    static NEXT_RECORD_ID: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!(
+        "{nanos:032x}-{:x}-{:x}",
+        std::process::id(),
+        NEXT_RECORD_ID.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 impl Entry {
     pub fn with_kind(kind: EntryKind, text: String) -> Self {
         Self {
             timestamp: Local::now().to_rfc3339_opts(SecondsFormat::Secs, false),
             kind,
             text: sanitize_entry_text(kind, &text),
+            record_id: Some(new_record_id()),
             event_id: None,
             conversation_id: None,
             session_id: None,
@@ -96,6 +115,7 @@ impl Entry {
             timestamp,
             kind,
             text: sanitize_entry_text(kind, &text),
+            record_id: Some(new_record_id()),
             event_id: Some(event_id),
             conversation_id,
             session_id,
@@ -116,12 +136,18 @@ pub struct Journal {
     pending: Vec<Entry>,
     /// Event IDs already durably present in the journal.
     persisted_event_ids: HashSet<String>,
+    /// Record IDs already durably present in the shared journal.
+    persisted_record_ids: HashSet<String>,
+    /// Record IDs already represented in this process's in-memory cache.
+    cached_record_ids: HashSet<String>,
+    /// Record IDs accepted into memory but not yet confirmed durable.
+    pending_record_ids: HashSet<String>,
     /// Event IDs already represented in this process's in-memory cache.
     cached_event_ids: HashSet<String>,
     /// Event IDs accepted into memory but not yet confirmed durable.
     pending_event_ids: HashSet<String>,
     /// Byte offset through the shared JSONL file already checked for external
-    /// event IDs. Each SSH process advances this while holding JournalFileLock.
+    /// rows. Each SSH process advances this while holding JournalFileLock.
     journal_scan_offset: u64,
 }
 
@@ -205,6 +231,7 @@ impl Journal {
         let mut total_text_bytes = 0usize;
         let mut skipped_corrupt_lines = 0usize;
         let mut persisted_event_ids = HashSet::new();
+        let mut persisted_record_ids = HashSet::new();
 
         for line in reader.lines() {
             let line = line?;
@@ -218,6 +245,11 @@ impl Journal {
                         // A retry after a crash may leave both the original and
                         // a later import attempt in JSONL. Keep the first copy.
                         if !persisted_event_ids.insert(event_id.clone()) {
+                            continue;
+                        }
+                    }
+                    if let Some(record_id) = entry.record_id.as_ref() {
+                        if !persisted_record_ids.insert(record_id.clone()) {
                             continue;
                         }
                     }
@@ -250,6 +282,9 @@ impl Journal {
             pending: Vec::new(),
             cached_event_ids: persisted_event_ids.clone(),
             persisted_event_ids,
+            cached_record_ids: persisted_record_ids.clone(),
+            persisted_record_ids,
+            pending_record_ids: HashSet::new(),
             pending_event_ids: HashSet::new(),
             journal_scan_offset,
         })
@@ -266,6 +301,7 @@ impl Journal {
 
         let _journal_lock = JournalFileLock::acquire(&self.path)?;
         let event_id = entry.event_id.clone();
+        let record_id = entry.record_id.clone();
         if let Some(event_id) = event_id.as_ref() {
             if self.pending_event_ids.contains(event_id) {
                 return Err(io::Error::new(
@@ -274,7 +310,15 @@ impl Journal {
                 ));
             }
         }
-        self.refresh_external_event_ids()?;
+        if let Some(record_id) = record_id.as_ref() {
+            if self.pending_record_ids.contains(record_id) {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "record is in the journal's pending-write queue",
+                ));
+            }
+        }
+        self.refresh_external_entries_locked()?;
 
         if let Some(event_id) = event_id.as_ref() {
             if self.persisted_event_ids.contains(event_id) {
@@ -282,6 +326,18 @@ impl Journal {
                 // If the shared-journal poll has not already mirrored it into
                 // this process's cache, add it now without writing a duplicate.
                 if self.cached_event_ids.insert(event_id.clone()) {
+                    if let Some(record_id) = record_id.as_ref() {
+                        self.cached_record_ids.insert(record_id.clone());
+                    }
+                    self.push_entry_to_memory(entry);
+                }
+                return Ok(());
+            }
+        }
+
+        if let Some(record_id) = record_id.as_ref() {
+            if self.persisted_record_ids.contains(record_id) {
+                if self.cached_record_ids.insert(record_id.clone()) {
                     self.push_entry_to_memory(entry);
                 }
                 return Ok(());
@@ -292,11 +348,17 @@ impl Journal {
         if let Some(event_id) = entry.event_id.as_ref() {
             self.cached_event_ids.insert(event_id.clone());
         }
+        if let Some(record_id) = record_id.as_ref() {
+            self.cached_record_ids.insert(record_id.clone());
+        }
 
         // Never let a newer entry overtake an older entry whose disk append failed.
         if !self.pending.is_empty() {
             if let Some(event_id) = entry.event_id.as_ref() {
                 self.pending_event_ids.insert(event_id.clone());
+            }
+            if let Some(record_id) = record_id.as_ref() {
+                self.pending_record_ids.insert(record_id.clone());
             }
             self.pending.push(entry);
             return self.save_pending_locked();
@@ -307,12 +369,18 @@ impl Journal {
                 if let Some(event_id) = entry.event_id.as_ref() {
                     self.persisted_event_ids.insert(event_id.clone());
                 }
+                if let Some(record_id) = record_id.as_ref() {
+                    self.persisted_record_ids.insert(record_id.clone());
+                }
                 self.journal_scan_offset = fs::metadata(&self.path)?.len();
                 Ok(())
             }
             Err(error) => {
                 if let Some(event_id) = entry.event_id.as_ref() {
                     self.pending_event_ids.insert(event_id.clone());
+                }
+                if let Some(record_id) = record_id.as_ref() {
+                    self.pending_record_ids.insert(record_id.clone());
                 }
                 self.pending.push(entry);
                 Err(error)
@@ -333,24 +401,24 @@ impl Journal {
         }
     }
 
-    /// Poll newly appended Hermes records from the shared JSONL journal.
+    /// Poll new notes and Hermes events from the shared JSONL journal.
     ///
-    /// Every terminal still has a private inbox, but this journal tail makes
-    /// cross-terminal display resilient if a private inbox is delayed, missed,
-    /// or consumed by a terminal that exits before its peers import it.
-    pub fn refresh_external_hermes_entries(&mut self) -> io::Result<usize> {
+    /// Every terminal keeps its own in-memory view, while this tail reader
+    /// mirrors newly appended note rows from any peer into every live view.
+    /// Hermes events retain their stable event-ID deduplication as well.
+    pub fn refresh_external_entries(&mut self) -> io::Result<usize> {
         let _journal_lock = JournalFileLock::acquire(&self.path)?;
-        self.refresh_external_event_ids()
+        self.refresh_external_entries_locked()
     }
 
-    /// Refresh event IDs appended by other STREENOTE processes since our last
-    /// file offset. The caller holds the inter-process journal lock. Newly
-    /// observed Hermes entries are copied into this process's memory cache.
-    fn refresh_external_event_ids(&mut self) -> io::Result<usize> {
+    /// Refresh rows appended by other STREENOTE processes since our last file
+    /// offset. The caller holds the inter-process journal lock.
+    fn refresh_external_entries_locked(&mut self) -> io::Result<usize> {
         let metadata = fs::metadata(&self.path)?;
         if metadata.len() < self.journal_scan_offset {
             self.journal_scan_offset = 0;
             self.persisted_event_ids.clear();
+            self.persisted_record_ids.clear();
         }
         let file = File::open(&self.path)?;
         let mut reader = BufReader::new(file);
@@ -365,16 +433,45 @@ impl Journal {
                 break;
             }
             if let Ok(mut entry) = serde_json::from_slice::<Entry>(&line) {
-                if let Some(event_id) = entry.event_id.clone() {
-                    let is_new = self.persisted_event_ids.insert(event_id.clone());
-                    if is_new
-                        && is_hermes_journal_kind(entry.kind)
-                        && self.cached_event_ids.insert(event_id)
-                    {
-                        entry.text = sanitize_entry_text(entry.kind, &entry.text);
-                        self.push_entry_to_memory(entry);
-                        mirrored += 1;
+                let record_id_is_new = entry
+                    .record_id
+                    .as_ref()
+                    .map(|record_id| self.persisted_record_ids.insert(record_id.clone()));
+
+                let should_mirror = if is_hermes_journal_kind(entry.kind) {
+                    if let Some(event_id) = entry.event_id.as_ref() {
+                        let is_new = self.persisted_event_ids.insert(event_id.clone());
+                        is_new && self.cached_event_ids.insert(event_id.clone())
+                    } else {
+                        match (record_id_is_new, entry.record_id.as_ref()) {
+                            (Some(true), Some(record_id)) => {
+                                self.cached_record_ids.insert(record_id.clone())
+                            }
+                            (None, None) => true,
+                            _ => false,
+                        }
                     }
+                } else if entry.kind == EntryKind::Note {
+                    match (record_id_is_new, entry.record_id.as_ref()) {
+                        (Some(true), Some(record_id)) => {
+                            self.cached_record_ids.insert(record_id.clone())
+                        }
+                        // Legacy journal rows created before record IDs were
+                        // introduced are still mirrored once by their byte offset.
+                        (None, None) => true,
+                        _ => false,
+                    }
+                } else {
+                    false
+                };
+
+                if should_mirror {
+                    if let Some(record_id) = entry.record_id.as_ref() {
+                        self.cached_record_ids.insert(record_id.clone());
+                    }
+                    entry.text = sanitize_entry_text(entry.kind, &entry.text);
+                    self.push_entry_to_memory(entry);
+                    mirrored += 1;
                 }
             }
             scanned = scanned.saturating_add(count as u64);
@@ -397,12 +494,15 @@ impl Journal {
         }
 
         let _journal_lock = JournalFileLock::acquire(&self.path)?;
-        self.refresh_external_event_ids()?;
+        self.refresh_external_entries_locked()?;
 
         for entry in &entries {
             self.total_text_bytes = self.total_text_bytes.saturating_add(entry.text.len());
             if let Some(event_id) = entry.event_id.as_ref() {
                 self.cached_event_ids.insert(event_id.clone());
+            }
+            if let Some(record_id) = entry.record_id.as_ref() {
+                self.cached_record_ids.insert(record_id.clone());
             }
             self.entries.push(entry.clone());
         }
@@ -412,6 +512,9 @@ impl Journal {
                 if let Some(event_id) = entry.event_id.as_ref() {
                     self.pending_event_ids.insert(event_id.clone());
                 }
+                if let Some(record_id) = entry.record_id.as_ref() {
+                    self.pending_record_ids.insert(record_id.clone());
+                }
             }
             self.pending.extend(entries);
             return self.save_pending_locked();
@@ -420,6 +523,9 @@ impl Journal {
         for entry in &entries {
             if let Some(event_id) = entry.event_id.as_ref() {
                 self.pending_event_ids.insert(event_id.clone());
+            }
+            if let Some(record_id) = entry.record_id.as_ref() {
+                self.pending_record_ids.insert(record_id.clone());
             }
         }
 
@@ -452,13 +558,14 @@ impl Journal {
         file.flush()?;
         file.sync_data()?;
         self.persisted_event_ids.extend(self.pending_event_ids.drain());
+        self.persisted_record_ids.extend(self.pending_record_ids.drain());
         self.journal_scan_offset = fs::metadata(&self.path)?.len();
         Ok(())
     }
 
     pub fn save_pending(&mut self) -> io::Result<()> {
         let _journal_lock = JournalFileLock::acquire(&self.path)?;
-        self.refresh_external_event_ids()?;
+        self.refresh_external_entries_locked()?;
         self.save_pending_locked()
     }
 
@@ -467,6 +574,7 @@ impl Journal {
         if self.pending.is_empty() {
             file.sync_data()?;
             self.persisted_event_ids.extend(self.pending_event_ids.drain());
+            self.persisted_record_ids.extend(self.pending_record_ids.drain());
             self.journal_scan_offset = fs::metadata(&self.path)?.len();
             return Ok(());
         }
@@ -492,6 +600,7 @@ impl Journal {
         file.flush()?;
         file.sync_data()?;
         self.persisted_event_ids.extend(self.pending_event_ids.drain());
+        self.persisted_record_ids.extend(self.pending_record_ids.drain());
         self.journal_scan_offset = fs::metadata(&self.path)?.len();
         Ok(())
     }
@@ -987,7 +1096,7 @@ mod shared_journal_tests {
         assert!(second.entries.is_empty(), "second cache starts unchanged");
 
         assert_eq!(
-            second.refresh_external_hermes_entries().expect("poll shared journal"),
+            second.refresh_external_entries().expect("poll shared journal"),
             1,
             "second terminal must import the externally appended prompt",
         );
@@ -1009,6 +1118,69 @@ mod shared_journal_tests {
             contents.lines().filter(|line| line.contains("shared-journal-prompt-001")).count(),
             1,
         );
+        let _ = fs::remove_file(&path);
+        let lock = PathBuf::from(format!("{}.lock", path.display()));
+        let _ = fs::remove_file(lock);
+    }
+
+    #[test]
+    fn live_notes_sync_between_terminals_in_both_directions_without_mirroring_commands() {
+        let path = journal_path();
+        let mut first = Journal::open(path.clone()).expect("open first terminal journal");
+        let mut second = Journal::open(path.clone()).expect("open second terminal journal");
+
+        first
+            .append(Entry::with_kind(
+                EntryKind::TerminalCommand,
+                "private shell command".to_string(),
+            ))
+            .expect("persist first terminal command");
+        first
+            .append(Entry::with_kind(
+                EntryKind::Note,
+                "note written in terminal one".to_string(),
+            ))
+            .expect("persist first terminal note");
+
+        // The second terminal discovers the first note even when its next
+        // action is another local append rather than an explicit refresh.
+        second
+            .append(Entry::with_kind(
+                EntryKind::Note,
+                "note written in terminal two".to_string(),
+            ))
+            .expect("persist second terminal note");
+
+        assert_eq!(second.entries.len(), 2);
+        assert_eq!(second.entries[0].kind, EntryKind::Note);
+        assert_eq!(second.entries[0].text, "note written in terminal one");
+        assert_eq!(second.entries[1].text, "note written in terminal two");
+
+        // The first terminal receives the second terminal's note on its next
+        // poll, and repeated polls cannot create duplicate rows.
+        assert_eq!(
+            first.refresh_external_entries().expect("sync second note"),
+            1
+        );
+        assert_eq!(
+            first.refresh_external_entries().expect("idempotent note poll"),
+            0
+        );
+        assert_eq!(first.entries.len(), 3);
+        assert_eq!(first.entries[2].text, "note written in terminal two");
+
+        // Neither terminal imports another terminal's shell command as a note.
+        assert_eq!(
+            second.refresh_external_entries().expect("no extra shared rows"),
+            0
+        );
+
+        drop(first);
+        drop(second);
+        let contents = fs::read_to_string(&path).expect("read shared journal");
+        assert_eq!(contents.lines().count(), 3);
+        assert_eq!(contents.matches("note written in terminal one").count(), 1);
+        assert_eq!(contents.matches("note written in terminal two").count(), 1);
         let _ = fs::remove_file(&path);
         let lock = PathBuf::from(format!("{}.lock", path.display()));
         let _ = fs::remove_file(lock);

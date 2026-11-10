@@ -2,7 +2,6 @@ name: Hermes journal integration CI
 
 on:
   push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -101,7 +100,7 @@ jobs:
           PY
       - name: Test original Hermes prompt fan-out
         run: python3 -m unittest discover -s contrib/hermes -p 'test_*.py'
-      - name: Test journal storage compatibility
-        run: cargo test storage::terminal_output_filter_tests
+      - name: Test journal storage and cross-terminal synchronization
+        run: "cargo test storage::"
       - name: Test Restricted Access splash layouts
         run: cargo test access_splash_tests

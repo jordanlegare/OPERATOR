@@ -165,7 +165,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut review_server,
     );
     // Import any Hermes events queued before shutdown, then drain shell output.
-    if let Err(error) = drain_hermes_events(&mut app, &mut hermes_bridge) {
+    if let Err(error) = drain_shared_journal_updates(&mut app, &mut hermes_bridge) {
         app.status = format!("Hermes journal import pending: {error}");
     }
     drain_shell(&mut app, &mut shell)?;
@@ -1173,19 +1173,18 @@ fn refresh_active_reviewer_count(
     }
 }
 
-/// Import Hermes events while keeping a highlighted live-tail row attached
-/// to the newest imported record.
-fn drain_hermes_events(
+/// Import Hermes inbox events and mirror peer notes while keeping a highlighted
+/// live-tail row attached to the newest imported record.
+fn drain_shared_journal_updates(
     app: &mut App,
     hermes_bridge: &mut HermesBridge,
 ) -> io::Result<usize> {
     let was_tracking_tail = app.is_tracking_selected_tail();
     let previous_len = app.journal.entries.len();
     let inbox_imported = hermes_bridge.drain(&mut app.journal)?;
-    // Private inboxes provide reliable per-instance delivery. Also tail the
-    // shared JSONL file so a prompt persisted by another terminal appears in
-    // this process even if its private inbox event was delayed or missed.
-    let shared_journal_imported = app.journal.refresh_external_hermes_entries()?;
+    // Private inboxes provide reliable per-instance Hermes delivery. The
+    // shared journal tail also mirrors notes written by any peer terminal.
+    let shared_journal_imported = app.journal.refresh_external_entries()?;
     if app.journal.entries.len() > previous_len {
         app.update_selected_tail_after_append(was_tracking_tail);
     }
@@ -1212,9 +1211,9 @@ fn run(
             }
         }
         drain_shell(app, shell)?;
-        match drain_hermes_events(app, hermes_bridge) {
+        match drain_shared_journal_updates(app, hermes_bridge) {
             Ok(imported) if imported > 0 => {
-                app.status = format!("Imported {imported} Hermes conversation event(s).");
+                app.status = format!("Synced {imported} shared journal row(s).");
             }
             Ok(_) => {}
             Err(error) => {
@@ -1401,10 +1400,10 @@ fn run_terminal_workspace_loop(
         }
 
         // Keep importing Hermes hook records while the F1 PTY is active.
-        match drain_hermes_events(app, hermes_bridge) {
+        match drain_shared_journal_updates(app, hermes_bridge) {
             Ok(imported) if imported > 0 => {
                 app.status = format!(
-                    "Imported {imported} Hermes conversation event(s) from F1 workspace."
+                    "Synced {imported} shared journal row(s) while F1 workspace was active."
                 );
             }
             Ok(_) => {}
@@ -1675,10 +1674,10 @@ fn run_terminal_workspace_loop(
             run_workspace_review_overlay(_terminal, app)?;
             continue;
         }
-        match drain_hermes_events(app, hermes_bridge) {
+        match drain_shared_journal_updates(app, hermes_bridge) {
             Ok(imported) if imported > 0 => {
                 app.status = format!(
-                    "Imported {imported} Hermes conversation event(s) from F1 workspace."
+                    "Synced {imported} shared journal row(s) while F1 workspace was active."
                 );
             }
             Ok(_) => {}
