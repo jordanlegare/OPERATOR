@@ -3,4 +3,6 @@ version: "1.0"
 description: Hold final Hermes answers for STREENOTE operator review before delivery.
 provides_hooks:
   - pre_llm_call
+  - pre_api_request
+  - post_llm_call
   - transform_llm_output
