@@ -359,9 +359,12 @@ class HermesReviewPluginTests(unittest.TestCase):
             events = [json.loads(path.read_text()) for path in inbox.glob("*.json")]
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["text"], "The first prompt is in history.")
-            self.assertEqual(events[0]["event_id"], hashlib.sha256(
-                b"pre_llm_call\\0fallback-session\\0fallback-turn"
-            ).hexdigest())
+            self.assertEqual(
+                events[0]["event_id"],
+                CAPTURE.make_event_id(
+                    "pre_llm_call", "fallback-session", "fallback-turn"
+                ),
+            )
 
         records = [json.loads(line) for line in self.diagnostic_path.read_text().splitlines()]
         invoked = [record for record in records if record["event"] == "PROMPT_HOOK_INVOKED"]
