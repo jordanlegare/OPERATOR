@@ -203,16 +203,6 @@ def _load_review_routes() -> tuple[list[dict[str, Any]], Path]:
     return routes, directory
 
 
-def _route_score(session_id: str, instance_id: str) -> bytes:
-    material = f"{session_id}\0{instance_id}".encode("utf-8")
-    return hashlib.sha256(material).digest()
-
-
-def _rendezvous_route(session_id: str, routes: list[dict[str, Any]]) -> dict[str, Any]:
-    """Select a stable owner using highest-score rendezvous hashing."""
-    return max(routes, key=lambda route: _route_score(session_id, route["instance_id"]))
-
-
 def _write_dispatch_cursor(path: Path, instance_id: str) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
