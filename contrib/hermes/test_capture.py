@@ -134,7 +134,7 @@ class CapturePromptFanoutTests(unittest.TestCase):
             self.assertEqual(events[0]["kind"], "hermes_user")
             self.assertEqual(
                 events[0]["text"],
-                "Describe the attached diagram.\\n[image attachment]",
+                "Describe the attached diagram.\n[image attachment]",
             )
             self.assertNotIn(secret_image_payload, events[0]["text"])
 
