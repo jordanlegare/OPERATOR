@@ -546,7 +546,7 @@ def review_response(
             )
         except RuntimeError as error:
             _log_event("REVIEW_POOL_UNAVAILABLE", error=str(error), required=required)
-            if reviewers_were_configured or required:
+            if reviewers_were_configured:
                 raise
             selected_route = None
             break
@@ -628,7 +628,28 @@ def review_response(
 
     if selected_route is None:
         # All terminals are connected but have deliberately disabled review.
-        # This is equivalent to the existing explicit /review off override.
+        # They still receive the response as read-only copies; this is
+        # equivalent to the existing explicit /review off override.
+        for observer in routes:
+            try:
+                observed = _exchange(
+                    observer["socket_path"],
+                    request,
+                    observer["instance_id"],
+                    observe_only=True,
+                )
+                _log_event(
+                    "BROADCAST_DELIVERED" if observed.get("decision") == "observed" else "BROADCAST_DELIVERY_ERROR",
+                    request_id=request_id,
+                    instance_id=observer["instance_id"],
+                )
+            except Exception as error:
+                _log_event(
+                    "BROADCAST_DELIVERY_ERROR",
+                    request_id=request_id,
+                    instance_id=observer["instance_id"],
+                    error=str(error),
+                )
         _log_event("REVIEW_BYPASS", request_id=request_id, required=required, reason="no enabled reviewers")
         return None
     if reply is None:
