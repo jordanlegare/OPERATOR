@@ -225,31 +225,33 @@ def _write_dispatch_cursor(path: Path, instance_id: str) -> None:
     os.chmod(path, 0o600)
 
 
+def _refresh_review_routes(
+    routes: list[dict[str, Any]], registry_dir: Path
+) -> list[dict[str, Any]]:
+    """Refresh registry-backed routes so live /review toggles take effect while queued."""
+    if any(route.get("manifest_path") is not None for route in routes):
+        fresh_routes, fresh_registry_dir = _load_review_routes()
+        if fresh_registry_dir == registry_dir:
+            return fresh_routes
+    # Legacy listeners and isolated scheduler tests have no per-instance
+    # manifest. Preserve their supplied route list for compatibility.
+    return routes
+
+
 def _acquire_review_slot(
     routes: list[dict[str, Any]],
     registry_dir: Path,
     timeout: float = SOCKET_TIMEOUT_SECONDS,
     excluded: set[str] | None = None,
-) -> tuple[dict[str, Any], int]:
-    """Acquire one enabled listener's process-wide slot, round-robin.
+) -> tuple[dict[str, Any], int] | None:
+    """Acquire one currently enabled listener's slot using live round-robin routing.
 
-    flock is automatically released if the Hermes gateway dies, so a crashed
-    callback cannot permanently consume a reviewer's capacity. Each listener
-    handles one active review at a time; concurrent answers wait for a free
-    listener instead of failing because every TUI is momentarily occupied.
+    Returns None when every live terminal has opted out. While eligible
+    listeners are busy, refresh their manifests every poll so /review off
+    withdraws a terminal immediately and /review on can add it to the pool.
+    flock is released automatically if the gateway callback crashes.
     """
     excluded = excluded or set()
-    candidates = sorted(
-        (
-            route for route in routes
-            if route.get("review_enabled", True)
-            and route["instance_id"] not in excluded
-        ),
-        key=lambda route: route["instance_id"],
-    )
-    if not candidates:
-        raise RuntimeError("No connected STREENOTE terminal currently has /review on.")
-
     dispatch_dir = registry_dir / "dispatch"
     dispatch_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
@@ -259,8 +261,25 @@ def _acquire_review_slot(
     scheduler_path = dispatch_dir / "scheduler.lock"
     cursor_path = dispatch_dir / "round-robin"
     deadline = time.monotonic() + max(0.0, timeout)
+    registry_backed = any(route.get("manifest_path") is not None for route in routes)
 
     while True:
+        current_routes = (
+            _refresh_review_routes(routes, registry_dir)
+            if registry_backed
+            else routes
+        )
+        candidates = sorted(
+            (
+                route for route in current_routes
+                if route.get("review_enabled", True)
+                and route["instance_id"] not in excluded
+            ),
+            key=lambda route: route["instance_id"],
+        )
+        if not candidates:
+            return None
+
         scheduler_fd = os.open(scheduler_path, os.O_CREAT | os.O_RDWR, 0o600)
         selected: tuple[dict[str, Any], int] | None = None
         try:
@@ -300,11 +319,10 @@ def _acquire_review_slot(
         if selected is not None:
             return selected
         if time.monotonic() >= deadline:
-            raise RuntimeError(
-                "All connected STREENOTE reviewers are busy; the Hermes response was withheld."
+            raise TimeoutError(
+                "All enabled STREENOTE reviewers remained busy until the review queue deadline."
             )
         time.sleep(0.05)
-
 
 def _release_review_slot(lock_fd: int) -> None:
     try:
@@ -387,43 +405,6 @@ def _exchange(
     except Exception:
         connection.close()
         raise
-
-def _broadcast_review_result(
-    routes: list[dict[str, Any]],
-    request: dict[str, Any],
-    decision: str,
-    final_response: str | None,
-) -> None:
-    """Publish the final outcome to every connected terminal, including reviewer."""
-    result_request = dict(request)
-    result_request["response_text"] = final_response or ""
-    for route in routes:
-        try:
-            reply = _exchange(
-                route["socket_path"],
-                result_request,
-                route["instance_id"],
-                observe_only=True,
-                phase="result",
-                decision=decision,
-            )
-            if reply.get("decision") != "observed":
-                raise RuntimeError("terminal did not acknowledge final-result broadcast")
-            _log_event(
-                "REVIEW_RESULT_BROADCAST",
-                request_id=request["request_id"],
-                instance_id=route["instance_id"],
-                decision=decision,
-            )
-        except Exception as error:
-            _log_event(
-                "REVIEW_RESULT_BROADCAST_ERROR",
-                request_id=request["request_id"],
-                instance_id=route["instance_id"],
-                decision=decision,
-                error=str(error),
-            )
-
 
 
 def _render_prompt_text(value: Any) -> str | None:
@@ -697,7 +678,7 @@ def review_response(
     platform: str = "",
     **kwargs: Any,
 ) -> str | None:
-    """Broadcast each final reply to every terminal and assign one reviewer."""
+    """Assign each final reply to one active, currently available reviewer."""
     del kwargs
     required = _review_required()
     _log_event(
@@ -739,60 +720,41 @@ def review_response(
         "response_text": response_text,
     }
 
-    # Only terminals with /review on are eligible to make the release
-    # decision. Every other connected terminal still receives a read-only
-    # copy, so the shared conversation remains visible across SSH windows.
+    # Dispatch only to an opted-in, currently available reviewer. Observer
+    # terminals are not contacted; their journal event fan-out is independent
+    # of review assignment.
     excluded: set[str] = set()
     reply: dict[str, Any] | None = None
     selected_route: dict[str, Any] | None = None
-    reviewers_were_configured = any(
-        route.get("review_enabled", True) for route in routes
-    )
-    max_attempts = max(1, len(routes))
-    for _ in range(max_attempts):
+
+    while True:
         try:
-            selected_route, slot_fd = _acquire_review_slot(
+            acquired = _acquire_review_slot(
                 routes, registry_dir, excluded=excluded
             )
-        except RuntimeError as error:
-            _log_event("REVIEW_POOL_UNAVAILABLE", error=str(error), required=required)
-            if reviewers_were_configured:
-                raise
+        except TimeoutError as error:
+            _log_event(
+                "REVIEW_POOL_BUSY",
+                request_id=request_id,
+                error=str(error),
+                required=required,
+            )
+            raise RuntimeError(
+                "All active STREENOTE reviewers are busy; the Hermes response was withheld."
+            ) from error
+
+        if acquired is None:
             selected_route = None
+            _log_event(
+                "REVIEW_BYPASS",
+                request_id=request_id,
+                required=required,
+                reason="no active reviewers",
+            )
             break
 
+        selected_route, slot_fd = acquired
         try:
-            for observer in routes:
-                if observer["instance_id"] == selected_route["instance_id"]:
-                    continue
-                try:
-                    observed = _exchange(
-                        observer["socket_path"],
-                        request,
-                        observer["instance_id"],
-                        observe_only=True,
-                    )
-                    if observed.get("decision") != "observed":
-                        _log_event(
-                            "BROADCAST_DELIVERY_ERROR",
-                            request_id=request_id,
-                            instance_id=observer["instance_id"],
-                            error="observer did not acknowledge broadcast",
-                        )
-                    else:
-                        _log_event(
-                            "BROADCAST_DELIVERED",
-                            request_id=request_id,
-                            instance_id=observer["instance_id"],
-                        )
-                except Exception as error:
-                    _log_event(
-                        "BROADCAST_DELIVERY_ERROR",
-                        request_id=request_id,
-                        instance_id=observer["instance_id"],
-                        error=str(error),
-                    )
-
             try:
                 reply = _exchange(
                     selected_route["socket_path"],
@@ -826,8 +788,9 @@ def review_response(
                         "All registered STREENOTE review sockets are stale or unavailable; "
                         "the Hermes response was withheld."
                     ) from error
+                selected_route = None
+                reply = None
                 continue
-            break
         except (TimeoutError, socket.timeout) as error:
             _log_event("REVIEW_ERROR", request_id=request_id, error="socket timeout")
             raise RuntimeError(
@@ -841,33 +804,27 @@ def review_response(
         finally:
             _release_review_slot(slot_fd)
 
+        if reply and reply.get("decision") == "bypass":
+            # The operator may have opted out after the dispatcher read the
+            # manifest but before the socket accepted this request. Do not
+            # assign to that terminal again; refresh and try another reviewer.
+            excluded.add(selected_route["instance_id"])
+            _log_event(
+                "REVIEWER_OPTED_OUT_DURING_DISPATCH",
+                request_id=request_id,
+                instance_id=selected_route["instance_id"],
+            )
+            selected_route = None
+            reply = None
+            continue
+        break
+
     if selected_route is None:
-        # All terminals are connected but have deliberately disabled review.
-        # They still receive the response as read-only copies; this is
-        # equivalent to the existing explicit /review off override.
-        for observer in routes:
-            try:
-                observed = _exchange(
-                    observer["socket_path"],
-                    request,
-                    observer["instance_id"],
-                    observe_only=True,
-                )
-                _log_event(
-                    "BROADCAST_DELIVERED" if observed.get("decision") == "observed" else "BROADCAST_DELIVERY_ERROR",
-                    request_id=request_id,
-                    instance_id=observer["instance_id"],
-                )
-            except Exception as error:
-                _log_event(
-                    "BROADCAST_DELIVERY_ERROR",
-                    request_id=request_id,
-                    instance_id=observer["instance_id"],
-                    error=str(error),
-                )
-        _broadcast_review_result(routes, request, "bypass", response_text)
-        _log_event("REVIEW_BYPASS", request_id=request_id, required=required, reason="no enabled reviewers")
+        # Every connected terminal has explicitly opted out (or became
+        # unavailable while this request was queued). This deliberate operator
+        # choice bypasses even STREENOTE_HERMES_REVIEW_REQUIRED.
         return None
+
     if reply is None:
         raise RuntimeError(
             "No connected STREENOTE reviewer was available; the Hermes response was withheld."
