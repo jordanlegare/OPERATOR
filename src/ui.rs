@@ -134,7 +134,7 @@ fn draw_hermes_review(frame: &mut Frame, app: &mut App, theme: Theme) {
         .constraints([
             Constraint::Length(2),
             Constraint::Min(1),
-            Constraint::Length(2),
+            Constraint::Length(3),
         ])
         .split(inner);
 
@@ -228,6 +228,10 @@ fn draw_hermes_review(frame: &mut Frame, app: &mut App, theme: Theme) {
 
     let footer = vec![
         Line::from(vec![
+            Span::styled(" STATUS ", Style::default().fg(theme.bg).bg(theme.warning).add_modifier(Modifier::BOLD)),
+            Span::styled(app.status.clone(), Style::default().fg(theme.text)),
+        ]),
+        Line::from(vec![
             Span::styled(" F2 ", Style::default().fg(theme.bg).bg(theme.success).add_modifier(Modifier::BOLD)),
             Span::styled(" RELEASE ORIGINAL    ", Style::default().fg(theme.success).add_modifier(Modifier::BOLD)),
             Span::styled(" F3 ", Style::default().fg(theme.bg).bg(theme.info).add_modifier(Modifier::BOLD)),
@@ -236,7 +240,7 @@ fn draw_hermes_review(frame: &mut Frame, app: &mut App, theme: Theme) {
             Span::styled(" WITHHOLD RESPONSE", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(Span::styled(
-            "Ctrl+A select all · type/paste to replace · arrows move · Enter newline · F2/F3/F4 decide · Esc does not release",
+            "Ctrl+A select all · Ctrl+V clipboard · Shift+Insert / terminal Paste inserts text · type to replace · Esc keeps held",
             Style::default().fg(theme.muted),
         )),
     ];
