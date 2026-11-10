@@ -380,6 +380,17 @@ impl HermesReviewServer {
             .and_then(|path| path.parent().map(PathBuf::from))
     }
 
+    /// Count registered terminals that are opted into Hermes final-answer
+    /// review and still have a live process and Unix-domain listener.
+    ///
+    /// The registry is shared by every STREENOTE SSH session for this user,
+    /// so each terminal can independently refresh the same live count.
+    pub fn active_reviewer_count(&self) -> usize {
+        self.session_registry_dir()
+            .map(|directory| count_active_reviewers_in(&directory))
+            .unwrap_or(0)
+    }
+
     pub fn set_enabled(&self, enabled: bool) {
         let previous = self.enabled.swap(enabled, Ordering::Relaxed);
         if previous != enabled {
@@ -466,6 +477,66 @@ fn resolve_review_session_dir(explicit: Option<PathBuf>, legacy_socket: PathBuf)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("review-sessions")
+}
+
+/// Count enabled, live registrations in the shared reviewer registry.
+fn count_active_reviewers_in(directory: &std::path::Path) -> usize {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return 0;
+    };
+
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .filter(|entry| {
+            let Ok(bytes) = fs::read(entry.path()) else {
+                return false;
+            };
+            let Ok(registration) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                return false;
+            };
+            if registration.get("review_enabled").and_then(|value| value.as_bool()) != Some(true) {
+                return false;
+            }
+
+            let Some(pid) = registration.get("pid").and_then(|value| value.as_u64()) else {
+                return false;
+            };
+            if pid == 0 || pid > i32::MAX as u64 || !review_process_is_alive(pid as u32) {
+                return false;
+            }
+
+            let Some(socket_path) = registration.get("socket_path").and_then(|value| value.as_str()) else {
+                return false;
+            };
+            let Ok(metadata) = fs::symlink_metadata(socket_path) else {
+                return false;
+            };
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileTypeExt;
+                metadata.file_type().is_socket()
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = metadata;
+                false
+            }
+        })
+        .count()
+}
+
+#[cfg(unix)]
+fn review_process_is_alive(pid: u32) -> bool {
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    result == 0
+        || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn review_process_is_alive(_pid: u32) -> bool {
+    false
 }
 
 fn new_review_instance_id() -> String {
@@ -860,7 +931,11 @@ mod tests {
         assert!(second_registration.exists());
         first.set_enabled(true);
         second.set_enabled(true);
+        assert_eq!(first.active_reviewer_count(), 2);
+        assert_eq!(second.active_reviewer_count(), 2);
+
         first.set_enabled(false);
+        assert_eq!(second.active_reviewer_count(), 1);
         let first_manifest: serde_json::Value = serde_json::from_slice(
             &fs::read(&first_registration).expect("read first registration manifest"),
         ).expect("parse first registration manifest");
@@ -879,6 +954,7 @@ mod tests {
         assert!(!first_socket.exists());
         assert!(second_registration.exists());
         assert!(second_socket.exists());
+        assert_eq!(second.active_reviewer_count(), 1);
 
         drop(second);
         let _ = fs::remove_dir_all(root.parent().expect("test root"));
