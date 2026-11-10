@@ -113,6 +113,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
     show_access_disclaimer(&mut terminal)?;
     let size = terminal.size()?;
+
+    // Start review routing before the PTY so its identity can be inherited by
+    // the interactive shell and Hermes' pre_llm_call capture hook.
+    let mut review_server = HermesReviewServer::start()?;
+    if let Some(instance_id) = review_server.instance_id() {
+        std::env::set_var("STREENOTE_HERMES_REVIEW_INSTANCE_ID", instance_id);
+        if let Some(registry_dir) = review_server.session_registry_dir() {
+            std::env::set_var("STREENOTE_HERMES_REVIEW_SESSION_DIR", registry_dir);
+        }
+    }
+
     let shell_rows = size.height.saturating_sub(12).max(8);
     let mut shell = match ShellSession::spawn(size.width, shell_rows) {
         Ok(session) => Some(session),
@@ -142,7 +153,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut hermes_bridge = HermesBridge::default();
-    let mut review_server = HermesReviewServer::start()?;
     review_server.set_enabled(app.review_hermes_responses);
     let result = run(
         &mut terminal,
