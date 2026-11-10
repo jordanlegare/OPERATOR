@@ -181,6 +181,59 @@ class HermesReviewPluginTests(unittest.TestCase):
                 "One response shared with every connected SSH terminal.",
             )
 
+    def test_edited_final_answer_is_propagated_to_reviewer_and_observer_terminals(self):
+        registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
+        registry.mkdir(mode=0o700, parents=True)
+        requests_by_instance = {}
+        workers = []
+        errors_by_instance = {}
+        for instance_id, review_enabled in (("a1", True), ("b2", False)):
+            socket_path = registry / f"{instance_id}.sock"
+            worker, requests, errors = self._serve(
+                {
+                    "version": 1,
+                    "decision": "replace",
+                    "response_text": "Edited answer delivered to every terminal.",
+                },
+                socket_path=socket_path,
+                accept_count=2,
+            )
+            workers.append(worker)
+            requests_by_instance[instance_id] = requests
+            errors_by_instance[instance_id] = errors
+            manifest = registry / f"{instance_id}.json"
+            manifest.write_text(json.dumps({
+                "version": 1,
+                "instance_id": instance_id,
+                "socket_path": str(socket_path),
+                "review_enabled": review_enabled,
+            }))
+            os.chmod(manifest, 0o600)
+
+        result = PLUGIN.review_response(
+            "Original unedited answer.",
+            session_id="edited-broadcast-session",
+            model="qwen3.5:latest",
+            platform="api_server",
+        )
+        self.assertEqual(result, "Edited answer delivered to every terminal.")
+
+        for worker in workers:
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+        self.assertFalse(any(error for errors in errors_by_instance.values() for error in errors))
+
+        for instance_id in ("a1", "b2"):
+            self.assertEqual(len(requests_by_instance[instance_id]), 2)
+            final_message = requests_by_instance[instance_id][1]
+            self.assertTrue(final_message["observe_only"])
+            self.assertEqual(final_message["phase"], "result")
+            self.assertEqual(final_message["decision"], "replace")
+            self.assertEqual(
+                final_message["response_text"],
+                "Edited answer delivered to every terminal.",
+            )
+
     def test_review_pool_round_robins_and_skips_a_terminal_with_an_active_lease(self):
         registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
         registry.mkdir(mode=0o700, parents=True)
