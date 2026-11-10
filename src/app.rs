@@ -1,5 +1,6 @@
 use std::{
     cell::{Ref, RefCell},
+    collections::VecDeque,
     io,
     path::PathBuf,
     time::{Duration, Instant},
@@ -10,7 +11,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     conversations::{build_threads, collapse_live_streams, is_hermes_event, ConversationThread},
-    hermes_review::{diagnostics_summary, ReviewDecision, ReviewRequest, MAX_REVIEW_BYTES},
+    hermes_review::{
+        diagnostics_summary, ReviewBroadcast, ReviewDecision, ReviewRequest, MAX_REVIEW_BYTES,
+    },
     shell::ShellSession,
     settings::Settings,
     storage::{
@@ -130,8 +133,13 @@ pub struct App {
     pub conversation_focus_entry: Option<usize>,
     /// Whether final Hermes responses must be approved before client delivery.
     pub review_hermes_responses: bool,
+    /// Throttle disk checks while synchronizing the per-user review preference.
+    last_review_settings_check: Instant,
     /// Active final-response review; its channel is the only release path to Hermes.
     pub pending_review: Option<ReviewRequest>,
+    /// Read-only copies of final responses delivered to this non-reviewing terminal.
+    pub review_broadcasts: VecDeque<ReviewBroadcast>,
+    pub review_broadcast_scroll: u16,
     /// Editable copy of the held answer and its UTF-8 byte cursor.
     pub review_text: String,
     pub review_cursor: usize,
@@ -208,7 +216,10 @@ impl App {
             conversation_follow_tail: true,
             conversation_focus_entry: None,
             review_hermes_responses: settings.review_hermes_responses,
+            last_review_settings_check: Instant::now(),
             pending_review: None,
+            review_broadcasts: VecDeque::new(),
+            review_broadcast_scroll: 0,
             review_text: String::new(),
             review_cursor: 0,
             review_vertical_scroll: 0,
@@ -1274,6 +1285,26 @@ impl App {
         };
     }
 
+    /// Synchronize the per-user review preference written by another SSH-launched
+    /// STREENOTE process. A single /review on therefore makes every live
+    /// terminal eligible for the shared reviewer pool.
+    pub fn sync_hermes_review_setting(&mut self) -> bool {
+        if self.last_review_settings_check.elapsed() < Duration::from_millis(250) {
+            return false;
+        }
+        self.last_review_settings_check = Instant::now();
+        let persisted = Settings::load().review_hermes_responses;
+        if persisted == self.review_hermes_responses {
+            return false;
+        }
+        self.review_hermes_responses = persisted;
+        self.status = format!(
+            "Shared Hermes response review is now {} in all connected STREENOTE terminals.",
+            if persisted { "ON" } else { "OFF" }
+        );
+        true
+    }
+
     pub fn set_hermes_review_enabled(&mut self, enabled: bool) {
         if self.review_hermes_responses == enabled {
             self.status = format!(
@@ -1292,6 +1323,50 @@ impl App {
             Err(error) => format!(
                 "Hermes response review changed for this session but settings could not be saved: {error}"
             ),
+        };
+    }
+
+    pub fn receive_hermes_broadcast(&mut self, broadcast: ReviewBroadcast) {
+        // The result message updates the corresponding pending notification
+        // instead of creating a second copy. It is also valid for the reviewer
+        // terminal to receive only the result after its editor closes.
+        if let Some(existing) = self.review_broadcasts.iter_mut().find(|item| {
+            item.request_id == broadcast.request_id
+        }) {
+            *existing = broadcast;
+        } else {
+            // Retain every response notification until the operator dismisses
+            // it; silently dropping an older answer would break terminal fan-out.
+            self.review_broadcasts.push_back(broadcast);
+        }
+        if self.pending_review.is_none() {
+            let latest = self.review_broadcasts.back();
+            self.status = match latest.and_then(|item| item.decision.as_deref()) {
+                Some("approve") => "Hermes answer approved unchanged and shared with all connected terminals.".to_string(),
+                Some("replace") => "Edited Hermes answer approved and shared with all connected terminals.".to_string(),
+                Some("reject") => "Hermes answer withheld by the reviewer and shared as a withheld status.".to_string(),
+                Some("bypass") => "Hermes answer released without review and shared with all connected terminals.".to_string(),
+                _ => "A Hermes response is awaiting review in another connected STREENOTE terminal.".to_string(),
+            };
+        }
+    }
+
+    pub fn dismiss_hermes_broadcast(&mut self) {
+        self.review_broadcasts.pop_front();
+        self.review_broadcast_scroll = 0;
+        if !self.review_broadcasts.is_empty() {
+            self.status = format!(
+                "{} more Hermes response broadcast(s) waiting.",
+                self.review_broadcasts.len()
+            );
+        }
+    }
+
+    pub fn scroll_hermes_broadcast(&mut self, amount: i32) {
+        self.review_broadcast_scroll = if amount < 0 {
+            self.review_broadcast_scroll.saturating_sub(amount.unsigned_abs() as u16)
+        } else {
+            self.review_broadcast_scroll.saturating_add(amount as u16)
         };
     }
 
@@ -2099,6 +2174,46 @@ mod tests {
         );
         assert!(app.pending_review.is_none());
         assert!(app.review_text.is_empty());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn shared_hermes_broadcast_is_upgraded_in_place_with_the_final_edited_answer() {
+        use crate::hermes_review::ReviewBroadcast;
+
+        let (mut app, path) = test_app();
+        app.receive_hermes_broadcast(ReviewBroadcast {
+            request_id: "shared-review-001".to_string(),
+            session_id: "session-1".to_string(),
+            model: "qwen3.5:latest".to_string(),
+            platform: "api_server".to_string(),
+            response_text: "Original draft".to_string(),
+            phase: "pending".to_string(),
+            decision: None,
+        });
+        assert_eq!(app.review_broadcasts.len(), 1);
+        assert_eq!(app.review_broadcasts[0].response_text, "Original draft");
+
+        app.receive_hermes_broadcast(ReviewBroadcast {
+            request_id: "shared-review-001".to_string(),
+            session_id: "session-1".to_string(),
+            model: "qwen3.5:latest".to_string(),
+            platform: "api_server".to_string(),
+            response_text: "Edited and approved final text".to_string(),
+            phase: "result".to_string(),
+            decision: Some("replace".to_string()),
+        });
+        assert_eq!(app.review_broadcasts.len(), 1, "result must update, not duplicate");
+        assert_eq!(
+            app.review_broadcasts[0].response_text,
+            "Edited and approved final text"
+        );
+        assert_eq!(
+            app.review_broadcasts[0].decision.as_deref(),
+            Some("replace")
+        );
+        assert!(app.status.contains("Edited Hermes answer approved"));
 
         let _ = fs::remove_file(path);
     }

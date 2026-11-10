@@ -84,13 +84,13 @@ pub fn diagnostics_summary() -> String {
         .and_then(|r| r.get("timestamp").and_then(|v| v.as_str())).unwrap_or("never");
     let socket = latest_diagnostic(&records, "SOCKET_ROUTES_RESOLVED")
         .map(|record| {
-            let details = record.get("details");
+            let details = record.get("details").unwrap_or(record);
             let count = details
-                .and_then(|value| value.get("route_count"))
+                .get("route_count")
                 .and_then(|value| value.as_u64())
                 .unwrap_or(0);
             let directory = details
-                .and_then(|value| value.get("registry_dir"))
+                .get("registry_dir")
                 .and_then(|value| value.as_str())
                 .unwrap_or("unknown registry");
             format!("{count} active listener(s) in {directory}")
@@ -101,11 +101,19 @@ pub fn diagnostics_summary() -> String {
             format!("{} ({})", resolved, if exists { "exists" } else { "missing" })
         }))
         .unwrap_or_else(|| "not checked".to_string());
-    let route = latest_diagnostic(&records, "SESSION_ROUTE_SELECTED")
+    let route = latest_diagnostic(&records, "SESSION_REVIEW_ASSIGNED")
+        .or_else(|| latest_diagnostic(&records, "SESSION_ROUTE_SELECTED"))
         .map(|record| {
-            let session = record.get("session_hash").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let session = record.get("session_hash").and_then(|v| v.as_str()).unwrap_or("not pinned");
             let instance = record.get("instance_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-            format!("session {session} -> {instance}")
+            format!("reviewer {instance} (session {session})")
+        })
+        .unwrap_or_else(|| "none".to_string());
+    let broadcast = latest_diagnostic(&records, "REVIEW_RESULT_BROADCAST")
+        .map(|record| {
+            let decision = record.get("decision").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let instance = record.get("instance_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+            format!("{decision} -> {instance}")
         })
         .unwrap_or_else(|| "none".to_string());
     let connected = latest_diagnostic(&records, "SOCKET_CONNECT_OK")
@@ -119,7 +127,7 @@ pub fn diagnostics_summary() -> String {
     let error = latest_diagnostic(&records, "REVIEW_ERROR")
         .and_then(|r| r.get("error").or_else(|| r.get("details").and_then(|d| d.get("error"))))
         .and_then(|v| v.as_str()).unwrap_or("none");
-    format!("plugin registered: {plugin}; callback: {callback}; listeners: {socket}; route: {route}; connected: {connected}; STREENOTE request: {request}; last decision: {decision}; last error: {error}; log: {}", path.display())
+    format!("plugin registered: {plugin}; callback: {callback}; listeners: {socket}; reviewer: {route}; final broadcast: {broadcast}; connected: {connected}; STREENOTE request: {request}; last decision: {decision}; last error: {error}; log: {}", path.display())
 }
 
 #[derive(Debug)]
@@ -131,6 +139,17 @@ pub struct ReviewRequest {
     pub response_text: String,
     pub expires_at: Instant,
     pub reply: SyncSender<ReviewDecision>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReviewBroadcast {
+    pub request_id: String,
+    pub session_id: String,
+    pub model: String,
+    pub platform: String,
+    pub response_text: String,
+    pub phase: String,
+    pub decision: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,7 +169,17 @@ struct WireRequest {
     model: String,
     #[serde(default)]
     platform: String,
+    #[serde(default)]
+    observe_only: bool,
+    #[serde(default = "default_broadcast_phase")]
+    phase: String,
+    #[serde(default)]
+    decision: Option<String>,
     response_text: String,
+}
+
+fn default_broadcast_phase() -> String {
+    "pending".to_string()
 }
 
 #[derive(Debug, Serialize)]
@@ -165,6 +194,7 @@ struct WireResponse {
 
 pub struct HermesReviewServer {
     receiver: Receiver<ReviewRequest>,
+    broadcast_receiver: Receiver<ReviewBroadcast>,
     enabled: Arc<AtomicBool>,
     socket_path: PathBuf,
     instance_id: Option<String>,
@@ -214,6 +244,7 @@ impl HermesReviewServer {
             "instance_id": instance_id,
             "socket_path": server.socket_path,
             "pid": std::process::id(),
+            "review_enabled": false,
         });
         write_session_registration(&registration_path, &registration)?;
         append_diagnostic_event("REVIEW_SERVER_REGISTERED", serde_json::json!({
@@ -267,6 +298,7 @@ impl HermesReviewServer {
         listener.set_nonblocking(true)?;
 
         let (sender, receiver) = mpsc::channel();
+        let (broadcast_sender, broadcast_receiver) = mpsc::channel();
         let enabled = Arc::new(AtomicBool::new(false));
         let worker_enabled = Arc::clone(&enabled);
         let stop = Arc::new(AtomicBool::new(false));
@@ -281,6 +313,7 @@ impl HermesReviewServer {
                             // accept loop can keep polling, and listener shutdown
                             // never waits for an operator to decide a pending answer.
                             let connection_sender = sender.clone();
+                            let connection_broadcast_sender = broadcast_sender.clone();
                             let connection_enabled = Arc::clone(&worker_enabled);
                             let connection_stop = Arc::clone(&worker_stop);
                             let _ = thread::Builder::new()
@@ -289,6 +322,7 @@ impl HermesReviewServer {
                                     if let Err(error) = handle_connection(
                                         stream,
                                         &connection_sender,
+                                        &connection_broadcast_sender,
                                         &connection_enabled,
                                         &connection_stop,
                                     ) {
@@ -315,6 +349,7 @@ impl HermesReviewServer {
 
         Ok(Self {
             receiver,
+            broadcast_receiver,
             enabled,
             socket_path,
             instance_id: None,
@@ -346,11 +381,34 @@ impl HermesReviewServer {
     }
 
     pub fn set_enabled(&self, enabled: bool) {
-        self.enabled.store(enabled, Ordering::Relaxed);
+        let previous = self.enabled.swap(enabled, Ordering::Relaxed);
+        if previous != enabled {
+            if let (Some(instance_id), Some(registration_path)) =
+                (self.instance_id.as_deref(), self.registration_path.as_ref())
+            {
+                let registration = serde_json::json!({
+                    "version": 1,
+                    "instance_id": instance_id,
+                    "socket_path": self.socket_path,
+                    "pid": std::process::id(),
+                    "review_enabled": enabled,
+                });
+                if let Err(error) = write_session_registration(registration_path, &registration) {
+                    append_diagnostic_event("REVIEW_REGISTRATION_UPDATE_FAILED", serde_json::json!({
+                        "instance_id": instance_id,
+                        "error": error.to_string(),
+                    }));
+                }
+            }
+        }
     }
 
     pub fn try_recv(&self) -> Option<ReviewRequest> {
         self.receiver.try_recv().ok()
+    }
+
+    pub fn try_recv_broadcast(&self) -> Option<ReviewBroadcast> {
+        self.broadcast_receiver.try_recv().ok()
     }
 
     #[cfg(test)]
@@ -379,6 +437,14 @@ impl Drop for HermesReviewServer {
         }
         if let Some(registration_path) = &self.registration_path {
             let _ = fs::remove_file(registration_path);
+            if let (Some(instance_id), Some(registry_dir)) =
+                (self.instance_id.as_deref(), self.session_registry_dir())
+            {
+                // Remove only this TUI's inbox. Other live SSH instances keep
+                // their independent copies of every queued hook event.
+                let inbox = registry_dir.join("inboxes").join(instance_id);
+                let _ = fs::remove_dir_all(inbox);
+            }
         }
         let _ = fs::remove_file(&self.socket_path);
     }
@@ -509,6 +575,7 @@ fn resolve_review_socket_path(
 fn handle_connection(
     mut stream: std::os::unix::net::UnixStream,
     sender: &Sender<ReviewRequest>,
+    broadcast_sender: &Sender<ReviewBroadcast>,
     enabled: &AtomicBool,
     stop: &AtomicBool,
 ) -> io::Result<()> {
@@ -557,7 +624,9 @@ fn handle_connection(
         || request.session_id.len() > 1024
         || request.model.len() > 1024
         || request.platform.len() > 128
-        || request.response_text.is_empty()
+        || request.phase.len() > 16
+        || request.decision.as_ref().is_some_and(|decision| decision.len() > 16)
+        || (!request.observe_only && request.response_text.is_empty())
         || request.response_text.len() > MAX_REVIEW_BYTES
     {
         return write_wire_response(
@@ -575,7 +644,43 @@ fn handle_connection(
         "request_id": request.request_id,
         "platform": request.platform,
         "model": request.model,
+        "observe_only": request.observe_only,
     }));
+
+    // Observer copies are read-only notifications. They are delivered to
+    // every other connected terminal, acknowledged immediately, and cannot
+    // approve, edit, or reject the held Hermes response.
+    if request.observe_only {
+        let broadcast = ReviewBroadcast {
+            request_id: request.request_id.clone(),
+            session_id: request.session_id.clone(),
+            model: request.model.clone(),
+            platform: request.platform.clone(),
+            response_text: request.response_text.clone(),
+            phase: request.phase.clone(),
+            decision: request.decision.clone(),
+        };
+        if broadcast_sender.send(broadcast).is_err() {
+            return write_wire_response(
+                &mut stream,
+                WireResponse {
+                    version: 1,
+                    decision: "reject",
+                    response_text: None,
+                    error: Some("STREENOTE broadcast queue is unavailable".to_string()),
+                },
+            );
+        }
+        return write_wire_response(
+            &mut stream,
+            WireResponse {
+                version: 1,
+                decision: "observed",
+                response_text: None,
+                error: None,
+            },
+        );
+    }
 
     // A missing STREENOTE toggle must never surprise the operator with a
     // blocking prompt. The plugin remains loaded, but the original response
@@ -753,6 +858,11 @@ mod tests {
         assert!(second_socket.exists());
         assert!(first_registration.exists());
         assert!(second_registration.exists());
+        first.set_enabled(true);
+        let first_manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(&first_registration).expect("read registration manifest"),
+        ).expect("parse registration manifest");
+        assert_eq!(first_manifest["review_enabled"], true);
         assert_eq!(
             fs::read_dir(&root).expect("read session registry").count(),
             4
@@ -806,6 +916,76 @@ mod tests {
             ),
             PathBuf::from("/custom/review.sock")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observer_broadcast_is_delivered_read_only_without_creating_a_review_request() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+
+        let root = test_root();
+        let socket = root.join("review.sock");
+        let server = HermesReviewServer::start_at_for_test(socket.clone())
+            .expect("start listener");
+
+        let client_socket = socket.clone();
+        let client = thread::spawn(move || {
+            let mut stream = UnixStream::connect(&client_socket).expect("connect observer");
+            let pending = json!({
+                "version": 1,
+                "request_id": "broadcast-001",
+                "session_id": "session-shared",
+                "model": "qwen3.5:latest",
+                "platform": "api_server",
+                "observe_only": true,
+                "phase": "pending",
+                "response_text": "Original draft",
+            });
+            writeln!(stream, "{pending}").expect("send pending broadcast");
+            let mut response = String::new();
+            BufReader::new(stream)
+                .read_line(&mut response)
+                .expect("read pending acknowledgment");
+            let response: serde_json::Value =
+                serde_json::from_str(&response).expect("decode pending acknowledgment");
+            assert_eq!(response["decision"], "observed");
+
+            let mut stream = UnixStream::connect(client_socket).expect("connect result observer");
+            let result = json!({
+                "version": 1,
+                "request_id": "broadcast-001",
+                "session_id": "session-shared",
+                "model": "qwen3.5:latest",
+                "platform": "api_server",
+                "observe_only": true,
+                "phase": "result",
+                "decision": "replace",
+                "response_text": "Edited final answer",
+            });
+            writeln!(stream, "{result}").expect("send final-result broadcast");
+            let mut response = String::new();
+            BufReader::new(stream)
+                .read_line(&mut response)
+                .expect("read result acknowledgment");
+            let response: serde_json::Value =
+                serde_json::from_str(&response).expect("decode result acknowledgment");
+            assert_eq!(response["decision"], "observed");
+        });
+
+        client.join().expect("observer client completes");
+        let pending = server.try_recv_broadcast().expect("TUI receives pending copy");
+        assert_eq!(pending.request_id, "broadcast-001");
+        assert_eq!(pending.phase, "pending");
+        assert_eq!(pending.response_text, "Original draft");
+        let result = server.try_recv_broadcast().expect("TUI receives final result copy");
+        assert_eq!(result.request_id, "broadcast-001");
+        assert_eq!(result.phase, "result");
+        assert_eq!(result.decision.as_deref(), Some("replace"));
+        assert_eq!(result.response_text, "Edited final answer");
+        assert!(server.try_recv().is_none(), "observer copy must not open an editable review");
+        drop(server);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]

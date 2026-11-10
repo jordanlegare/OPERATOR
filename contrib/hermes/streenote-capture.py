@@ -7,7 +7,6 @@ emits a Hermes hook-protocol directive on stdout.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -74,92 +73,6 @@ def _review_instance_is_active(registry: Path, instance_id: str) -> bool:
         return False
 
 
-def write_review_session_route(
-    registry_dir: str | Path, session_id: str, instance_id: str
-) -> Path:
-    """Bind a Hermes session to the STREENOTE SSH instance that submitted it.
-
-    The file contains only a SHA-256 session digest and the non-secret instance
-    ID. It is atomically replaced and protected by a per-session advisory lock.
-    """
-    if not isinstance(session_id, str) or not session_id or len(session_id) > 1024:
-        raise ValueError("invalid Hermes session_id for review routing")
-    if not isinstance(instance_id, str) or not re.fullmatch(r"[a-f0-9-]{1,64}", instance_id):
-        raise ValueError("invalid STREENOTE review instance ID")
-    registry = Path(registry_dir).expanduser()
-    if not registry.is_absolute():
-        raise ValueError("STREENOTE review registry path must be absolute")
-
-    routes = registry / "routes"
-    routes.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        os.chmod(registry, 0o700)
-        os.chmod(routes, 0o700)
-    except OSError:
-        pass
-
-    registry_stat = registry.stat()
-    if registry_stat.st_uid != os.getuid() or (registry_stat.st_mode & 0o077):
-        raise PermissionError("STREENOTE review registry is not private to this Unix user")
-
-    session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
-    assignment = routes / f"{session_hash}.json"
-    lock_path = routes / f"{session_hash}.lock"
-    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        os.fchmod(lock_fd, 0o600)
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        # A Hermes session is an ownership unit. Two SSH-launched clients
-        # can submit turns close together; the first live origin must remain
-        # authoritative rather than allowing a later hook to steal the route.
-        try:
-            existing_stat = assignment.lstat()
-            if (
-                stat.S_ISREG(existing_stat.st_mode)
-                and existing_stat.st_uid == os.getuid()
-                and not (stat.S_IMODE(existing_stat.st_mode) & 0o077)
-                and existing_stat.st_size <= 4096
-            ):
-                existing = json.loads(assignment.read_text(encoding="utf-8"))
-                if isinstance(existing, dict):
-                    owner = existing.get("instance_id")
-                    if (
-                        existing.get("version") == 1
-                        and existing.get("session_hash") == session_hash
-                        and isinstance(owner, str)
-                        and _review_instance_is_active(registry, owner)
-                    ):
-                        return assignment
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            pass
-
-        record = {
-            "version": 1,
-            "session_hash": session_hash,
-            "instance_id": instance_id,
-        }
-        fd, temporary_name = tempfile.mkstemp(
-            prefix=f".{session_hash}.", suffix=".tmp", dir=routes
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as temporary:
-                os.fchmod(temporary.fileno(), 0o600)
-                json.dump(record, temporary, separators=(",", ":"))
-                temporary.write("\n")
-                temporary.flush()
-                os.fsync(temporary.fileno())
-            os.replace(temporary_name, assignment)
-            os.chmod(assignment, 0o600)
-        except Exception:
-            try:
-                os.unlink(temporary_name)
-            except OSError:
-                pass
-            raise
-        return assignment
-    finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
 
 
 def make_event_id(event_name: str, session_id: object, identity_id: object) -> str:
@@ -318,7 +231,7 @@ def history_snapshot_text(history) -> str | None:
     return snapshot
 
 
-def write_inbox_event(inbox: Path, event: dict) -> None:
+def _write_inbox_event_one(inbox: Path, event: dict) -> None:
     ready = inbox / "ready"
     ready.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
@@ -349,6 +262,74 @@ def write_inbox_event(inbox: Path, event: dict) -> None:
         except OSError:
             pass
         raise
+
+
+def _connected_instance_inboxes(registry: Path) -> list[Path]:
+    """Find private per-terminal inboxes for every currently live STREENOTE listener."""
+    try:
+        registry_stat = registry.lstat()
+        if (
+            not stat.S_ISDIR(registry_stat.st_mode)
+            or registry_stat.st_uid != os.getuid()
+            or stat.S_IMODE(registry_stat.st_mode) & 0o077
+        ):
+            return []
+    except OSError:
+        return []
+
+    instance_ids = set()
+    for manifest in registry.glob("*.json"):
+        try:
+            metadata = manifest.lstat()
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) & 0o077
+                or metadata.st_size > 4096
+            ):
+                continue
+            registration = json.loads(manifest.read_text(encoding="utf-8"))
+            if not isinstance(registration, dict):
+                continue
+            instance_id = registration.get("instance_id")
+            if (
+                registration.get("version") == 1
+                and isinstance(instance_id, str)
+                and manifest.name == f"{instance_id}.json"
+                and _review_instance_is_active(registry, instance_id)
+            ):
+                instance_ids.add(instance_id)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+
+    inbox_root = registry / "inboxes"
+    return [
+        inbox_root / instance_id
+        for instance_id in sorted(instance_ids)
+    ]
+
+
+def write_inbox_event(inbox: Path, event: dict) -> None:
+    """Fan each Hermes hook event out to every live STREENOTE terminal.
+
+    Every TUI gets a private queue, so one process cannot consume another
+    terminal's messages. The shared Journal uses event IDs and an inter-process
+    file lock to persist a single copy even though every process imports it.
+    """
+    registry_value = os.environ.get("STREENOTE_HERMES_REVIEW_SESSION_DIR")
+    recipients = []
+    if registry_value:
+        registry = Path(registry_value).expanduser()
+        if registry.is_absolute():
+            recipients = _connected_instance_inboxes(registry)
+
+    if not recipients:
+        # Preserve the original single-inbox contract for non-SSH or legacy
+        # Hermes integrations that do not publish a review-session registry.
+        recipients = [inbox]
+
+    for recipient in recipients:
+        _write_inbox_event_one(recipient, event)
 
 
 def write_history_snapshot(
@@ -468,24 +449,6 @@ def main() -> int:
         extra = payload.get("extra")
         if not isinstance(extra, dict):
             extra = {}
-
-        # Register routing as soon as Hermes identifies the session, before
-        # inspecting or size-limiting prompt content. This is the origin link
-        # used later by transform_llm_output in the shared gateway process.
-        if event_name == "pre_llm_call":
-            route_session_id = event_value(payload, extra, "session_id")
-            instance_id = os.environ.get("STREENOTE_HERMES_REVIEW_INSTANCE_ID")
-            registry_dir = os.environ.get("STREENOTE_HERMES_REVIEW_SESSION_DIR")
-            if route_session_id and instance_id and registry_dir:
-                try:
-                    write_review_session_route(
-                        registry_dir, str(route_session_id), instance_id
-                    )
-                except Exception as exc:
-                    print(
-                        f"STREENOTE Hermes review route registration failed: {exc}",
-                        file=sys.stderr,
-                    )
 
         if event_name == "pre_llm_call":
             kind = "hermes_user"

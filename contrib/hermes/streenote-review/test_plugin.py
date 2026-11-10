@@ -40,30 +40,37 @@ class HermesReviewPluginTests(unittest.TestCase):
         self.env.stop()
         self.temp_dir.cleanup()
 
-    def _serve(self, reply, socket_path=None):
+    def _serve(self, reply, socket_path=None, accept_count=1):
         errors = []
         requests = []
         path = Path(socket_path) if socket_path is not None else self.socket_path
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         listener.bind(str(path))
         os.chmod(path, 0o600)
-        listener.listen(1)
+        listener.listen(accept_count)
         listener.settimeout(4)
 
         def run():
             try:
-                connection, _ = listener.accept()
-                with connection:
-                    data = bytearray()
-                    while b"\n" not in data:
-                        chunk = connection.recv(65536)
-                        if not chunk:
-                            raise AssertionError("plugin closed before sending request")
-                        data.extend(chunk)
-                    requests.append(json.loads(bytes(data).split(b"\n", 1)[0]))
-                    connection.sendall(
-                        json.dumps(reply, ensure_ascii=False).encode("utf-8") + b"\n"
-                    )
+                for _ in range(accept_count):
+                    connection, _ = listener.accept()
+                    with connection:
+                        data = bytearray()
+                        while b"\n" not in data:
+                            chunk = connection.recv(65536)
+                            if not chunk:
+                                raise AssertionError("plugin closed before sending request")
+                            data.extend(chunk)
+                        request = json.loads(bytes(data).split(b"\n", 1)[0])
+                        requests.append(request)
+                        response = (
+                            {"version": 1, "decision": "observed"}
+                            if request.get("observe_only")
+                            else reply
+                        )
+                        connection.sendall(
+                            json.dumps(response, ensure_ascii=False).encode("utf-8") + b"\n"
+                        )
             except socket.timeout:
                 pass
             except Exception as error:  # surfaced in the test thread below
@@ -78,7 +85,6 @@ class HermesReviewPluginTests(unittest.TestCase):
         worker = threading.Thread(target=run, daemon=True)
         worker.start()
         return worker, requests, errors
-
     def _call(self, session_id="session-123"):
         return PLUGIN.review_response(
             "The unreviewed draft.",
@@ -104,117 +110,198 @@ class HermesReviewPluginTests(unittest.TestCase):
         records = [json.loads(line) for line in self.diagnostic_path.read_text().splitlines()]
         self.assertEqual(records[-1]["event"], "PLUGIN_REGISTERED")
 
-    def test_pre_llm_capture_binds_each_hermes_session_to_its_originating_ssh_instance(self):
+    def test_response_is_broadcast_to_all_terminals_and_reviewed_by_one_enabled_terminal(self):
         registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
         registry.mkdir(mode=0o700, parents=True)
-        instance_ids = ["a1", "b2", "c3"]
+        instance_ids = ("a1", "b2", "c3")
         workers = []
-        server_error_lists = []
+        requests_by_instance = {}
+        errors_by_instance = {}
+
         for instance_id in instance_ids:
             socket_path = registry / f"{instance_id}.sock"
-            worker, _, listener_errors = self._serve(
-                {
-                    "version": 1,
-                    "decision": "replace",
-                    "response_text": f"routed:{instance_id}",
-                },
+            worker, requests, errors = self._serve(
+                {"version": 1, "decision": "approve"},
                 socket_path=socket_path,
+                accept_count=2,
             )
             workers.append(worker)
-            server_error_lists.append(listener_errors)
-            manifest_path = registry / f"{instance_id}.json"
-            manifest_path.write_text(json.dumps({
+            requests_by_instance[instance_id] = requests
+            errors_by_instance[instance_id] = errors
+            manifest = registry / f"{instance_id}.json"
+            manifest.write_text(json.dumps({
                 "version": 1,
                 "instance_id": instance_id,
                 "socket_path": str(socket_path),
-                "pid": os.getpid(),
+                "review_enabled": instance_id != "c3",
             }))
-            os.chmod(manifest_path, 0o600)
+            os.chmod(manifest, 0o600)
 
-        # This is the same helper called by the existing pre_llm_call capture
-        # hook in each STREENOTE-managed PTY.
-        session_a = "hermes-session-origin-a"
-        session_b = "hermes-session-origin-b"
-        CAPTURE.write_review_session_route(registry, session_a, "a1")
-        CAPTURE.write_review_session_route(registry, session_b, "c3")
-        # Concurrent turns for the same Hermes session must not let another
-        # SSH-launched STREENOTE process steal its live origin assignment.
-        CAPTURE.write_review_session_route(registry, session_a, "b2")
-
-        routes, directory = PLUGIN._load_review_routes()
-        self.assertEqual({route["instance_id"] for route in routes}, set(instance_ids))
-        self.assertEqual(
-            PLUGIN._select_review_route(session_a, routes, directory)["instance_id"],
-            "a1",
+        result = PLUGIN.review_response(
+            "One response shared with every connected SSH terminal.",
+            session_id="shared-session-1",
+            model="qwen3.5:latest",
+            platform="api_server",
         )
         self.assertEqual(
-            PLUGIN._select_review_route(session_b, routes, directory)["instance_id"],
-            "c3",
+            result,
+            "One response shared with every connected SSH terminal.",
         )
 
-        self.assertEqual(
-            PLUGIN.review_response(
-                "Unreviewed response A",
-                session_id=session_a,
-                model="qwen3.5:latest",
-                platform="api_server",
-            ),
-            "routed:a1",
-        )
-        self.assertEqual(
-            PLUGIN.review_response(
-                "Unreviewed response B",
-                session_id=session_b,
-                model="qwen3.5:latest",
-                platform="api_server",
-            ),
-            "routed:c3",
-        )
-
-        # Existing session affinity is stable even after the active set changes.
-        self.assertEqual(
-            PLUGIN._select_review_route(session_a, routes, directory)["instance_id"],
-            "a1",
-        )
         for worker in workers:
             worker.join(timeout=5)
             self.assertFalse(worker.is_alive())
-        self.assertFalse(any(server_error_lists))
 
-    def test_multiple_review_sessions_without_origin_affinity_are_not_misrouted(self):
+        self.assertFalse(any(error for errors in errors_by_instance.values() for error in errors))
+        delivered = {
+            instance_id: requests[0]
+            for instance_id, requests in requests_by_instance.items()
+        }
+        self.assertEqual(set(delivered), set(instance_ids))
+        active = [
+            instance_id for instance_id, request in delivered.items()
+            if not request.get("observe_only", False)
+        ]
+        observers = [
+            instance_id for instance_id, request in delivered.items()
+            if request.get("observe_only", False)
+        ]
+        self.assertEqual(len(active), 1)
+        self.assertIn(active[0], ("a1", "b2"))
+        self.assertEqual(set(observers), set(instance_ids) - set(active))
+        self.assertEqual(delivered["c3"]["observe_only"], True)
+        for instance_id in instance_ids:
+            self.assertEqual(len(requests_by_instance[instance_id]), 2)
+            final_message = requests_by_instance[instance_id][1]
+            self.assertTrue(final_message.get("observe_only"))
+            self.assertEqual(final_message.get("phase"), "result")
+            self.assertEqual(final_message.get("decision"), "approve")
+            self.assertEqual(
+                final_message["response_text"],
+                "One response shared with every connected SSH terminal.",
+            )
+
+    def test_edited_final_answer_is_propagated_to_reviewer_and_observer_terminals(self):
         registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
         registry.mkdir(mode=0o700, parents=True)
-        sockets = []
+        requests_by_instance = {}
+        workers = []
+        errors_by_instance = {}
+        for instance_id, review_enabled in (("a1", True), ("b2", False)):
+            socket_path = registry / f"{instance_id}.sock"
+            worker, requests, errors = self._serve(
+                {
+                    "version": 1,
+                    "decision": "replace",
+                    "response_text": "Edited answer delivered to every terminal.",
+                },
+                socket_path=socket_path,
+                accept_count=2,
+            )
+            workers.append(worker)
+            requests_by_instance[instance_id] = requests
+            errors_by_instance[instance_id] = errors
+            manifest = registry / f"{instance_id}.json"
+            manifest.write_text(json.dumps({
+                "version": 1,
+                "instance_id": instance_id,
+                "socket_path": str(socket_path),
+                "review_enabled": review_enabled,
+            }))
+            os.chmod(manifest, 0o600)
+
+        result = PLUGIN.review_response(
+            "Original unedited answer.",
+            session_id="edited-broadcast-session",
+            model="qwen3.5:latest",
+            platform="api_server",
+        )
+        self.assertEqual(result, "Edited answer delivered to every terminal.")
+
+        for worker in workers:
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+        self.assertFalse(any(error for errors in errors_by_instance.values() for error in errors))
+
         for instance_id in ("a1", "b2"):
+            self.assertEqual(len(requests_by_instance[instance_id]), 2)
+            final_message = requests_by_instance[instance_id][1]
+            self.assertTrue(final_message["observe_only"])
+            self.assertEqual(final_message["phase"], "result")
+            self.assertEqual(final_message["decision"], "replace")
+            self.assertEqual(
+                final_message["response_text"],
+                "Edited answer delivered to every terminal.",
+            )
+
+    def test_review_pool_round_robins_and_skips_a_terminal_with_an_active_lease(self):
+        registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
+        registry.mkdir(mode=0o700, parents=True)
+        routes = [
+            {"instance_id": name, "review_enabled": True}
+            for name in ("a1", "b2", "c3")
+        ]
+
+        first, first_fd = PLUGIN._acquire_review_slot(routes, registry, timeout=0.2)
+        second, second_fd = PLUGIN._acquire_review_slot(routes, registry, timeout=0.2)
+        third, third_fd = PLUGIN._acquire_review_slot(routes, registry, timeout=0.2)
+        try:
+            self.assertEqual(
+                {first["instance_id"], second["instance_id"], third["instance_id"]},
+                {"a1", "b2", "c3"},
+            )
+            fourth, fourth_fd = None, None
+            PLUGIN._release_review_slot(second_fd)
+            second_fd = -1
+            fourth, fourth_fd = PLUGIN._acquire_review_slot(routes, registry, timeout=0.2)
+            self.assertEqual(fourth["instance_id"], "b2")
+            PLUGIN._release_review_slot(fourth_fd)
+            fourth_fd = -1
+        finally:
+            PLUGIN._release_review_slot(first_fd)
+            PLUGIN._release_review_slot(third_fd)
+            if second_fd >= 0:
+                PLUGIN._release_review_slot(second_fd)
+
+    def test_capture_fans_each_hook_event_out_to_each_live_terminal_inbox(self):
+        registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
+        registry.mkdir(mode=0o700, parents=True)
+        listeners = []
+        instance_ids = ("a1", "b2", "c3")
+        for instance_id in instance_ids:
             socket_path = registry / f"{instance_id}.sock"
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             listener.bind(str(socket_path))
             os.chmod(socket_path, 0o600)
             listener.listen(1)
-            sockets.append(listener)
-            manifest_path = registry / f"{instance_id}.json"
-            manifest_path.write_text(json.dumps({
+            listeners.append(listener)
+            manifest = registry / f"{instance_id}.json"
+            manifest.write_text(json.dumps({
                 "version": 1,
                 "instance_id": instance_id,
                 "socket_path": str(socket_path),
+                "review_enabled": True,
             }))
-            os.chmod(manifest_path, 0o600)
-        try:
-            # Ambiguous routing must fail closed even when the optional global
-            # STREENOTE_HERMES_REVIEW_REQUIRED switch is unset.
-            with patch.dict(os.environ, {}, clear=False):
-                os.environ.pop("STREENOTE_HERMES_REVIEW_REQUIRED", None)
-                with self.assertRaisesRegex(RuntimeError, "response was withheld"):
-                    PLUGIN.review_response(
-                        "Unreviewed response",
-                        session_id="session-without-origin-affinity",
-                        model="qwen3.5:latest",
-                        platform="api_server",
-                    )
-        finally:
-            for listener in sockets:
-                listener.close()
+            os.chmod(manifest, 0o600)
 
+        event = {
+            "version": 1,
+            "event_id": "fanout-event-001",
+            "kind": "hermes_user",
+            "timestamp": "2026-11-10T12:00:00-05:00",
+            "text": "A prompt that every connected terminal must receive.",
+            "session_id": "session-shared",
+        }
+        CAPTURE.write_inbox_event(Path(self.temp_dir.name) / "unused-single-inbox", event)
+
+        for instance_id in instance_ids:
+            inbox = registry / "inboxes" / instance_id / "ready"
+            records = list(inbox.glob("*.json"))
+            self.assertEqual(len(records), 1, f"{instance_id} must get its own event copy")
+            self.assertEqual(json.loads(records[0].read_text())["event_id"], "fanout-event-001")
+
+        for listener in listeners:
+            listener.close()
 
     def test_runtime_socket_path_is_shared_by_processes_with_different_home_values(self):
         with tempfile.TemporaryDirectory(prefix="streenote-runtime-") as runtime:
@@ -259,7 +346,7 @@ class HermesReviewPluginTests(unittest.TestCase):
         events = [record["event"] for record in records]
         self.assertIn("CALLBACK_INVOKED", events)
         self.assertIn("SOCKET_ROUTES_RESOLVED", events)
-        self.assertIn("SESSION_ROUTE_SELECTED", events)
+        self.assertIn("SESSION_REVIEW_ASSIGNED", events)
         self.assertIn("SOCKET_CONNECT_OK", events)
         self.assertIn("REQUEST_SENT", events)
         self.assertIn("DECISION_RECEIVED", events)

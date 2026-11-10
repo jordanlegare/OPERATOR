@@ -70,10 +70,7 @@ impl ShellSession {
         // Bind Hermes' pre_llm_call capture events to this exact SSH-launched
         // STREENOTE instance. The shared gateway uses that session association
         // to return final answers to the originating terminal.
-        for variable in [
-            "STREENOTE_HERMES_REVIEW_INSTANCE_ID",
-            "STREENOTE_HERMES_REVIEW_SESSION_DIR",
-        ] {
+        for variable in ["STREENOTE_HERMES_REVIEW_SESSION_DIR"] {
             if let Some(value) = env::var_os(variable) {
                 command.env(variable, value);
             }

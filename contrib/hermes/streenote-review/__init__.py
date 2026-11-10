@@ -14,6 +14,7 @@ import os
 import re
 import socket
 import stat
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -182,6 +183,7 @@ def _load_review_routes() -> tuple[list[dict[str, Any]], Path]:
                     "instance_id": instance_id,
                     "socket_path": socket_path,
                     "manifest_path": manifest,
+                    "review_enabled": bool(registration.get("review_enabled", True)),
                 })
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 continue
@@ -196,113 +198,109 @@ def _load_review_routes() -> tuple[list[dict[str, Any]], Path]:
             "instance_id": "legacy",
             "socket_path": legacy_path,
             "manifest_path": None,
+            "review_enabled": True,
         })
     return routes, directory
 
 
-def _route_score(session_id: str, instance_id: str) -> bytes:
-    material = f"{session_id}\0{instance_id}".encode("utf-8")
-    return hashlib.sha256(material).digest()
-
-
-def _rendezvous_route(session_id: str, routes: list[dict[str, Any]]) -> dict[str, Any]:
-    """Select a stable owner using highest-score rendezvous hashing."""
-    return max(routes, key=lambda route: _route_score(session_id, route["instance_id"]))
-
-
-def _write_route_assignment(path: Path, session_hash: str, instance_id: str) -> None:
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        os.chmod(path.parent, 0o700)
-    except OSError:
-        pass
-    record = {
-        "version": 1,
-        "session_hash": session_hash,
-        "instance_id": instance_id,
-    }
+def _write_dispatch_cursor(path: Path, instance_id: str) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        os.write(descriptor, (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8"))
+        os.write(descriptor, (instance_id + "\n").encode("utf-8"))
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    os.replace(temporary, path)
+    os.chmod(path, 0o600)
+
+
+def _acquire_review_slot(
+    routes: list[dict[str, Any]],
+    registry_dir: Path,
+    timeout: float = SOCKET_TIMEOUT_SECONDS,
+    excluded: set[str] | None = None,
+) -> tuple[dict[str, Any], int]:
+    """Acquire one enabled listener's process-wide slot, round-robin.
+
+    flock is automatically released if the Hermes gateway dies, so a crashed
+    callback cannot permanently consume a reviewer's capacity. Each listener
+    handles one active review at a time; concurrent answers wait for a free
+    listener instead of failing because every TUI is momentarily occupied.
+    """
+    excluded = excluded or set()
+    candidates = sorted(
+        (
+            route for route in routes
+            if route.get("review_enabled", True)
+            and route["instance_id"] not in excluded
+        ),
+        key=lambda route: route["instance_id"],
+    )
+    if not candidates:
+        raise RuntimeError("No connected STREENOTE terminal currently has /review on.")
+
+    dispatch_dir = registry_dir / "dispatch"
+    dispatch_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
-        os.replace(temporary, path)
-        os.chmod(path, 0o600)
-    finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
-
-
-def _select_review_route(
-    session_id: str, routes: list[dict[str, Any]], registry_dir: Path
-) -> dict[str, Any]:
-    """Use the source PTY's captured affinity; rebalance only after that TUI exits."""
-    if not session_id:
-        if len(routes) == 1:
-            return routes[0]
-        raise RuntimeError(
-            "Hermes did not provide a session_id and multiple STREENOTE review "
-            "sessions are active; the response was withheld rather than routed "
-            "to an arbitrary terminal."
-        )
-
-    session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
-    route_dir = registry_dir / "routes"
-    assignment_path = route_dir / f"{session_hash}.json"
-    lock_path = route_dir / f"{session_hash}.lock"
-    route_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        os.chmod(route_dir, 0o700)
+        os.chmod(dispatch_dir, 0o700)
     except OSError:
         pass
+    scheduler_path = dispatch_dir / "scheduler.lock"
+    cursor_path = dispatch_dir / "round-robin"
+    deadline = time.monotonic() + max(0.0, timeout)
 
-    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        os.fchmod(descriptor, 0o600)
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        assigned_id = None
+    while True:
+        scheduler_fd = os.open(scheduler_path, os.O_CREAT | os.O_RDWR, 0o600)
+        selected: tuple[dict[str, Any], int] | None = None
         try:
-            metadata = assignment_path.lstat()
-            if (
-                stat.S_ISREG(metadata.st_mode)
-                and metadata.st_uid == os.getuid()
-                and not (stat.S_IMODE(metadata.st_mode) & 0o077)
-                and metadata.st_size <= 4096
-            ):
-                assignment = json.loads(assignment_path.read_text(encoding="utf-8"))
-                if assignment.get("version") == 1 and assignment.get("session_hash") == session_hash:
-                    assigned_id = assignment.get("instance_id")
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            pass
+            os.fchmod(scheduler_fd, 0o600)
+            fcntl.flock(scheduler_fd, fcntl.LOCK_EX)
+            try:
+                last_id = cursor_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                last_id = ""
+            start = 0
+            for index, route in enumerate(candidates):
+                if route["instance_id"] == last_id:
+                    start = (index + 1) % len(candidates)
+                    break
+            ordered = candidates[start:] + candidates[:start]
 
-        if assigned_id:
-            for route in routes:
-                if route["instance_id"] == assigned_id:
-                    return route
-            # The originating SSH session has exited. Reassign only now,
-            # using rendezvous hashing across the remaining live listeners.
-            selected = _rendezvous_route(session_id, routes)
-            _write_route_assignment(assignment_path, session_hash, selected["instance_id"])
+            for route in ordered:
+                lock_path = dispatch_dir / f"{route['instance_id']}.lock"
+                lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+                try:
+                    os.fchmod(lock_fd, 0o600)
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    os.close(lock_fd)
+                    continue
+                try:
+                    _write_dispatch_cursor(cursor_path, route["instance_id"])
+                except Exception:
+                    _release_review_slot(lock_fd)
+                    raise
+                selected = (route, lock_fd)
+                break
+        finally:
+            fcntl.flock(scheduler_fd, fcntl.LOCK_UN)
+            os.close(scheduler_fd)
+
+        if selected is not None:
             return selected
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "All connected STREENOTE reviewers are busy; the Hermes response was withheld."
+            )
+        time.sleep(0.05)
 
-        if len(routes) == 1:
-            selected = routes[0]
-            _write_route_assignment(assignment_path, session_hash, selected["instance_id"])
-            return selected
 
-        raise RuntimeError(
-            "No STREENOTE SSH-session affinity was captured for this Hermes session. "
-            "The capture hook must run in the originating STREENOTE PTY; refusing to "
-            "route the answer to another SSH terminal."
-        )
+def _release_review_slot(lock_fd: int) -> None:
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
     finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
-        os.close(descriptor)
+        os.close(lock_fd)
 
 
 def _read_json_line(connection: socket.socket) -> dict[str, Any]:
@@ -334,9 +332,20 @@ class _ReviewSocketUnavailable(Exception):
     """A route disappeared before a connection was established."""
 
 
-def _exchange(path: Path, request: dict[str, Any], instance_id: str) -> dict[str, Any]:
+def _exchange(
+    path: Path,
+    request: dict[str, Any],
+    instance_id: str,
+    observe_only: bool = False,
+    phase: str = "pending",
+    decision: str | None = None,
+) -> dict[str, Any]:
+    payload = dict(request)
+    payload["observe_only"] = observe_only
+    payload["phase"] = phase
+    payload["decision"] = decision
     encoded = json.dumps(
-        request, ensure_ascii=False, separators=(",", ":")
+        payload, ensure_ascii=False, separators=(",", ":")
     ).encode("utf-8")
     if len(encoded) > MAX_REVIEW_BYTES:
         raise RuntimeError("Hermes final response exceeds STREENOTE's 8 MiB review limit")
@@ -347,6 +356,9 @@ def _exchange(path: Path, request: dict[str, Any], instance_id: str) -> dict[str
         try:
             connection.connect(str(path))
         except (FileNotFoundError, ConnectionRefusedError) as error:
+            # Only a failure before connect succeeds is safe to reroute.
+            # Once a peer has accepted the request, never duplicate a
+            # potentially displayed/approved review to a second terminal.
             raise _ReviewSocketUnavailable(str(error)) from error
         _log_event(
             "SOCKET_CONNECT_OK",
@@ -356,11 +368,51 @@ def _exchange(path: Path, request: dict[str, Any], instance_id: str) -> dict[str
         )
         with connection:
             connection.sendall(encoded + b"\n")
-            _log_event("REQUEST_SENT", request_id=request.get("request_id", ""), instance_id=instance_id)
+            _log_event(
+                "REQUEST_SENT",
+                request_id=request.get("request_id", ""),
+                instance_id=instance_id,
+            )
             return _read_json_line(connection)
     except Exception:
         connection.close()
         raise
+
+def _broadcast_review_result(
+    routes: list[dict[str, Any]],
+    request: dict[str, Any],
+    decision: str,
+    final_response: str | None,
+) -> None:
+    """Publish the final outcome to every connected terminal, including reviewer."""
+    result_request = dict(request)
+    result_request["response_text"] = final_response or ""
+    for route in routes:
+        try:
+            reply = _exchange(
+                route["socket_path"],
+                result_request,
+                route["instance_id"],
+                observe_only=True,
+                phase="result",
+                decision=decision,
+            )
+            if reply.get("decision") != "observed":
+                raise RuntimeError("terminal did not acknowledge final-result broadcast")
+            _log_event(
+                "REVIEW_RESULT_BROADCAST",
+                request_id=request["request_id"],
+                instance_id=route["instance_id"],
+                decision=decision,
+            )
+        except Exception as error:
+            _log_event(
+                "REVIEW_RESULT_BROADCAST_ERROR",
+                request_id=request["request_id"],
+                instance_id=route["instance_id"],
+                decision=decision,
+                error=str(error),
+            )
 
 
 def review_response(
@@ -370,7 +422,7 @@ def review_response(
     platform: str = "",
     **kwargs: Any,
 ) -> str | None:
-    """Hold the final reply at the STREENOTE instance assigned to this Hermes session."""
+    """Broadcast each final reply to every terminal and assign one reviewer."""
     del kwargs
     required = _review_required()
     _log_event(
@@ -389,6 +441,7 @@ def review_response(
         registry_dir=str(registry_dir),
         route_count=len(routes),
         instance_ids=[route["instance_id"] for route in routes],
+        enabled_reviewers=[route["instance_id"] for route in routes if route.get("review_enabled", True)],
         required=required,
     )
     if not routes:
@@ -401,31 +454,6 @@ def review_response(
             )
         return None
 
-    try:
-        route = _select_review_route(str(session_id or ""), routes, registry_dir)
-    except RuntimeError as error:
-        # Multiple live SSH listeners with no trustworthy affinity is never
-        # a pass-through condition. Returning None here silently releases an
-        # unreviewed answer, which defeats /review on in every active TUI.
-        _log_event(
-            "REVIEW_ROUTE_ERROR",
-            error=str(error),
-            required=required,
-            fail_closed=True,
-        )
-        raise RuntimeError(
-            f"STREENOTE could not resolve the originating SSH review session; "
-            f"the Hermes response was withheld: {error}"
-        ) from error
-
-    session_hash = hashlib.sha256(str(session_id or "").encode("utf-8")).hexdigest()[:16]
-    _log_event(
-        "SESSION_ROUTE_SELECTED",
-        session_hash=session_hash,
-        instance_id=route["instance_id"],
-        socket_path=str(route["socket_path"]),
-    )
-
     request_id = uuid.uuid4().hex
     request = {
         "version": 1,
@@ -436,53 +464,95 @@ def review_response(
         "response_text": response_text,
     }
 
-    # Retry only when connect() proves the selected process is already gone.
-    # Once connected, never send the same request to another TUI: the first
-    # listener may already have displayed it to its operator.
-    remaining = list(routes)
-    reply = None
-    selected_route = route
-    while remaining:
+    # Only terminals with /review on are eligible to make the release
+    # decision. Every other connected terminal still receives a read-only
+    # copy, so the shared conversation remains visible across SSH windows.
+    excluded: set[str] = set()
+    reply: dict[str, Any] | None = None
+    selected_route: dict[str, Any] | None = None
+    reviewers_were_configured = any(
+        route.get("review_enabled", True) for route in routes
+    )
+    max_attempts = max(1, len(routes))
+    for _ in range(max_attempts):
         try:
-            reply = _exchange(
-                selected_route["socket_path"],
-                request,
-                selected_route["instance_id"],
+            selected_route, slot_fd = _acquire_review_slot(
+                routes, registry_dir, excluded=excluded
             )
-            route = selected_route
+        except RuntimeError as error:
+            _log_event("REVIEW_POOL_UNAVAILABLE", error=str(error), required=required)
+            if reviewers_were_configured:
+                raise
+            selected_route = None
             break
-        except _ReviewSocketUnavailable as error:
-            _log_event(
-                "SOCKET_CONNECT_ERROR",
-                socket_path=str(selected_route["socket_path"]),
-                instance_id=selected_route["instance_id"],
-                error=str(error),
-                request_id=request_id,
-            )
-            manifest = selected_route.get("manifest_path")
-            if manifest is not None:
+
+        try:
+            for observer in routes:
+                if observer["instance_id"] == selected_route["instance_id"]:
+                    continue
                 try:
-                    manifest.unlink()
+                    observed = _exchange(
+                        observer["socket_path"],
+                        request,
+                        observer["instance_id"],
+                        observe_only=True,
+                    )
+                    if observed.get("decision") != "observed":
+                        _log_event(
+                            "BROADCAST_DELIVERY_ERROR",
+                            request_id=request_id,
+                            instance_id=observer["instance_id"],
+                            error="observer did not acknowledge broadcast",
+                        )
+                    else:
+                        _log_event(
+                            "BROADCAST_DELIVERED",
+                            request_id=request_id,
+                            instance_id=observer["instance_id"],
+                        )
+                except Exception as error:
+                    _log_event(
+                        "BROADCAST_DELIVERY_ERROR",
+                        request_id=request_id,
+                        instance_id=observer["instance_id"],
+                        error=str(error),
+                    )
+
+            try:
+                reply = _exchange(
+                    selected_route["socket_path"],
+                    request,
+                    selected_route["instance_id"],
+                )
+            except _ReviewSocketUnavailable as error:
+                _log_event(
+                    "REVIEWER_UNAVAILABLE",
+                    request_id=request_id,
+                    instance_id=selected_route["instance_id"],
+                    error=str(error),
+                )
+                excluded.add(selected_route["instance_id"])
+                manifest = selected_route.get("manifest_path")
+                if manifest is not None:
+                    try:
+                        manifest.unlink()
+                    except OSError:
+                        pass
+                try:
+                    selected_route["socket_path"].unlink()
                 except OSError:
                     pass
-            # A refused connection proves the same-UID legacy socket file is
-            # stale too; remove it so future calls do not keep selecting it.
-            try:
-                selected_route["socket_path"].unlink()
-            except OSError:
-                pass
-            remaining = [
-                candidate for candidate in remaining
-                if candidate["instance_id"] != selected_route["instance_id"]
-            ]
-            if not remaining:
-                raise RuntimeError(
-                    "All registered STREENOTE review sockets are stale or unavailable; "
-                    "the Hermes response was withheld."
-                ) from error
-            selected_route = _select_review_route(
-                str(session_id or ""), remaining, registry_dir
-            )
+                routes = [
+                    route for route in routes
+                    if route["instance_id"] != selected_route["instance_id"]
+                ]
+                if not routes:
+                    raise RuntimeError(
+                        "All registered STREENOTE review sockets are stale or unavailable; "
+                        "the Hermes response was withheld."
+                    ) from error
+                continue
+            break
         except (TimeoutError, socket.timeout) as error:
             _log_event("REVIEW_ERROR", request_id=request_id, error="socket timeout")
             raise RuntimeError(
@@ -493,12 +563,49 @@ def review_response(
             raise RuntimeError(
                 f"STREENOTE review channel failed; the Hermes response was withheld: {error}"
             ) from error
-        except RuntimeError as error:
-            _log_event("REVIEW_ERROR", request_id=request_id, error=str(error))
-            raise
+        finally:
+            _release_review_slot(slot_fd)
 
+    if selected_route is None:
+        # All terminals are connected but have deliberately disabled review.
+        # They still receive the response as read-only copies; this is
+        # equivalent to the existing explicit /review off override.
+        for observer in routes:
+            try:
+                observed = _exchange(
+                    observer["socket_path"],
+                    request,
+                    observer["instance_id"],
+                    observe_only=True,
+                )
+                _log_event(
+                    "BROADCAST_DELIVERED" if observed.get("decision") == "observed" else "BROADCAST_DELIVERY_ERROR",
+                    request_id=request_id,
+                    instance_id=observer["instance_id"],
+                )
+            except Exception as error:
+                _log_event(
+                    "BROADCAST_DELIVERY_ERROR",
+                    request_id=request_id,
+                    instance_id=observer["instance_id"],
+                    error=str(error),
+                )
+        _broadcast_review_result(routes, request, "bypass", response_text)
+        _log_event("REVIEW_BYPASS", request_id=request_id, required=required, reason="no enabled reviewers")
+        return None
     if reply is None:
-        raise RuntimeError("STREENOTE did not return a review decision; the response was withheld.")
+        raise RuntimeError(
+            "No connected STREENOTE reviewer was available; the Hermes response was withheld."
+        )
+
+    session_hash = hashlib.sha256(str(session_id or "").encode("utf-8")).hexdigest()[:16]
+    _log_event(
+        "SESSION_REVIEW_ASSIGNED",
+        request_id=request_id,
+        session_hash=session_hash,
+        instance_id=selected_route["instance_id"],
+        socket_path=str(selected_route["socket_path"]),
+    )
 
     if reply.get("version") != 1:
         _log_event("REVIEW_ERROR", request_id=request_id, error="unsupported protocol version")
@@ -509,13 +616,15 @@ def review_response(
         "DECISION_RECEIVED",
         request_id=request_id,
         decision=str(decision),
-        instance_id=route["instance_id"],
+        instance_id=selected_route["instance_id"],
     )
     if decision == "bypass":
         # An explicit operator choice (/review off) overrides fail-closed mode.
+        _broadcast_review_result(routes, request, "bypass", response_text)
         _log_event("REVIEW_BYPASS", request_id=request_id, required=required)
         return None
     if decision == "approve":
+        _broadcast_review_result(routes, request, "approve", response_text)
         _log_event("REVIEW_APPROVED", request_id=request_id)
         return response_text
     if decision == "replace":
@@ -530,6 +639,7 @@ def review_response(
             raise RuntimeError(
                 "STREENOTE replacement exceeded the review limit; the Hermes response was withheld."
             )
+        _broadcast_review_result(routes, request, "replace", replacement)
         _log_event(
             "REVIEW_REPLACED",
             request_id=request_id,
@@ -539,6 +649,7 @@ def review_response(
     if decision == "reject":
         reason = reply.get("error")
         detail = f" ({reason})" if isinstance(reason, str) and reason else ""
+        _broadcast_review_result(routes, request, "reject", None)
         _log_event("REVIEW_REJECTED", request_id=request_id, reason=str(reason or "")[:300])
         raise RuntimeError(f"STREENOTE operator withheld this Hermes response{detail}.")
     _log_event("REVIEW_ERROR", request_id=request_id, error=f"unknown decision {decision!r}")

@@ -39,7 +39,7 @@ use ratatui::{
 };
 
 use app::{App, ConversationView, InputMode};
-use hermes_bridge::HermesBridge;
+use hermes_bridge::{HermesBridge, HERMES_INBOX_ENV};
 use hermes_review::HermesReviewServer;
 use shell::ShellSession;
 use storage::Journal;
@@ -118,9 +118,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the interactive shell and Hermes' pre_llm_call capture hook.
     let mut review_server = HermesReviewServer::start()?;
     if let Some(instance_id) = review_server.instance_id() {
-        std::env::set_var("STREENOTE_HERMES_REVIEW_INSTANCE_ID", instance_id);
         if let Some(registry_dir) = review_server.session_registry_dir() {
-            std::env::set_var("STREENOTE_HERMES_REVIEW_SESSION_DIR", registry_dir);
+            std::env::set_var("STREENOTE_HERMES_REVIEW_SESSION_DIR", &registry_dir);
+            // Each SSH-launched TUI consumes its own inbox fan-out. The capture
+            // hook writes every Hermes event to every live instance's inbox.
+            let instance_inbox = registry_dir.join("inboxes").join(instance_id);
+            std::env::set_var(HERMES_INBOX_ENV, instance_inbox);
         }
     }
 
@@ -1155,6 +1158,25 @@ fn split_command_words(command: &str) -> Option<Vec<String>> {
     Some(words)
 }
 
+fn drain_review_broadcasts(app: &mut App, review_server: &mut HermesReviewServer) {
+    while let Some(broadcast) = review_server.try_recv_broadcast() {
+        app.receive_hermes_broadcast(broadcast);
+    }
+}
+
+fn handle_broadcast_key(code: KeyCode, app: &mut App) {
+    match code {
+        KeyCode::Up => app.scroll_hermes_broadcast(-3),
+        KeyCode::Down => app.scroll_hermes_broadcast(3),
+        KeyCode::PageUp => app.scroll_hermes_broadcast(-12),
+        KeyCode::PageDown => app.scroll_hermes_broadcast(12),
+        KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => {
+            app.dismiss_hermes_broadcast();
+        }
+        _ => {}
+    }
+}
+
 /// Import Hermes events while keeping a highlighted live-tail row attached
 /// to the newest imported record.
 fn drain_hermes_events(
@@ -1179,7 +1201,9 @@ fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         app.expire_hermes_review_if_needed();
+        app.sync_hermes_review_setting();
         review_server.set_enabled(app.review_hermes_responses);
+        drain_review_broadcasts(app, review_server);
         if app.pending_review.is_none() {
             if let Some(request) = review_server.try_recv() {
                 app.begin_hermes_review(request);
@@ -1210,7 +1234,9 @@ fn run(
                     || (key.kind == KeyEventKind::Repeat
                         && matches!(key.code, KeyCode::Up | KeyCode::Down)) =>
             {
-                if key.kind == KeyEventKind::Press && key.code == KeyCode::F(1) {
+                if app.pending_review.is_none() && !app.review_broadcasts.is_empty() {
+                    handle_broadcast_key(key.code, app);
+                } else if key.kind == KeyEventKind::Press && key.code == KeyCode::F(1) {
                     let size = terminal.size()?;
                     match ShellSession::spawn(size.width, size.height) {
                         Ok(mut workspace_session) => {
@@ -1229,11 +1255,18 @@ fn run(
                             app.status = format!("Could not start independent terminal workspace: {error}");
                         }
                     }
-                } else if handle_key(key.code, key.modifiers, app, shell)? {
-                    break;
+                } else {
+                    let should_exit = handle_key(key.code, key.modifiers, app, shell)?;
+                    // Publish /review on|off changes immediately so the
+                    // shared Hermes dispatcher sees the live reviewer pool
+                    // state before the next poll iteration.
+                    review_server.set_enabled(app.review_hermes_responses);
+                    if should_exit {
+                        break;
+                    }
                 }
             }
-            Event::Mouse(_) if app.pending_review.is_some() => {}
+            Event::Mouse(_) if app.pending_review.is_some() || !app.review_broadcasts.is_empty() => {}
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Right)
                     if app.message_view_index.is_none()
@@ -1265,7 +1298,7 @@ fn run(
             Event::Paste(text) => {
                 if app.pending_review.is_some() {
                     app.review_insert_text(&text);
-                } else {
+                } else if app.review_broadcasts.is_empty() {
                     paste_clipboard_text(app, &text, "terminal paste event");
                 }
             },
@@ -1354,7 +1387,9 @@ fn run_terminal_workspace_loop(
 
     loop {
         app.expire_hermes_review_if_needed();
+        app.sync_hermes_review_setting();
         review_server.set_enabled(app.review_hermes_responses);
+        drain_review_broadcasts(app, review_server);
         if app.pending_review.is_none() {
             if let Some(request) = review_server.try_recv() {
                 app.begin_hermes_review(request);
@@ -1362,6 +1397,10 @@ fn run_terminal_workspace_loop(
         }
         if app.pending_review.is_some() {
             run_workspace_review_overlay(terminal, app)?;
+            continue;
+        }
+        if !app.review_broadcasts.is_empty() {
+            run_workspace_broadcast_overlay(terminal, app, review_server)?;
             continue;
         }
 
@@ -1493,6 +1532,69 @@ fn run_workspace_review_overlay(
     Ok(())
 }
 
+fn run_workspace_broadcast_overlay(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    review_server: &mut HermesReviewServer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut out = stdout();
+    execute!(
+        out,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+        ),
+        crossterm::cursor::Hide
+    )?;
+    terminal.clear()?;
+
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        while !app.review_broadcasts.is_empty() {
+            // A newly assigned review takes priority over this read-only
+            // notification. Never leave a pool slot idle behind an observer
+            // overlay in the F1 raw-terminal workspace.
+            drain_review_broadcasts(app, review_server);
+            if app.pending_review.is_none() {
+                if let Some(request) = review_server.try_recv() {
+                    app.begin_hermes_review(request);
+                    break;
+                }
+            }
+            terminal.draw(|frame| ui::draw(frame, app))?;
+            if !event::poll(Duration::from_millis(40))? {
+                continue;
+            }
+            match event::read()? {
+                Event::Key(key)
+                    if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat =>
+                {
+                    handle_broadcast_key(key.code, app);
+                }
+                Event::Resize(_, _) => {}
+                _ => {}
+            }
+        }
+        Ok(())
+    })();
+
+    let cleanup = execute!(
+        out,
+        PopKeyboardEnhancementFlags,
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    );
+    let clear = terminal.clear();
+    result?;
+    cleanup?;
+    clear?;
+    Ok(())
+}
+
 fn handle_review_key(code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
     if app.pending_review.is_none() {
         return;
@@ -1592,6 +1694,7 @@ fn run_terminal_workspace_loop(
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         app.expire_hermes_review_if_needed();
+        app.sync_hermes_review_setting();
         review_server.set_enabled(app.review_hermes_responses);
         if app.pending_review.is_none() {
             if let Some(request) = review_server.try_recv() {
@@ -1600,6 +1703,10 @@ fn run_terminal_workspace_loop(
         }
         if app.pending_review.is_some() {
             run_workspace_review_overlay(_terminal, app)?;
+            continue;
+        }
+        if !app.review_broadcasts.is_empty() {
+            run_workspace_broadcast_overlay(_terminal, app, review_server)?;
             continue;
         }
         match drain_hermes_events(app, hermes_bridge) {
