@@ -99,6 +99,8 @@ jobs:
           assert delta["turn_id"] == "ci-turn"
           assert delta["iteration"] == 0
           PY
+      - name: Test original Hermes prompt fan-out
+        run: python3 -m unittest discover -s contrib/hermes -p 'test_*.py'
       - name: Test journal storage compatibility
         run: cargo test storage::terminal_output_filter_tests
       - name: Test Restricted Access splash layouts
