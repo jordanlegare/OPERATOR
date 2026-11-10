@@ -545,6 +545,15 @@ def session_event_text(event_name: str, payload: dict, extra: dict) -> str:
 def main() -> int:
     inbox_value = os.environ.get("STREENOTE_HERMES_INBOX")
     if not inbox_value:
+        # A detached gateway may invoke the Python hook directly, without the
+        # per-PTY inbox variable. Select a live registered inbox as the history
+        # marker location; write_inbox_event still fans each event to everyone.
+        for candidate in review_session_registry_candidates():
+            active_inboxes = _connected_instance_inboxes(candidate)
+            if active_inboxes:
+                inbox_value = str(active_inboxes[0])
+                break
+    if not inbox_value:
         return 0
 
     try:
