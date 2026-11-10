@@ -178,7 +178,8 @@ hermes hooks doctor
 
 Rebuild and restart STREENOTE so its Rust-created PTYs receive the inbox variable, then launch Hermes from that shell. If your Hermes configuration routes hooks through a separate gateway service, point the hook command at a gateway wrapper that exports the same inbox path; see the process-boundary note above.
 
-- `pre_llm_call` captures the user's prompt as a `hermes_user` entry and, once per session, any prior user/assistant/tool history as a `hermes_history` entry (`HCTX`).
+- `pre_llm_call` captures Hermes' original `user_message`—before hook-injected skill/plugin context—as a `hermes_user` entry. Every registered terminal receives the same prompt event in its private inbox. Text-only prompts are preserved; for multimodal prompts, readable text parts are retained and image/audio/file payloads are represented by safe placeholders rather than storing binary data or data URLs.
+- Once per session, the first non-empty `conversation_history` is captured as a `hermes_history` entry (`HCTX`), allowing a resumed session to bring its earlier user/assistant/tool messages into the same thread. The shared journal preserves this history for terminals that connect later; subsequent turns append only their new prompt and conversation events.
 - `post_llm_call` captures the final assistant response as a `hermes_assistant` entry.
 - `pre_tool_call` captures the tool name and arguments as a `hermes_tool_call` entry.
 - `post_tool_call` captures the tool result, status, duration, and error details (when present) as a `hermes_tool_result` entry.
