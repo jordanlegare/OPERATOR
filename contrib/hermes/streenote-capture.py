@@ -316,6 +316,37 @@ def _write_inbox_event_one(inbox: Path, event: dict) -> None:
         raise
 
 
+def default_review_session_dir() -> Path:
+    """Mirror Rust's default review registry resolution for detached gateways."""
+    configured = os.environ.get("STREENOTE_HERMES_REVIEW_SESSION_DIR")
+    if configured:
+        path = Path(configured).expanduser()
+        if path.is_absolute():
+            return path
+
+    uid = os.getuid()
+    runtime_root = Path(f"/run/user/{uid}")
+    try:
+        runtime_stat = runtime_root.stat()
+        if runtime_stat.is_dir() and runtime_stat.st_uid == uid:
+            return runtime_root / "streenote" / "review-sessions"
+    except OSError:
+        pass
+
+    legacy_socket = os.environ.get("STREENOTE_HERMES_REVIEW_SOCKET")
+    if legacy_socket:
+        path = Path(legacy_socket).expanduser()
+        if path.is_absolute():
+            return path.parent / "review-sessions"
+
+    data_home = os.environ.get("XDG_DATA_HOME")
+    if data_home and Path(data_home).expanduser().is_absolute():
+        return Path(data_home).expanduser() / "streenote" / "review-sessions"
+
+    home = Path.home()
+    return home / ".local" / "share" / "streenote" / "review-sessions"
+
+
 def _connected_instance_inboxes(registry: Path) -> list[Path]:
     """Find private per-terminal inboxes for every currently live STREENOTE listener."""
     try:
@@ -364,24 +395,45 @@ def _connected_instance_inboxes(registry: Path) -> list[Path]:
 def write_inbox_event(inbox: Path, event: dict) -> None:
     """Fan each Hermes hook event out to every live STREENOTE terminal.
 
-    Every TUI gets a private queue, so one process cannot consume another
-    terminal's messages. The shared Journal uses event IDs and an inter-process
-    file lock to persist a single copy even though every process imports it.
+    The hook may run in a detached systemd gateway with no PTY environment.
+    Resolve the per-user registry using the same defaults as Rust, rather than
+    silently falling back to the originating terminal when the registry
+    variable was not inherited. Each TUI still receives a private queue.
     """
-    registry_value = os.environ.get("STREENOTE_HERMES_REVIEW_SESSION_DIR")
-    recipients = []
-    if registry_value:
-        registry = Path(registry_value).expanduser()
-        if registry.is_absolute():
-            recipients = _connected_instance_inboxes(registry)
+    registry = default_review_session_dir()
+    recipients = _connected_instance_inboxes(registry)
 
-    if not recipients:
-        # Preserve the original single-inbox contract for non-SSH or legacy
-        # Hermes integrations that do not publish a review-session registry.
-        recipients = [inbox]
+    # Retain the source inbox as a safety recipient. This guarantees that the
+    # originating TUI does not lose its event during registration races or
+    # when a custom registry is temporarily unavailable.
+    source = inbox.expanduser()
+    if source not in recipients:
+        recipients.append(source)
 
+    failures = []
+    delivered = 0
     for recipient in recipients:
-        _write_inbox_event_one(recipient, event)
+        try:
+            _write_inbox_event_one(recipient, event)
+            delivered += 1
+        except Exception as exc:
+            failures.append(f"{recipient}: {exc}")
+
+    if failures:
+        # Attempt every recipient even when one inbox is inaccessible. Avoid
+        # including prompt text in diagnostics.
+        raise OSError(
+            f"Hermes event {event.get('event_id', 'unknown')} delivered to "
+            f"{delivered}/{len(recipients)} terminal inboxes; "
+            + "; ".join(failures)
+        )
+
+    if os.environ.get("STREENOTE_HERMES_CAPTURE_DEBUG") == "1":
+        print(
+            f"STREENOTE Hermes capture: fanned event {event.get('event_id', 'unknown')} "
+            f"to {delivered} terminal inbox(es) via {registry}",
+            file=sys.stderr,
+        )
 
 
 def write_history_snapshot(
