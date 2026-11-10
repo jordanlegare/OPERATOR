@@ -318,7 +318,8 @@ pub fn collapse_live_streams(entries: &[(usize, &Entry)]) -> CollapsedLiveStream
     collapsed
 }
 
-pub fn thread_for_entry(entries: &[Entry], entry_index: usize) -> Option<String> {
+#[cfg(test)]
+fn thread_for_entry(entries: &[Entry], entry_index: usize) -> Option<String> {
     build_threads(entries)
         .into_iter()
         .find(|thread| thread.entries.contains(&entry_index))
