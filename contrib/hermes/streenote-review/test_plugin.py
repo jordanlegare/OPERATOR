@@ -40,36 +40,37 @@ class HermesReviewPluginTests(unittest.TestCase):
         self.env.stop()
         self.temp_dir.cleanup()
 
-    def _serve(self, reply, socket_path=None):
+    def _serve(self, reply, socket_path=None, accept_count=1):
         errors = []
         requests = []
         path = Path(socket_path) if socket_path is not None else self.socket_path
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         listener.bind(str(path))
         os.chmod(path, 0o600)
-        listener.listen(1)
+        listener.listen(accept_count)
         listener.settimeout(4)
 
         def run():
             try:
-                connection, _ = listener.accept()
-                with connection:
-                    data = bytearray()
-                    while b"\n" not in data:
-                        chunk = connection.recv(65536)
-                        if not chunk:
-                            raise AssertionError("plugin closed before sending request")
-                        data.extend(chunk)
-                    request = json.loads(bytes(data).split(b"\n", 1)[0])
-                    requests.append(request)
-                    response = (
-                        {"version": 1, "decision": "observed"}
-                        if request.get("observe_only")
-                        else reply
-                    )
-                    connection.sendall(
-                        json.dumps(response, ensure_ascii=False).encode("utf-8") + b"\n"
-                    )
+                for _ in range(accept_count):
+                    connection, _ = listener.accept()
+                    with connection:
+                        data = bytearray()
+                        while b"\\n" not in data:
+                            chunk = connection.recv(65536)
+                            if not chunk:
+                                raise AssertionError("plugin closed before sending request")
+                            data.extend(chunk)
+                        request = json.loads(bytes(data).split(b"\\n", 1)[0])
+                        requests.append(request)
+                        response = (
+                            {"version": 1, "decision": "observed"}
+                            if request.get("observe_only")
+                            else reply
+                        )
+                        connection.sendall(
+                            json.dumps(response, ensure_ascii=False).encode("utf-8") + b"\\n"
+                        )
             except socket.timeout:
                 pass
             except Exception as error:  # surfaced in the test thread below
@@ -84,7 +85,6 @@ class HermesReviewPluginTests(unittest.TestCase):
         worker = threading.Thread(target=run, daemon=True)
         worker.start()
         return worker, requests, errors
-
     def _call(self, session_id="session-123"):
         return PLUGIN.review_response(
             "The unreviewed draft.",
@@ -123,6 +123,7 @@ class HermesReviewPluginTests(unittest.TestCase):
             worker, requests, errors = self._serve(
                 {"version": 1, "decision": "approve"},
                 socket_path=socket_path,
+                accept_count=2,
             )
             workers.append(worker)
             requests_by_instance[instance_id] = requests
@@ -169,6 +170,16 @@ class HermesReviewPluginTests(unittest.TestCase):
         self.assertIn(active[0], ("a1", "b2"))
         self.assertEqual(set(observers), set(instance_ids) - set(active))
         self.assertEqual(delivered["c3"]["observe_only"], True)
+        for instance_id in instance_ids:
+            self.assertEqual(len(requests_by_instance[instance_id]), 2)
+            final_message = requests_by_instance[instance_id][1]
+            self.assertTrue(final_message.get("observe_only"))
+            self.assertEqual(final_message.get("phase"), "result")
+            self.assertEqual(final_message.get("decision"), "approve")
+            self.assertEqual(
+                final_message["response_text"],
+                "One response shared with every connected SSH terminal.",
+            )
 
     def test_review_pool_round_robins_and_skips_a_terminal_with_an_active_lease(self):
         registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
