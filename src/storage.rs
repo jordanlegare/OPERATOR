@@ -120,6 +120,8 @@ pub struct Journal {
     pending: Vec<Entry>,
     /// Event IDs already durably present in the journal.
     persisted_event_ids: HashSet<String>,
+    /// Event IDs already represented in this process's in-memory cache.
+    cached_event_ids: HashSet<String>,
     /// Event IDs accepted into memory but not yet confirmed durable.
     pending_event_ids: HashSet<String>,
     /// Byte offset through the shared JSONL file already checked for external
@@ -250,6 +252,7 @@ impl Journal {
             total_text_bytes,
             skipped_corrupt_lines,
             pending: Vec::new(),
+            cached_event_ids: persisted_event_ids.clone(),
             persisted_event_ids,
             pending_event_ids: HashSet::new(),
             journal_scan_offset,
@@ -267,9 +270,6 @@ impl Journal {
 
         let _journal_lock = JournalFileLock::acquire(&self.path)?;
         let event_id = entry.event_id.clone();
-        let was_already_known = event_id
-            .as_ref()
-            .is_some_and(|id| self.persisted_event_ids.contains(id));
         if let Some(event_id) = event_id.as_ref() {
             if self.pending_event_ids.contains(event_id) {
                 return Err(io::Error::new(
@@ -283,9 +283,9 @@ impl Journal {
         if let Some(event_id) = event_id.as_ref() {
             if self.persisted_event_ids.contains(event_id) {
                 // Another SSH instance may have persisted this event first.
-                // Still add it to this process's in-memory view, but never
-                // append a duplicate JSONL row.
-                if !was_already_known {
+                // If the shared-journal poll has not already mirrored it into
+                // this process's cache, add it now without writing a duplicate.
+                if self.cached_event_ids.insert(event_id.clone()) {
                     self.push_entry_to_memory(entry);
                 }
                 return Ok(());
@@ -293,6 +293,9 @@ impl Journal {
         }
 
         self.push_entry_to_memory(entry.clone());
+        if let Some(event_id) = entry.event_id.as_ref() {
+            self.cached_event_ids.insert(event_id.clone());
+        }
 
         // Never let a newer entry overtake an older entry whose disk append failed.
         if !self.pending.is_empty() {
@@ -334,9 +337,20 @@ impl Journal {
         }
     }
 
+    /// Poll newly appended Hermes records from the shared JSONL journal.
+    ///
+    /// Every terminal still has a private inbox, but this journal tail makes
+    /// cross-terminal display resilient if a private inbox is delayed, missed,
+    /// or consumed by a terminal that exits before its peers import it.
+    pub fn refresh_external_hermes_entries(&mut self) -> io::Result<usize> {
+        let _journal_lock = JournalFileLock::acquire(&self.path)?;
+        self.refresh_external_event_ids()
+    }
+
     /// Refresh event IDs appended by other STREENOTE processes since our last
-    /// file offset. The caller holds the inter-process journal lock.
-    fn refresh_external_event_ids(&mut self) -> io::Result<()> {
+    /// file offset. The caller holds the inter-process journal lock. Newly
+    /// observed Hermes entries are copied into this process's memory cache.
+    fn refresh_external_event_ids(&mut self) -> io::Result<usize> {
         let metadata = fs::metadata(&self.path)?;
         if metadata.len() < self.journal_scan_offset {
             self.journal_scan_offset = 0;
@@ -347,21 +361,30 @@ impl Journal {
         reader.seek(SeekFrom::Start(self.journal_scan_offset))?;
         let mut line = Vec::new();
         let mut scanned = 0u64;
+        let mut mirrored = 0usize;
         loop {
             line.clear();
             let count = reader.read_until(b'\n', &mut line)?;
             if count == 0 || !line.ends_with(b"\n") {
                 break;
             }
-            if let Ok(entry) = serde_json::from_slice::<Entry>(&line) {
-                if let Some(event_id) = entry.event_id {
-                    self.persisted_event_ids.insert(event_id);
+            if let Ok(mut entry) = serde_json::from_slice::<Entry>(&line) {
+                if let Some(event_id) = entry.event_id.clone() {
+                    let is_new = self.persisted_event_ids.insert(event_id.clone());
+                    if is_new
+                        && is_hermes_journal_kind(entry.kind)
+                        && self.cached_event_ids.insert(event_id)
+                    {
+                        entry.text = sanitize_entry_text(entry.kind, &entry.text);
+                        self.push_entry_to_memory(entry);
+                        mirrored += 1;
+                    }
                 }
             }
             scanned = scanned.saturating_add(count as u64);
         }
         self.journal_scan_offset = self.journal_scan_offset.saturating_add(scanned);
-        Ok(())
+        Ok(mirrored)
     }
     /// Batch append is used for PTY output so high-volume commands do not force
     /// one fsync per output line. Entries enter the cache before any disk I/O.
@@ -382,6 +405,9 @@ impl Journal {
 
         for entry in &entries {
             self.total_text_bytes = self.total_text_bytes.saturating_add(entry.text.len());
+            if let Some(event_id) = entry.event_id.as_ref() {
+                self.cached_event_ids.insert(event_id.clone());
+            }
             self.entries.push(entry.clone());
         }
 
@@ -619,6 +645,22 @@ pub fn entry_transcript_text(entry: &Entry, index: usize) -> String {
         format_timestamp(&entry.timestamp),
         entry_kind_label(entry.kind),
         entry_display_text(entry)
+    )
+}
+
+fn is_hermes_journal_kind(kind: EntryKind) -> bool {
+    matches!(
+        kind,
+        EntryKind::HermesUser
+            | EntryKind::HermesAssistant
+            | EntryKind::HermesToolCall
+            | EntryKind::HermesToolResult
+            | EntryKind::HermesStreamStart
+            | EntryKind::HermesStreamDelta
+            | EntryKind::HermesStreamEnd
+            | EntryKind::HermesHistory
+            | EntryKind::HermesInterim
+            | EntryKind::HermesSession
     )
 }
 
@@ -925,6 +967,55 @@ mod shared_journal_tests {
             "streenote-shared-journal-{}-{id}.jsonl",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn live_terminal_mirrors_peer_hermes_writes_from_shared_journal_without_inbox_delivery() {
+        let path = journal_path();
+        let mut first = Journal::open(path.clone()).expect("open first terminal journal");
+        let mut second = Journal::open(path.clone()).expect("open second terminal journal");
+        let event = Entry::with_external_event(
+            EntryKind::HermesUser,
+            "First prompt must appear in every live terminal.".to_string(),
+            "2026-11-10T12:00:00-05:00".to_string(),
+            "shared-journal-prompt-001".to_string(),
+            Some("conversation-1".to_string()),
+            Some("session-1".to_string()),
+            None,
+            Some("turn-1".to_string()),
+            None,
+            None,
+        );
+
+        first.append(event.clone()).expect("first terminal persists prompt");
+        assert!(second.entries.is_empty(), "second cache starts unchanged");
+
+        assert_eq!(
+            second.refresh_external_hermes_entries().expect("poll shared journal"),
+            1,
+            "second terminal must import the externally appended prompt",
+        );
+        assert_eq!(second.entries.len(), 1);
+        assert_eq!(
+            second.entries[0].text,
+            "First prompt must appear in every live terminal."
+        );
+
+        // A later duplicate from the second terminal's private inbox must not
+        // add a second in-memory row or a second durable JSONL record.
+        second.append(event).expect("deduplicate its private inbox copy");
+        assert_eq!(second.entries.len(), 1);
+
+        drop(first);
+        drop(second);
+        let contents = fs::read_to_string(&path).expect("read shared journal");
+        assert_eq!(
+            contents.lines().filter(|line| line.contains("shared-journal-prompt-001")).count(),
+            1,
+        );
+        let _ = fs::remove_file(&path);
+        let lock = PathBuf::from(format!("{}.lock", path.display()));
+        let _ = fs::remove_file(lock);
     }
 
     #[test]

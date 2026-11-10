@@ -1185,11 +1185,15 @@ fn drain_hermes_events(
 ) -> io::Result<usize> {
     let was_tracking_tail = app.is_tracking_selected_tail();
     let previous_len = app.journal.entries.len();
-    let result = hermes_bridge.drain(&mut app.journal);
+    let inbox_imported = hermes_bridge.drain(&mut app.journal)?;
+    // Private inboxes provide reliable per-instance delivery. Also tail the
+    // shared JSONL file so a prompt persisted by another terminal appears in
+    // this process even if its private inbox event was delayed or missed.
+    let shared_journal_imported = app.journal.refresh_external_hermes_entries()?;
     if app.journal.entries.len() > previous_len {
         app.update_selected_tail_after_append(was_tracking_tail);
     }
-    result
+    Ok(inbox_imported + shared_journal_imported)
 }
 
 fn run(
