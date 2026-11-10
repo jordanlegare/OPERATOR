@@ -132,6 +132,8 @@ pub struct App {
     pub conversation_focus_entry: Option<usize>,
     /// Whether final Hermes responses must be approved before client delivery.
     pub review_hermes_responses: bool,
+    /// Number of live STREENOTE terminals currently opted into review.
+    pub active_reviewer_count: usize,
     /// Active final-response review; its channel is the only release path to Hermes.
     pub pending_review: Option<ReviewRequest>,
     /// Editable copy of the held answer and its UTF-8 byte cursor.
@@ -214,6 +216,7 @@ impl App {
             // Every new terminal joins the reviewer pool. Operators can opt
             // this instance out temporarily with /review off.
             review_hermes_responses: true,
+            active_reviewer_count: 0,
             pending_review: None,
             review_text: String::new(),
             review_cursor: 0,
