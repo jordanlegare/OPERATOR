@@ -52,12 +52,10 @@ class CapturePromptFanoutTests(unittest.TestCase):
             listener.close()
         self.tempdir.cleanup()
 
-    def _run_hook(self, payload, *, registry_env=None):
-        environment = {
-            "STREENOTE_HERMES_INBOX": str(self.inboxes["a1"]),
-        }
-        if registry_env is not None:
-            environment["STREENOTE_HERMES_REVIEW_SESSION_DIR"] = str(registry_env)
+    def _run_hook(self, payload, *, include_inbox_env=True):
+        environment = {}
+        if include_inbox_env:
+            environment["STREENOTE_HERMES_INBOX"] = str(self.inboxes["a1"])
 
         with patch.dict(CAPTURE.os.environ, environment, clear=True), patch.object(
             CAPTURE,
@@ -70,9 +68,10 @@ class CapturePromptFanoutTests(unittest.TestCase):
             previous_stdin = CAPTURE.sys.stdin
             CAPTURE.sys.stdin = io.StringIO(json.dumps(payload))
             try:
+                expected_inbox = environment.get("STREENOTE_HERMES_INBOX")
                 self.assertEqual(
                     CAPTURE.os.environ.get("STREENOTE_HERMES_INBOX"),
-                    environment["STREENOTE_HERMES_INBOX"],
+                    expected_inbox,
                 )
                 self.assertEqual(CAPTURE.main(), 0)
             finally:
@@ -101,7 +100,7 @@ class CapturePromptFanoutTests(unittest.TestCase):
                     {"role": "tool", "name": "terminal", "content": "api_key=super-secret"},
                 ],
             },
-        })
+        }, include_inbox_env=False)
 
         copies = [self._events(inbox) for inbox in self.inboxes.values()]
         self.assertEqual(len(copies), 2)
