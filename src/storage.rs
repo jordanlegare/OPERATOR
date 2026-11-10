@@ -341,8 +341,8 @@ impl Journal {
         let mut scanned = 0u64;
         loop {
             line.clear();
-            let count = reader.read_until(b'\\n', &mut line)?;
-            if count == 0 || !line.ends_with(b"\\n") {
+            let count = reader.read_until(b'\n', &mut line)?;
+            if count == 0 || !line.ends_with(b"\n") {
                 break;
             }
             if let Ok(entry) = serde_json::from_slice::<Entry>(&line) {
@@ -443,7 +443,7 @@ impl Journal {
 
         // If a previous write stopped halfway through a JSON line, terminate that
         // damaged fragment before retrying. Blank lines are ignored by the loader.
-        file.write_all(b"\\n")?;
+        file.write_all(b"\n")?;
         let pending = std::mem::take(&mut self.pending);
         for (index, entry) in pending.iter().enumerate() {
             let mut bytes = match serde_json::to_vec(entry) {
@@ -453,7 +453,7 @@ impl Journal {
                     return Err(io::Error::other(error));
                 }
             };
-            bytes.push(b'\\n');
+            bytes.push(b'\n');
             if let Err(error) = file.write_all(&bytes) {
                 self.pending.extend_from_slice(&pending[index..]);
                 return Err(error);
