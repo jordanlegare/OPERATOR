@@ -1255,8 +1255,15 @@ fn run(
                             app.status = format!("Could not start independent terminal workspace: {error}");
                         }
                     }
-                } else if handle_key(key.code, key.modifiers, app, shell)? {
-                    break;
+                } else {
+                    let should_exit = handle_key(key.code, key.modifiers, app, shell)?;
+                    // Publish /review on|off changes immediately so the
+                    // shared Hermes dispatcher sees the live reviewer pool
+                    // state before the next poll iteration.
+                    review_server.set_enabled(app.review_hermes_responses);
+                    if should_exit {
+                        break;
+                    }
                 }
             }
             Event::Mouse(_) if app.pending_review.is_some() || !app.review_broadcasts.is_empty() => {}
