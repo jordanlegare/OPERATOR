@@ -2197,7 +2197,7 @@ fn read_osc52_terminal_clipboard() -> io::Result<Option<String>> {
 
     // Query the clipboard selection ("c"). The response is ESC ] 52 ; c ; BASE64 BEL/ST.
     let mut output = stdout();
-    output.write_all(b"\x1b]52;c;?\x1b\\\\")?;
+    output.write_all(b"\x1b]52;c;?\x1b\\")?;
     output.flush()?;
 
     let prefix = b"\x1b]52;c;";
