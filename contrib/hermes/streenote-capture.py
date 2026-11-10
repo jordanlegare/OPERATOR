@@ -87,7 +87,7 @@ def write_review_session_route(
             with os.fdopen(fd, "w", encoding="utf-8") as temporary:
                 os.fchmod(temporary.fileno(), 0o600)
                 json.dump(record, temporary, separators=(",", ":"))
-                temporary.write("\\n")
+                temporary.write("\n")
                 temporary.flush()
                 os.fsync(temporary.fileno())
             os.replace(temporary_name, assignment)

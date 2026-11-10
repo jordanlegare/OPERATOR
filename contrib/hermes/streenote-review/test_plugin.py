@@ -252,7 +252,8 @@ class HermesReviewPluginTests(unittest.TestCase):
         records = [json.loads(line) for line in log_path.read_text().splitlines()]
         events = [record["event"] for record in records]
         self.assertIn("CALLBACK_INVOKED", events)
-        self.assertIn("SOCKET_PATH_RESOLVED", events)
+        self.assertIn("SOCKET_ROUTES_RESOLVED", events)
+        self.assertIn("SESSION_ROUTE_SELECTED", events)
         self.assertIn("SOCKET_CONNECT_OK", events)
         self.assertIn("REQUEST_SENT", events)
         self.assertIn("DECISION_RECEIVED", events)
