@@ -1,6 +1,5 @@
 use std::{
     cell::{Ref, RefCell},
-    collections::VecDeque,
     io,
     path::PathBuf,
     time::{Duration, Instant},
@@ -137,9 +136,6 @@ pub struct App {
     last_review_settings_check: Instant,
     /// Active final-response review; its channel is the only release path to Hermes.
     pub pending_review: Option<ReviewRequest>,
-    /// Read-only copies of final responses delivered to this non-reviewing terminal.
-    pub review_broadcasts: VecDeque<ReviewBroadcast>,
-    pub review_broadcast_scroll: u16,
     /// Editable copy of the held answer and its UTF-8 byte cursor.
     pub review_text: String,
     pub review_cursor: usize,
@@ -218,8 +214,6 @@ impl App {
             review_hermes_responses: settings.review_hermes_responses,
             last_review_settings_check: Instant::now(),
             pending_review: None,
-            review_broadcasts: VecDeque::new(),
-            review_broadcast_scroll: 0,
             review_text: String::new(),
             review_cursor: 0,
             review_vertical_scroll: 0,
@@ -1326,48 +1320,10 @@ impl App {
         };
     }
 
-    pub fn receive_hermes_broadcast(&mut self, broadcast: ReviewBroadcast) {
-        // Pending copies let other terminals inspect the draft while one operator
-        // reviews it. A result is only a lifecycle signal: close that pending
-        // copy silently instead of opening a confirmation modal on every terminal.
-        // The selected reviewer's F2/F3/F4 decision remains authoritative.
-        if broadcast.phase == "result" {
-            self.review_broadcasts
-                .retain(|item| item.request_id != broadcast.request_id);
-            self.review_broadcast_scroll = 0;
-            return;
-        }
-
-        if let Some(existing) = self.review_broadcasts.iter_mut().find(|item| {
-            item.request_id == broadcast.request_id
-        }) {
-            *existing = broadcast;
-        } else {
-            self.review_broadcasts.push_back(broadcast);
-        }
-        if self.pending_review.is_none() {
-            self.status =
-                "A Hermes response is awaiting review in another connected STREENOTE terminal."
-                    .to_string();
-        }
-    }
-    pub fn dismiss_hermes_broadcast(&mut self) {
-        self.review_broadcasts.pop_front();
-        self.review_broadcast_scroll = 0;
-        if !self.review_broadcasts.is_empty() {
-            self.status = format!(
-                "{} more Hermes response broadcast(s) waiting.",
-                self.review_broadcasts.len()
-            );
-        }
-    }
-
-    pub fn scroll_hermes_broadcast(&mut self, amount: i32) {
-        self.review_broadcast_scroll = if amount < 0 {
-            self.review_broadcast_scroll.saturating_sub(amount.unsigned_abs() as u16)
-        } else {
-            self.review_broadcast_scroll.saturating_add(amount as u16)
-        };
+    pub fn receive_hermes_broadcast(&mut self, _broadcast: ReviewBroadcast) {
+        // Response previews are intentionally private to the selected reviewer.
+        // Other terminals drain and discard observer broadcasts so they never
+        // replace the operator's normal terminal with a review-status modal.
     }
 
     pub fn begin_hermes_review(&mut self, request: ReviewRequest) {
@@ -2179,48 +2135,23 @@ mod tests {
     }
 
     #[test]
-    fn final_review_result_silently_closes_the_read_only_broadcast() {
+    fn observer_review_broadcast_is_ignored_without_opening_review_ui() {
         use crate::hermes_review::ReviewBroadcast;
 
         let (mut app, path) = test_app();
+        let original_status = app.status.clone();
         app.receive_hermes_broadcast(ReviewBroadcast {
-            request_id: "shared-review-001".to_string(),
+            request_id: "observer-review-001".to_string(),
             session_id: "session-1".to_string(),
             model: "qwen3.5:latest".to_string(),
             platform: "api_server".to_string(),
-            response_text: "Original draft".to_string(),
+            response_text: "Private held answer".to_string(),
             phase: "pending".to_string(),
             decision: None,
         });
-        assert_eq!(app.review_broadcasts.len(), 1);
-        assert_eq!(app.review_broadcasts[0].response_text, "Original draft");
-        app.status = "Keep the normal terminal status.".to_string();
 
-        app.review_broadcast_scroll = 12;
-        app.receive_hermes_broadcast(ReviewBroadcast {
-            request_id: "shared-review-001".to_string(),
-            session_id: "session-1".to_string(),
-            model: "qwen3.5:latest".to_string(),
-            platform: "api_server".to_string(),
-            response_text: "Edited and approved final text".to_string(),
-            phase: "result".to_string(),
-            decision: Some("replace".to_string()),
-        });
-        assert!(app.review_broadcasts.is_empty());
-        assert_eq!(app.review_broadcast_scroll, 0);
-        assert_eq!(app.status, "Keep the normal terminal status.");
-
-        // A result-only event must not create a new notification modal.
-        app.receive_hermes_broadcast(ReviewBroadcast {
-            request_id: "result-only-review".to_string(),
-            session_id: "session-1".to_string(),
-            model: "qwen3.5:latest".to_string(),
-            platform: "api_server".to_string(),
-            response_text: String::new(),
-            phase: "result".to_string(),
-            decision: Some("approve".to_string()),
-        });
-        assert!(app.review_broadcasts.is_empty());
+        assert!(app.pending_review.is_none());
+        assert_eq!(app.status, original_status);
 
         let _ = fs::remove_file(path);
     }

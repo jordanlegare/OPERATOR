@@ -1164,19 +1164,6 @@ fn drain_review_broadcasts(app: &mut App, review_server: &mut HermesReviewServer
     }
 }
 
-fn handle_broadcast_key(code: KeyCode, app: &mut App) {
-    match code {
-        KeyCode::Up => app.scroll_hermes_broadcast(-3),
-        KeyCode::Down => app.scroll_hermes_broadcast(3),
-        KeyCode::PageUp => app.scroll_hermes_broadcast(-12),
-        KeyCode::PageDown => app.scroll_hermes_broadcast(12),
-        KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => {
-            app.dismiss_hermes_broadcast();
-        }
-        _ => {}
-    }
-}
-
 /// Import Hermes events while keeping a highlighted live-tail row attached
 /// to the newest imported record.
 fn drain_hermes_events(
@@ -1238,9 +1225,7 @@ fn run(
                     || (key.kind == KeyEventKind::Repeat
                         && matches!(key.code, KeyCode::Up | KeyCode::Down)) =>
             {
-                if app.pending_review.is_none() && !app.review_broadcasts.is_empty() {
-                    handle_broadcast_key(key.code, app);
-                } else if key.kind == KeyEventKind::Press && key.code == KeyCode::F(1) {
+                if key.kind == KeyEventKind::Press && key.code == KeyCode::F(1) {
                     let size = terminal.size()?;
                     match ShellSession::spawn(size.width, size.height) {
                         Ok(mut workspace_session) => {
@@ -1270,7 +1255,7 @@ fn run(
                     }
                 }
             }
-            Event::Mouse(_) if app.pending_review.is_some() || !app.review_broadcasts.is_empty() => {}
+            Event::Mouse(_) if app.pending_review.is_some() => {}
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Right)
                     if app.message_view_index.is_none()
@@ -1302,7 +1287,7 @@ fn run(
             Event::Paste(text) => {
                 if app.pending_review.is_some() {
                     app.review_insert_text(&text);
-                } else if app.review_broadcasts.is_empty() {
+                } else {
                     paste_clipboard_text(app, &text, "terminal paste event");
                 }
             },
@@ -1401,10 +1386,6 @@ fn run_terminal_workspace_loop(
         }
         if app.pending_review.is_some() {
             run_workspace_review_overlay(terminal, app)?;
-            continue;
-        }
-        if !app.review_broadcasts.is_empty() {
-            run_workspace_broadcast_overlay(terminal, app, review_server)?;
             continue;
         }
 
@@ -1536,69 +1517,6 @@ fn run_workspace_review_overlay(
     Ok(())
 }
 
-fn run_workspace_broadcast_overlay(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut App,
-    review_server: &mut HermesReviewServer,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut out = stdout();
-    execute!(
-        out,
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste,
-        PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-        ),
-        crossterm::cursor::Hide
-    )?;
-    terminal.clear()?;
-
-    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        while !app.review_broadcasts.is_empty() {
-            // A newly assigned review takes priority over this read-only
-            // notification. Never leave a pool slot idle behind an observer
-            // overlay in the F1 raw-terminal workspace.
-            drain_review_broadcasts(app, review_server);
-            if app.pending_review.is_none() {
-                if let Some(request) = review_server.try_recv() {
-                    app.begin_hermes_review(request);
-                    break;
-                }
-            }
-            terminal.draw(|frame| ui::draw(frame, app))?;
-            if !event::poll(Duration::from_millis(40))? {
-                continue;
-            }
-            match event::read()? {
-                Event::Key(key)
-                    if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat =>
-                {
-                    handle_broadcast_key(key.code, app);
-                }
-                Event::Resize(_, _) => {}
-                _ => {}
-            }
-        }
-        Ok(())
-    })();
-
-    let cleanup = execute!(
-        out,
-        PopKeyboardEnhancementFlags,
-        DisableBracketedPaste,
-        DisableMouseCapture,
-        LeaveAlternateScreen,
-        crossterm::cursor::Show
-    );
-    let clear = terminal.clear();
-    result?;
-    cleanup?;
-    clear?;
-    Ok(())
-}
-
 fn handle_review_key(code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
     if app.pending_review.is_none() {
         return;
@@ -1707,10 +1625,6 @@ fn run_terminal_workspace_loop(
         }
         if app.pending_review.is_some() {
             run_workspace_review_overlay(_terminal, app)?;
-            continue;
-        }
-        if !app.review_broadcasts.is_empty() {
-            run_workspace_broadcast_overlay(_terminal, app, review_server)?;
             continue;
         }
         match drain_hermes_events(app, hermes_bridge) {
