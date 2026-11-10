@@ -2159,6 +2159,46 @@ mod tests {
     }
 
     #[test]
+    fn shared_hermes_broadcast_is_upgraded_in_place_with_the_final_edited_answer() {
+        use crate::hermes_review::ReviewBroadcast;
+
+        let (mut app, path) = test_app();
+        app.receive_hermes_broadcast(ReviewBroadcast {
+            request_id: "shared-review-001".to_string(),
+            session_id: "session-1".to_string(),
+            model: "qwen3.5:latest".to_string(),
+            platform: "api_server".to_string(),
+            response_text: "Original draft".to_string(),
+            phase: "pending".to_string(),
+            decision: None,
+        });
+        assert_eq!(app.review_broadcasts.len(), 1);
+        assert_eq!(app.review_broadcasts[0].response_text, "Original draft");
+
+        app.receive_hermes_broadcast(ReviewBroadcast {
+            request_id: "shared-review-001".to_string(),
+            session_id: "session-1".to_string(),
+            model: "qwen3.5:latest".to_string(),
+            platform: "api_server".to_string(),
+            response_text: "Edited and approved final text".to_string(),
+            phase: "result".to_string(),
+            decision: Some("replace".to_string()),
+        });
+        assert_eq!(app.review_broadcasts.len(), 1, "result must update, not duplicate");
+        assert_eq!(
+            app.review_broadcasts[0].response_text,
+            "Edited and approved final text"
+        );
+        assert_eq!(
+            app.review_broadcasts[0].decision.as_deref(),
+            Some("replace")
+        );
+        assert!(app.status.contains("Edited Hermes answer approved"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn expired_review_is_closed_and_returns_a_rejection() {
         use crate::hermes_review::{ReviewDecision, ReviewRequest};
         use std::sync::mpsc;
