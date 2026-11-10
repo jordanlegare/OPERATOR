@@ -245,7 +245,7 @@ Hermes assigns each held final answer to one available `/review on` terminal usi
 - **F2** releases the exact original answer.
 - **F3** releases the edited text.
 - **F4** withholds the answer. This does not automatically ask Hermes to regenerate; send a follow-up instruction as a new turn when appropriate.
-Use the arrow keys, Home/End, Backspace/Delete, Enter for a newline, and Ctrl+V or terminal paste to edit. Escape does not dismiss or release a held answer. Turning `/review off` while this terminal already owns a pending review prevents future assignments but does not cancel that review; finish it with F2, F3, or F4.
+Use Ctrl+A to select the complete held answer; type or paste to replace it. Backspace/Delete remove the selection. The arrow keys collapse the selection and move the cursor. Home/End move within a line, Ctrl+Home/End move to the document boundaries, and Enter inserts a newline. Ctrl+V or terminal paste inserts clipboard text. Escape does not dismiss or release a held answer. Turning `/review off` while this terminal already owns a pending review prevents future assignments but does not cancel that review; finish it with F2, F3, or F4.
 
 The STREENOTE listener waits up to nine minutes. If the selected reviewer rejects the response, the connection fails after accepting the request, or the review deadline expires, the plugin withholds the draft rather than releasing it. If no STREENOTE listener exists, the plugin passes responses through unchanged by default; with `STREENOTE_HERMES_REVIEW_REQUIRED=1`, it withholds them instead. A single `/review off` terminal does not bypass another terminal's active reviewer; pass-through occurs only when every registered terminal has review disabled.
 

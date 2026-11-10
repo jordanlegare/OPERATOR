@@ -1522,6 +1522,7 @@ fn handle_review_key(code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
 
     if modifiers.contains(KeyModifiers::CONTROL) {
         match code {
+            KeyCode::Char('a') | KeyCode::Char('A') => app.review_select_all(),
             KeyCode::Char('v') => paste_review_from_system_clipboard(app),
             KeyCode::Home => app.review_cursor_document_start(),
             KeyCode::End => app.review_cursor_document_end(),

@@ -60,6 +60,52 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
+fn review_editor_lines(app: &App, theme: Theme) -> Vec<Line<'static>> {
+    let selection = app.review_selected_range();
+    let normal_style = Style::default().fg(theme.text).bg(theme.panel);
+    let selected_style = Style::default()
+        .fg(theme.bg)
+        .bg(theme.info)
+        .add_modifier(Modifier::BOLD);
+    let mut result = Vec::new();
+    let mut absolute_line_start = 0usize;
+
+    for line in app.review_text.split('\n') {
+        let mut spans = Vec::new();
+        let mut run = String::new();
+        let mut run_selected: Option<bool> = None;
+
+        for (offset, character) in line.char_indices() {
+            let absolute_offset = absolute_line_start + offset;
+            let is_selected = selection
+                .is_some_and(|(start, end)| absolute_offset >= start && absolute_offset < end);
+            if run_selected.is_some_and(|previous| previous != is_selected) {
+                let style = if run_selected == Some(true) {
+                    selected_style
+                } else {
+                    normal_style
+                };
+                spans.push(Span::styled(std::mem::take(&mut run), style));
+            }
+            run_selected = Some(is_selected);
+            run.push(character);
+        }
+
+        if !run.is_empty() {
+            let style = if run_selected == Some(true) {
+                selected_style
+            } else {
+                normal_style
+            };
+            spans.push(Span::styled(run, style));
+        }
+        result.push(Line::from(spans));
+        absolute_line_start = absolute_line_start.saturating_add(line.len()).saturating_add(1);
+    }
+
+    result
+}
+
 fn draw_hermes_review(frame: &mut Frame, app: &mut App, theme: Theme) {
     let Some((request_id, session_id, model, platform)) = app.pending_review.as_ref().map(|request| (
         request.request_id.clone(),
@@ -161,7 +207,7 @@ fn draw_hermes_review(frame: &mut Frame, app: &mut App, theme: Theme) {
     let editor_area = sections[1];
     let editor_inner = editor_block.inner(editor_area);
     frame.render_widget(
-        Paragraph::new(app.review_text.clone())
+        Paragraph::new(review_editor_lines(app, theme))
             .style(Style::default().fg(theme.text).bg(theme.panel))
             .scroll((app.review_vertical_scroll, app.review_horizontal_scroll))
             .block(editor_block),
@@ -190,7 +236,7 @@ fn draw_hermes_review(frame: &mut Frame, app: &mut App, theme: Theme) {
             Span::styled(" WITHHOLD RESPONSE", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(Span::styled(
-            "Arrows edit · Enter newline · Home/End line · Ctrl+Home/End document · paste supported · Esc does not release",
+            "Ctrl+A select all · type/paste to replace · arrows move · Enter newline · F2/F3/F4 decide · Esc does not release",
             Style::default().fg(theme.muted),
         )),
     ];
