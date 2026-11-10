@@ -379,6 +379,9 @@ impl Journal {
                 if let Some(event_id) = entry.event_id.as_ref() {
                     self.pending_event_ids.insert(event_id.clone());
                 }
+                if let Some(record_id) = record_id.as_ref() {
+                    self.pending_record_ids.insert(record_id.clone());
+                }
                 self.pending.push(entry);
                 Err(error)
             }
@@ -1115,6 +1118,69 @@ mod shared_journal_tests {
             contents.lines().filter(|line| line.contains("shared-journal-prompt-001")).count(),
             1,
         );
+        let _ = fs::remove_file(&path);
+        let lock = PathBuf::from(format!("{}.lock", path.display()));
+        let _ = fs::remove_file(lock);
+    }
+
+    #[test]
+    fn live_notes_sync_between_terminals_in_both_directions_without_mirroring_commands() {
+        let path = journal_path();
+        let mut first = Journal::open(path.clone()).expect("open first terminal journal");
+        let mut second = Journal::open(path.clone()).expect("open second terminal journal");
+
+        first
+            .append(Entry::with_kind(
+                EntryKind::TerminalCommand,
+                "private shell command".to_string(),
+            ))
+            .expect("persist first terminal command");
+        first
+            .append(Entry::with_kind(
+                EntryKind::Note,
+                "note written in terminal one".to_string(),
+            ))
+            .expect("persist first terminal note");
+
+        // The second terminal discovers the first note even when its next
+        // action is another local append rather than an explicit refresh.
+        second
+            .append(Entry::with_kind(
+                EntryKind::Note,
+                "note written in terminal two".to_string(),
+            ))
+            .expect("persist second terminal note");
+
+        assert_eq!(second.entries.len(), 2);
+        assert_eq!(second.entries[0].kind, EntryKind::Note);
+        assert_eq!(second.entries[0].text, "note written in terminal one");
+        assert_eq!(second.entries[1].text, "note written in terminal two");
+
+        // The first terminal receives the second terminal's note on its next
+        // poll, and repeated polls cannot create duplicate rows.
+        assert_eq!(
+            first.refresh_external_entries().expect("sync second note"),
+            1
+        );
+        assert_eq!(
+            first.refresh_external_entries().expect("idempotent note poll"),
+            0
+        );
+        assert_eq!(first.entries.len(), 3);
+        assert_eq!(first.entries[2].text, "note written in terminal two");
+
+        // Neither terminal imports another terminal's shell command as a note.
+        assert_eq!(
+            second.refresh_external_entries().expect("no extra shared rows"),
+            0
+        );
+
+        drop(first);
+        drop(second);
+        let contents = fs::read_to_string(&path).expect("read shared journal");
+        assert_eq!(contents.lines().count(), 3);
+        assert_eq!(contents.matches("note written in terminal one").count(), 1);
+        assert_eq!(contents.matches("note written in terminal two").count(), 1);
         let _ = fs::remove_file(&path);
         let lock = PathBuf::from(format!("{}.lock", path.display()));
         let _ = fs::remove_file(lock);
