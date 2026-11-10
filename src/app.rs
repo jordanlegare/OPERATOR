@@ -11,7 +11,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::{
     conversations::{build_threads, collapse_live_streams, is_hermes_event, ConversationThread},
     hermes_review::{
-        diagnostics_summary, ReviewBroadcast, ReviewDecision, ReviewRequest, MAX_REVIEW_BYTES,
+        diagnostics_summary, ReviewDecision, ReviewRequest, MAX_REVIEW_BYTES,
     },
     shell::ShellSession,
     settings::Settings,
@@ -1306,12 +1306,6 @@ impl App {
         };
     }
 
-    pub fn receive_hermes_broadcast(&mut self, _broadcast: ReviewBroadcast) {
-        // Response previews are intentionally private to the selected reviewer.
-        // Other terminals drain and discard observer broadcasts so they never
-        // replace the operator's normal terminal with a review-status modal.
-    }
-
     pub fn begin_hermes_review(&mut self, request: ReviewRequest) {
         if self.pending_review.is_some() {
             let _ = request.reply.send(ReviewDecision::Reject);
@@ -2292,28 +2286,6 @@ mod tests {
         app.review_delete();
         assert!(app.review_text.is_empty());
         assert_eq!(app.review_cursor, 0);
-
-        let _ = fs::remove_file(path);
-    }
-
-    #[test]
-    fn observer_review_broadcast_is_ignored_without_opening_review_ui() {
-        use crate::hermes_review::ReviewBroadcast;
-
-        let (mut app, path) = test_app();
-        let original_status = app.status.clone();
-        app.receive_hermes_broadcast(ReviewBroadcast {
-            request_id: "observer-review-001".to_string(),
-            session_id: "session-1".to_string(),
-            model: "qwen3.5:latest".to_string(),
-            platform: "api_server".to_string(),
-            response_text: "Private held answer".to_string(),
-            phase: "pending".to_string(),
-            decision: None,
-        });
-
-        assert!(app.pending_review.is_none());
-        assert_eq!(app.status, original_status);
 
         let _ = fs::remove_file(path);
     }
