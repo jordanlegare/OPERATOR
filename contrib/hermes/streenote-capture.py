@@ -415,20 +415,32 @@ def write_inbox_event(inbox: Path, event: dict) -> None:
     silently falling back to the originating terminal when the registry
     variable was not inherited. Each TUI still receives a private queue.
     """
-    registry = None
-    recipients = []
+    registries = []
+    recipients_by_path = {}
     for candidate in review_session_registry_candidates():
         candidate_recipients = _connected_instance_inboxes(candidate)
-        if candidate_recipients:
-            registry = candidate
-            recipients = candidate_recipients
-            break
+        if not candidate_recipients:
+            continue
 
-    # A registered source is already included in the recipient list. Use its
-    # private inbox as a fallback only when no live registry can be discovered.
-    source = inbox.expanduser()
-    if not recipients:
-        recipients = [source]
+        registries.append(candidate)
+        for recipient in candidate_recipients:
+            # Several environment aliases may resolve to the same directory.
+            # Keep one delivery per physical inbox but do not stop at the first
+            # registry: a stale, valid override may contain only one terminal.
+            normalized = recipient.resolve(strict=False)
+            recipients_by_path.setdefault(normalized, normalized)
+
+    recipients = list(recipients_by_path.values())
+
+    # A source inbox may belong to a registry that was not enumerable (for
+    # example, while its manifest is being atomically replaced). Preserve it
+    # as a recipient without dropping any terminals found in other registries.
+    source = inbox.expanduser().resolve(strict=False)
+    if source not in recipients_by_path:
+        recipients.append(source)
+
+    # If no registry could be discovered, the source inbox remains the only
+    # safe destination available to this detached hook invocation.
 
     failures = []
     delivered = 0
@@ -449,10 +461,10 @@ def write_inbox_event(inbox: Path, event: dict) -> None:
         )
 
     if os.environ.get("STREENOTE_HERMES_CAPTURE_DEBUG") == "1":
-        route = str(registry) if registry is not None else "origin-inbox fallback"
+        route = ",".join(str(item) for item in registries) or "origin-inbox fallback"
         print(
             f"STREENOTE Hermes capture: fanned event {event.get('event_id', 'unknown')} "
-            f"to {delivered} terminal inbox(es) via {route}",
+            f"to {delivered}/{len(recipients)} terminal inbox(es) via {route}",
             file=sys.stderr,
         )
 
