@@ -1894,6 +1894,13 @@ fn handle_key(
         return Ok(false);
     }
 
+    if app.show_help {
+        if code == KeyCode::Esc {
+            app.show_help = false;
+        }
+        return Ok(false);
+    }
+
     if let Some(view) = app.conversation_view.clone() {
         match view {
             ConversationView::List => match code {
