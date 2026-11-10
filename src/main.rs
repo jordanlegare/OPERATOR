@@ -1515,15 +1515,26 @@ fn run_workspace_review_overlay(
     Ok(())
 }
 
+fn is_clipboard_paste_shortcut(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(code, KeyCode::Char('v' | 'V'))
+}
+
 fn handle_review_key(code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
     if app.pending_review.is_none() {
+        return;
+    }
+
+    // Some SSH terminal/keyboard-protocol combinations report Ctrl+V as
+    // Char('V') (often with SHIFT) rather than Char('v'). Accept both.
+    if is_clipboard_paste_shortcut(code, modifiers) {
+        paste_review_from_system_clipboard(app);
         return;
     }
 
     if modifiers.contains(KeyModifiers::CONTROL) {
         match code {
             KeyCode::Char('a') | KeyCode::Char('A') => app.review_select_all(),
-            KeyCode::Char('v') => paste_review_from_system_clipboard(app),
             KeyCode::Home => app.review_cursor_document_start(),
             KeyCode::End => app.review_cursor_document_end(),
             KeyCode::Char('q') => {
@@ -1984,7 +1995,7 @@ fn handle_key(
                     app.status = "Sent Ctrl+D (end-of-input) to the Debian shell.".to_string();
                 }
             }
-            KeyCode::Char('v') => paste_from_system_clipboard(app),
+            KeyCode::Char('v') | KeyCode::Char('V') => paste_from_system_clipboard(app),
             KeyCode::Char('s') => app.save(),
             KeyCode::Char('p') => app.history_previous(),
             KeyCode::Char('n') => app.history_next(),
@@ -2414,6 +2425,43 @@ fn theme_number_from_key(code: KeyCode, modifiers: KeyModifiers) -> Option<usize
     }
 }
 
+
+#[cfg(test)]
+mod clipboard_paste_shortcut_tests {
+    use super::{is_clipboard_paste_shortcut, KeyCode, KeyModifiers};
+
+    #[test]
+    fn ctrl_v_accepts_lowercase_terminal_key_reports() {
+        assert!(is_clipboard_paste_shortcut(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL
+        ));
+    }
+
+    #[test]
+    fn ctrl_v_accepts_uppercase_reports_from_ssh_terminals() {
+        assert!(is_clipboard_paste_shortcut(
+            KeyCode::Char('V'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        ));
+        assert!(is_clipboard_paste_shortcut(
+            KeyCode::Char('V'),
+            KeyModifiers::CONTROL
+        ));
+    }
+
+    #[test]
+    fn ordinary_v_is_not_treated_as_a_clipboard_shortcut() {
+        assert!(!is_clipboard_paste_shortcut(
+            KeyCode::Char('v'),
+            KeyModifiers::NONE
+        ));
+        assert!(!is_clipboard_paste_shortcut(
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL
+        ));
+    }
+}
 
 #[cfg(test)]
 mod ssh_dispatch_tests {
