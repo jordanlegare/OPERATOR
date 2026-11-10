@@ -252,7 +252,7 @@ def _write_inbox_event_one(inbox: Path, event: dict) -> None:
                 event, ensure_ascii=False, separators=(",", ":")
             ).encode("utf-8")
             temporary.write(data)
-            temporary.write(b"\\n")
+            temporary.write(b"\n")
             temporary.flush()
             os.fsync(temporary.fileno())
         os.replace(temporary_name, final_path)
