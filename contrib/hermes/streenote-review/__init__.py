@@ -461,6 +461,9 @@ def _exchange(
         try:
             connection.connect(str(path))
         except (FileNotFoundError, ConnectionRefusedError) as error:
+            # Only a failure before connect succeeds is safe to reroute.
+            # Once a peer has accepted the request, never duplicate a
+            # potentially displayed/approved review to a second terminal.
             raise _ReviewSocketUnavailable(str(error)) from error
         _log_event(
             "SOCKET_CONNECT_OK",
@@ -469,20 +472,16 @@ def _exchange(
             request_id=request.get("request_id", ""),
         )
         with connection:
-            connection.sendall(encoded + b"\n")
-            _log_event("REQUEST_SENT", request_id=request.get("request_id", ""), instance_id=instance_id)
-            try:
+            connection.sendall(encoded + b"\\n")
+            _log_event(
+                "REQUEST_SENT",
+                request_id=request.get("request_id", ""),
+                instance_id=instance_id,
+            )
             return _read_json_line(connection)
-        except RuntimeError as error:
-            if "closed the review channel without a decision" in str(error):
-                raise _ReviewSocketUnavailable(str(error)) from error
-            raise
-    except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError) as error:
-        raise _ReviewSocketUnavailable(str(error)) from error
     except Exception:
         connection.close()
         raise
-
 
 def _broadcast_review_result(
     routes: list[dict[str, Any]],
