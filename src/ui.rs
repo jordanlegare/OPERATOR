@@ -57,7 +57,69 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if app.pending_review.is_some() {
         draw_hermes_review(frame, app, theme);
+    } else if !app.review_broadcasts.is_empty() {
+        draw_hermes_broadcast(frame, app, theme);
     }
+}
+
+fn draw_hermes_broadcast(frame: &mut Frame, app: &App, theme: Theme) {
+    let Some(broadcast) = app.review_broadcasts.front() else {
+        return;
+    };
+    let popup = centered_rect(92, 88, frame.area());
+    frame.render_widget(Clear, popup);
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.info))
+        .title(Span::styled(
+            " HERMES RESPONSE · SHARED TO CONNECTED TERMINALS · READ ONLY ",
+            Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(theme.panel));
+    let inner = outer.inner(popup);
+    frame.render_widget(outer, popup);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(2),
+        ])
+        .split(inner);
+    let session_label = if broadcast.session_id.is_empty() {
+        "unknown".to_string()
+    } else {
+        broadcast.session_id.chars().take(24).collect::<String>()
+    };
+    let metadata = vec![
+        Line::from(vec![
+            Span::styled(" MODEL ", Style::default().fg(theme.info).add_modifier(Modifier::BOLD)),
+            Span::styled(if broadcast.model.is_empty() { "unknown" } else { &broadcast.model }, Style::default().fg(theme.text)),
+            Span::styled("   SESSION ", Style::default().fg(theme.info).add_modifier(Modifier::BOLD)),
+            Span::styled(session_label, Style::default().fg(theme.text)),
+        ]),
+        Line::from(vec![
+            Span::styled(" REVIEW ID ", Style::default().fg(theme.muted).add_modifier(Modifier::BOLD)),
+            Span::styled(broadcast.request_id.clone(), Style::default().fg(theme.muted)),
+            Span::styled("   Another connected terminal owns the review decision.", Style::default().fg(theme.warning)),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(metadata).style(Style::default().bg(theme.panel)),
+        sections[0],
+    );
+    frame.render_widget(
+        Paragraph::new(broadcast.response_text.clone())
+            .style(Style::default().fg(theme.text).bg(theme.panel))
+            .wrap(Wrap { trim: false })
+            .scroll((app.review_broadcast_scroll, 0)),
+        sections[1],
+    );
+    frame.render_widget(
+        Paragraph::new(" READ ONLY · ↑/↓ or PageUp/PageDown to scroll · ENTER/ESC to dismiss ")
+            .style(Style::default().fg(theme.info).bg(theme.panel)),
+        sections[2],
+    );
 }
 
 fn draw_hermes_review(frame: &mut Frame, app: &mut App, theme: Theme) {
