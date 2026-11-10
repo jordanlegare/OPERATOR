@@ -851,12 +851,10 @@ def review_response(
         instance_id=selected_route["instance_id"],
     )
     if decision == "bypass":
-        # An explicit operator choice (/review off) overrides fail-closed mode.
-        _broadcast_review_result(routes, request, "bypass", response_text)
+        # A local race may still reach this path after the reviewer toggles off.
         _log_event("REVIEW_BYPASS", request_id=request_id, required=required)
         return None
     if decision == "approve":
-        _broadcast_review_result(routes, request, "approve", response_text)
         _log_event("REVIEW_APPROVED", request_id=request_id)
         return response_text
     if decision == "replace":
@@ -871,7 +869,6 @@ def review_response(
             raise RuntimeError(
                 "STREENOTE replacement exceeded the review limit; the Hermes response was withheld."
             )
-        _broadcast_review_result(routes, request, "replace", replacement)
         _log_event(
             "REVIEW_REPLACED",
             request_id=request_id,
@@ -881,7 +878,6 @@ def review_response(
     if decision == "reject":
         reason = reply.get("error")
         detail = f" ({reason})" if isinstance(reason, str) and reason else ""
-        _broadcast_review_result(routes, request, "reject", None)
         _log_event("REVIEW_REJECTED", request_id=request_id, reason=str(reason or "")[:300])
         raise RuntimeError(f"STREENOTE operator withheld this Hermes response{detail}.")
     _log_event("REVIEW_ERROR", request_id=request_id, error=f"unknown decision {decision!r}")
