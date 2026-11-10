@@ -53,6 +53,7 @@ impl Default for HermesBridge {
 }
 
 impl HermesBridge {
+    #[cfg(test)]
     pub fn new(inbox: PathBuf) -> Self {
         Self { inbox }
     }

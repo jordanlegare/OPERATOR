@@ -58,6 +58,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.pending_review.is_some() {
         draw_hermes_review(frame, app, theme);
     }
+    if app.show_help
+        && app.pending_review.is_none()
+        && app.message_view_index.is_none()
+        && app.conversation_view.is_none()
+    {
+        draw_help(frame, frame.area(), theme);
+    }
 }
 
 fn review_editor_lines(app: &App, theme: Theme) -> Vec<Line<'static>> {

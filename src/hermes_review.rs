@@ -141,17 +141,6 @@ pub struct ReviewRequest {
     pub reply: SyncSender<ReviewDecision>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ReviewBroadcast {
-    pub request_id: String,
-    pub session_id: String,
-    pub model: String,
-    pub platform: String,
-    pub response_text: String,
-    pub phase: String,
-    pub decision: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReviewDecision {
     Approve,
@@ -171,15 +160,7 @@ struct WireRequest {
     platform: String,
     #[serde(default)]
     observe_only: bool,
-    #[serde(default = "default_broadcast_phase")]
-    phase: String,
-    #[serde(default)]
-    decision: Option<String>,
     response_text: String,
-}
-
-fn default_broadcast_phase() -> String {
-    "pending".to_string()
 }
 
 #[derive(Debug, Serialize)]
@@ -194,7 +175,6 @@ struct WireResponse {
 
 pub struct HermesReviewServer {
     receiver: Receiver<ReviewRequest>,
-    broadcast_receiver: Receiver<ReviewBroadcast>,
     enabled: Arc<AtomicBool>,
     socket_path: PathBuf,
     instance_id: Option<String>,
@@ -298,7 +278,6 @@ impl HermesReviewServer {
         listener.set_nonblocking(true)?;
 
         let (sender, receiver) = mpsc::channel();
-        let (broadcast_sender, broadcast_receiver) = mpsc::channel();
         let enabled = Arc::new(AtomicBool::new(false));
         let worker_enabled = Arc::clone(&enabled);
         let stop = Arc::new(AtomicBool::new(false));
@@ -313,7 +292,6 @@ impl HermesReviewServer {
                             // accept loop can keep polling, and listener shutdown
                             // never waits for an operator to decide a pending answer.
                             let connection_sender = sender.clone();
-                            let connection_broadcast_sender = broadcast_sender.clone();
                             let connection_enabled = Arc::clone(&worker_enabled);
                             let connection_stop = Arc::clone(&worker_stop);
                             let _ = thread::Builder::new()
@@ -322,7 +300,6 @@ impl HermesReviewServer {
                                     if let Err(error) = handle_connection(
                                         stream,
                                         &connection_sender,
-                                        &connection_broadcast_sender,
                                         &connection_enabled,
                                         &connection_stop,
                                     ) {
@@ -349,7 +326,6 @@ impl HermesReviewServer {
 
         Ok(Self {
             receiver,
-            broadcast_receiver,
             enabled,
             socket_path,
             instance_id: None,
@@ -416,10 +392,6 @@ impl HermesReviewServer {
 
     pub fn try_recv(&self) -> Option<ReviewRequest> {
         self.receiver.try_recv().ok()
-    }
-
-    pub fn try_recv_broadcast(&self) -> Option<ReviewBroadcast> {
-        self.broadcast_receiver.try_recv().ok()
     }
 
     #[cfg(test)]
@@ -646,7 +618,6 @@ fn resolve_review_socket_path(
 fn handle_connection(
     mut stream: std::os::unix::net::UnixStream,
     sender: &Sender<ReviewRequest>,
-    broadcast_sender: &Sender<ReviewBroadcast>,
     enabled: &AtomicBool,
     stop: &AtomicBool,
 ) -> io::Result<()> {
@@ -695,8 +666,6 @@ fn handle_connection(
         || request.session_id.len() > 1024
         || request.model.len() > 1024
         || request.platform.len() > 128
-        || request.phase.len() > 16
-        || request.decision.as_ref().is_some_and(|decision| decision.len() > 16)
         || (!request.observe_only && request.response_text.is_empty())
         || request.response_text.len() > MAX_REVIEW_BYTES
     {
@@ -718,30 +687,14 @@ fn handle_connection(
         "observe_only": request.observe_only,
     }));
 
-    // Observer copies are read-only notifications. They are delivered to
-    // every other connected terminal, acknowledged immediately, and cannot
-    // approve, edit, or reject the held Hermes response.
+    // Legacy observer notifications may still arrive from older plugins.
+    // Acknowledge them for protocol compatibility, but never enqueue or render
+    // observer data in any operator terminal.
     if request.observe_only {
-        let broadcast = ReviewBroadcast {
-            request_id: request.request_id.clone(),
-            session_id: request.session_id.clone(),
-            model: request.model.clone(),
-            platform: request.platform.clone(),
-            response_text: request.response_text.clone(),
-            phase: request.phase.clone(),
-            decision: request.decision.clone(),
-        };
-        if broadcast_sender.send(broadcast).is_err() {
-            return write_wire_response(
-                &mut stream,
-                WireResponse {
-                    version: 1,
-                    decision: "reject",
-                    response_text: None,
-                    error: Some("STREENOTE broadcast queue is unavailable".to_string()),
-                },
-            );
-        }
+        append_diagnostic_event("REVIEW_OBSERVER_IGNORED", serde_json::json!({
+            "request_id": request.request_id,
+            "platform": request.platform,
+        }));
         return write_wire_response(
             &mut stream,
             WireResponse {
@@ -1002,7 +955,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn observer_broadcast_is_delivered_read_only_without_creating_a_review_request() {
+    fn legacy_observer_notifications_are_acknowledged_without_tui_delivery() {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixStream;
 
@@ -1013,59 +966,39 @@ mod tests {
 
         let client_socket = socket.clone();
         let client = thread::spawn(move || {
-            let mut stream = UnixStream::connect(&client_socket).expect("connect observer");
-            let pending = json!({
-                "version": 1,
-                "request_id": "broadcast-001",
-                "session_id": "session-shared",
-                "model": "qwen3.5:latest",
-                "platform": "api_server",
-                "observe_only": true,
-                "phase": "pending",
-                "response_text": "Original draft",
-            });
-            writeln!(stream, "{pending}").expect("send pending broadcast");
-            let mut response = String::new();
-            BufReader::new(stream)
-                .read_line(&mut response)
-                .expect("read pending acknowledgment");
-            let response: serde_json::Value =
-                serde_json::from_str(&response).expect("decode pending acknowledgment");
-            assert_eq!(response["decision"], "observed");
-
-            let mut stream = UnixStream::connect(client_socket).expect("connect result observer");
-            let result = json!({
-                "version": 1,
-                "request_id": "broadcast-001",
-                "session_id": "session-shared",
-                "model": "qwen3.5:latest",
-                "platform": "api_server",
-                "observe_only": true,
-                "phase": "result",
-                "decision": "replace",
-                "response_text": "Edited final answer",
-            });
-            writeln!(stream, "{result}").expect("send final-result broadcast");
-            let mut response = String::new();
-            BufReader::new(stream)
-                .read_line(&mut response)
-                .expect("read result acknowledgment");
-            let response: serde_json::Value =
-                serde_json::from_str(&response).expect("decode result acknowledgment");
-            assert_eq!(response["decision"], "observed");
+            for (phase, decision, response_text) in [
+                ("pending", None, "Original draft"),
+                ("result", Some("replace"), "Edited final answer"),
+            ] {
+                let mut stream = UnixStream::connect(&client_socket)
+                    .expect("connect legacy observer");
+                let message = json!({
+                    "version": 1,
+                    "request_id": "broadcast-001",
+                    "session_id": "session-shared",
+                    "model": "qwen3.5:latest",
+                    "platform": "api_server",
+                    "observe_only": true,
+                    "phase": phase,
+                    "decision": decision,
+                    "response_text": response_text,
+                });
+                writeln!(stream, "{message}").expect("send legacy observer notification");
+                let mut response = String::new();
+                BufReader::new(stream)
+                    .read_line(&mut response)
+                    .expect("read observer acknowledgment");
+                let response: serde_json::Value =
+                    serde_json::from_str(&response).expect("decode observer acknowledgment");
+                assert_eq!(response["decision"], "observed");
+            }
         });
 
-        client.join().expect("observer client completes");
-        let pending = server.try_recv_broadcast().expect("TUI receives pending copy");
-        assert_eq!(pending.request_id, "broadcast-001");
-        assert_eq!(pending.phase, "pending");
-        assert_eq!(pending.response_text, "Original draft");
-        let result = server.try_recv_broadcast().expect("TUI receives final result copy");
-        assert_eq!(result.request_id, "broadcast-001");
-        assert_eq!(result.phase, "result");
-        assert_eq!(result.decision.as_deref(), Some("replace"));
-        assert_eq!(result.response_text, "Edited final answer");
-        assert!(server.try_recv().is_none(), "observer copy must not open an editable review");
+        client.join().expect("legacy observer client completes");
+        assert!(
+            server.try_recv().is_none(),
+            "legacy observer notifications must never enter an operator review queue"
+        );
         drop(server);
         let _ = fs::remove_dir_all(root);
     }

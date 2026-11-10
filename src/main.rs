@@ -1158,12 +1158,6 @@ fn split_command_words(command: &str) -> Option<Vec<String>> {
     Some(words)
 }
 
-fn drain_review_broadcasts(app: &mut App, review_server: &mut HermesReviewServer) {
-    while let Some(broadcast) = review_server.try_recv_broadcast() {
-        app.receive_hermes_broadcast(broadcast);
-    }
-}
-
 const REVIEWER_COUNT_REFRESH_INTERVAL: Duration = Duration::from_millis(300);
 
 /// Refresh from the shared per-session registry so all SSH terminals display
@@ -1212,7 +1206,6 @@ fn run(
         app.expire_hermes_review_if_needed();
         review_server.set_enabled(app.review_hermes_responses);
         refresh_active_reviewer_count(app, review_server, &mut last_reviewer_count_refresh);
-        drain_review_broadcasts(app, review_server);
         if app.pending_review.is_none() {
             if let Some(request) = review_server.try_recv() {
                 app.begin_hermes_review(request);
@@ -1243,7 +1236,9 @@ fn run(
                     || (key.kind == KeyEventKind::Repeat
                         && matches!(key.code, KeyCode::Up | KeyCode::Down)) =>
             {
-                if key.kind == KeyEventKind::Press && key.code == KeyCode::F(1) {
+                if key.kind == KeyEventKind::Press && key.code == KeyCode::F(1) && app.show_help {
+                    app.show_help = false;
+                } else if key.kind == KeyEventKind::Press && key.code == KeyCode::F(1) {
                     let size = terminal.size()?;
                     match ShellSession::spawn(size.width, size.height) {
                         Ok(mut workspace_session) => {
@@ -1395,7 +1390,6 @@ fn run_terminal_workspace_loop(
     loop {
         app.expire_hermes_review_if_needed();
         review_server.set_enabled(app.review_hermes_responses);
-        drain_review_broadcasts(app, review_server);
         if app.pending_review.is_none() {
             if let Some(request) = review_server.try_recv() {
                 app.begin_hermes_review(request);
@@ -1864,6 +1858,7 @@ mod workspace_input_tests {
     }
 }
 
+#[cfg(not(unix))]
 fn encode_terminal_key(code: KeyCode, modifiers: KeyModifiers) -> Vec<u8> {
     if modifiers.contains(KeyModifiers::CONTROL) {
         if let KeyCode::Char(ch) = code {
@@ -1896,6 +1891,13 @@ fn handle_key(
     // imported by the main loop appear without closing or reopening the modal.
     if app.pending_review.is_some() {
         handle_review_key(code, modifiers, app);
+        return Ok(false);
+    }
+
+    if app.show_help {
+        if code == KeyCode::Esc {
+            app.show_help = false;
+        }
         return Ok(false);
     }
 

@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     fs::{self, File, OpenOptions},
-    io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    io::{self, BufRead, BufReader, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -63,10 +63,6 @@ pub struct Entry {
 }
 
 impl Entry {
-    pub fn new(text: String) -> Self {
-        Self::with_kind(EntryKind::Note, text)
-    }
-
     pub fn with_kind(kind: EntryKind, text: String) -> Self {
         Self {
             timestamp: Local::now().to_rfc3339_opts(SecondsFormat::Secs, false),
