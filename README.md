@@ -238,11 +238,14 @@ In STREENOTE, run:
 /review status
 /review on
 ```
-Review mode is a shared per-user preference synchronized by all running STREENOTE instances. Running `/review on` makes connected STREENOTE instances eligible reviewers; each pending answer is assigned to one available terminal. **Only the selected reviewer sees the held response and the review editor.** Every other operator terminal continues normally: it does not display a response preview, green border, or review-status pop-up. Review decisions remain local to the selected reviewer:
+Reviewer availability is **per terminal session**. New STREENOTE terminals join the active reviewer pool by default. An operator who is busy or unavailable can run `/review off`; this immediately removes only that terminal from new assignments. Running `/review on` rejoins the pool at any time. These commands do not change other terminals and are not written as a shared preference. `/review status` reports this terminal's setting and recent dispatcher diagnostics.
+
+Hermes assigns each held final answer to one available `/review on` terminal using a round-robin scheduler. A terminal can handle one review at a time. Concurrent answers are assigned to other eligible terminals when possible; if all eligible terminals are busy, they wait for an available review slot. The dispatcher refreshes each terminal's live registration while waiting, so an operator who runs `/review off` is skipped even when a request is queued. If every connected operator has opted out, Hermes passes the original response through unchanged. The selected reviewer alone sees the red review editor; every other terminal continues operating normally.
+
 - **F2** releases the exact original answer.
 - **F3** releases the edited text.
 - **F4** withholds the answer. This does not automatically ask Hermes to regenerate; send a follow-up instruction as a new turn when appropriate.
-Use the arrow keys, Home/End, Backspace/Delete, Enter for a newline, and Ctrl+V or terminal paste to edit. Escape does not dismiss or release a held answer. An already pending review still needs an explicit decision even if review mode is later disabled.
+Use the arrow keys, Home/End, Backspace/Delete, Enter for a newline, and Ctrl+V or terminal paste to edit. Escape does not dismiss or release a held answer. Turning `/review off` while this terminal already owns a pending review prevents future assignments but does not cancel that review; finish it with F2, F3, or F4.
 
 The STREENOTE listener waits up to nine minutes. If the selected reviewer rejects the response, the connection fails after accepting the request, or the review deadline expires, the plugin withholds the draft rather than releasing it. If no STREENOTE listener exists, the plugin passes responses through unchanged by default; with `STREENOTE_HERMES_REVIEW_REQUIRED=1`, it withholds them instead. A single `/review off` terminal does not bypass another terminal's active reviewer; pass-through occurs only when every registered terminal has review disabled.
 
