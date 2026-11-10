@@ -2179,10 +2179,11 @@ mod tests {
     }
 
     #[test]
-    fn shared_hermes_broadcast_is_upgraded_in_place_with_the_final_edited_answer() {
+    fn final_review_result_silently_closes_the_read_only_broadcast() {
         use crate::hermes_review::ReviewBroadcast;
 
         let (mut app, path) = test_app();
+        app.status = "Keep the normal terminal status.".to_string();
         app.receive_hermes_broadcast(ReviewBroadcast {
             request_id: "shared-review-001".to_string(),
             session_id: "session-1".to_string(),
@@ -2195,6 +2196,7 @@ mod tests {
         assert_eq!(app.review_broadcasts.len(), 1);
         assert_eq!(app.review_broadcasts[0].response_text, "Original draft");
 
+        app.review_broadcast_scroll = 12;
         app.receive_hermes_broadcast(ReviewBroadcast {
             request_id: "shared-review-001".to_string(),
             session_id: "session-1".to_string(),
@@ -2204,20 +2206,24 @@ mod tests {
             phase: "result".to_string(),
             decision: Some("replace".to_string()),
         });
-        assert_eq!(app.review_broadcasts.len(), 1, "result must update, not duplicate");
-        assert_eq!(
-            app.review_broadcasts[0].response_text,
-            "Edited and approved final text"
-        );
-        assert_eq!(
-            app.review_broadcasts[0].decision.as_deref(),
-            Some("replace")
-        );
-        assert!(app.status.contains("Edited Hermes answer approved"));
+        assert!(app.review_broadcasts.is_empty());
+        assert_eq!(app.review_broadcast_scroll, 0);
+        assert_eq!(app.status, "Keep the normal terminal status.");
+
+        // A result-only event must not create a new notification modal.
+        app.receive_hermes_broadcast(ReviewBroadcast {
+            request_id: "result-only-review".to_string(),
+            session_id: "session-1".to_string(),
+            model: "qwen3.5:latest".to_string(),
+            platform: "api_server".to_string(),
+            response_text: String::new(),
+            phase: "result".to_string(),
+            decision: Some("approve".to_string()),
+        });
+        assert!(app.review_broadcasts.is_empty());
 
         let _ = fs::remove_file(path);
     }
-
     #[test]
     fn expired_review_is_closed_and_returns_a_rejection() {
         use crate::hermes_review::{ReviewDecision, ReviewRequest};
