@@ -137,6 +137,8 @@ pub struct App {
     /// Editable copy of the held answer and its UTF-8 byte cursor.
     pub review_text: String,
     pub review_cursor: usize,
+    /// Selected UTF-8 byte range in the held response editor.
+    pub review_selection: Option<(usize, usize)>,
     pub review_vertical_scroll: u16,
     pub review_horizontal_scroll: u16,
     /// Derived conversation groups are cached until the journal's entry count
@@ -215,6 +217,7 @@ impl App {
             pending_review: None,
             review_text: String::new(),
             review_cursor: 0,
+            review_selection: None,
             review_vertical_scroll: 0,
             review_horizontal_scroll: 0,
             conversation_cache: RefCell::new(ConversationCache::default()),
@@ -1314,6 +1317,7 @@ impl App {
         // Open at the beginning. Starting at the end made the renderer
         // horizontally scroll a long first line, hiding its initial text.
         self.review_cursor = 0;
+        self.review_selection = None;
         self.review_vertical_scroll = 0;
         self.review_horizontal_scroll = 0;
         self.status = format!(
@@ -1342,6 +1346,7 @@ impl App {
         let _ = request.reply.send(ReviewDecision::Reject);
         self.review_text.clear();
         self.review_cursor = 0;
+        self.review_selection = None;
         self.record_system(format!(
             "Hermes response review {} timed out · original answer withheld.",
             request.request_id
@@ -1357,6 +1362,7 @@ impl App {
         let result = request.reply.send(ReviewDecision::Approve);
         self.review_text.clear();
         self.review_cursor = 0;
+        self.review_selection = None;
         self.record_system(if result.is_ok() {
             format!(
                 "Hermes response review {} · original answer released.",
@@ -1389,6 +1395,7 @@ impl App {
         let result = request.reply.send(ReviewDecision::Replace(edited));
         self.review_text.clear();
         self.review_cursor = 0;
+        self.review_selection = None;
         self.record_system(if result.is_ok() {
             format!(
                 "Hermes response review {} · edited answer released.",
@@ -1409,6 +1416,7 @@ impl App {
         let result = request.reply.send(ReviewDecision::Reject);
         self.review_text.clear();
         self.review_cursor = 0;
+        self.review_selection = None;
         self.record_system(if result.is_ok() {
             format!(
                 "Hermes response review {} · original answer withheld.",
@@ -1422,24 +1430,84 @@ impl App {
         });
     }
 
+    /// Select the complete held answer for replacement or deletion.
+    pub fn review_select_all(&mut self) {
+        if self.pending_review.is_none() {
+            return;
+        }
+        if self.review_text.is_empty() {
+            self.review_selection = None;
+            self.review_cursor = 0;
+            return;
+        }
+        self.review_selection = Some((0, self.review_text.len()));
+        self.review_cursor = self.review_text.len();
+    }
+
+    /// Return the selected byte range when it is valid for the current text.
+    pub fn review_selected_range(&self) -> Option<(usize, usize)> {
+        let (start, end) = self.review_selection?;
+        (start <= end
+            && end <= self.review_text.len()
+            && self.review_text.is_char_boundary(start)
+            && self.review_text.is_char_boundary(end))
+            .then_some((start, end))
+    }
+
+    /// Collapse an active selection to one of its edges.
+    fn collapse_review_selection(&mut self, to_end: bool) -> bool {
+        let Some((start, end)) = self.review_selected_range() else {
+            self.review_selection = None;
+            return false;
+        };
+        self.review_cursor = if to_end { end } else { start };
+        self.review_selection = None;
+        true
+    }
+
     pub fn review_insert_text(&mut self, text: &str) {
         if self.pending_review.is_none() {
             return;
         }
         let cleaned = sanitize_multiline(text);
-        if self.review_text.len().saturating_add(cleaned.len()) > MAX_REVIEW_BYTES {
+        let selected = self.review_selected_range();
+        let replace_start = selected.map(|(start, _)| start).unwrap_or(self.review_cursor);
+        let removed_bytes = selected.map(|(start, end)| end - start).unwrap_or(0);
+        let resulting_len = self
+            .review_text
+            .len()
+            .saturating_sub(removed_bytes)
+            .saturating_add(cleaned.len());
+        if resulting_len > MAX_REVIEW_BYTES {
             self.status = format!(
                 "Review editor reached its {} MiB text limit.",
                 MAX_REVIEW_BYTES / (1024 * 1024)
             );
             return;
         }
-        self.review_text.insert_str(self.review_cursor, &cleaned);
-        self.review_cursor += cleaned.len();
+
+        if let Some((start, end)) = selected {
+            self.review_text.replace_range(start..end, &cleaned);
+            self.review_cursor = start + cleaned.len();
+        } else {
+            self.review_text.insert_str(replace_start, &cleaned);
+            self.review_cursor = replace_start + cleaned.len();
+        }
+        self.review_selection = None;
     }
 
     pub fn review_backspace(&mut self) {
-        if self.pending_review.is_none() || self.review_cursor == 0 {
+        if self.pending_review.is_none() {
+            return;
+        }
+        if let Some((start, end)) = self.review_selected_range() {
+            self.review_text.replace_range(start..end, "");
+            self.review_cursor = start;
+            self.review_selection = None;
+            return;
+        }
+        self.review_selection = None;
+        if self.review_cursor == 0 {
             return;
         }
         let previous = self.review_text[..self.review_cursor]
@@ -1452,7 +1520,17 @@ impl App {
     }
 
     pub fn review_delete(&mut self) {
-        if self.pending_review.is_none() || self.review_cursor >= self.review_text.len() {
+        if self.pending_review.is_none() {
+            return;
+        }
+        if let Some((start, end)) = self.review_selected_range() {
+            self.review_text.replace_range(start..end, "");
+            self.review_cursor = start;
+            self.review_selection = None;
+            return;
+        }
+        self.review_selection = None;
+        if self.review_cursor >= self.review_text.len() {
             return;
         }
         let next = self.review_text[self.review_cursor..]
@@ -1464,7 +1542,13 @@ impl App {
     }
 
     pub fn review_cursor_left(&mut self) {
-        if self.pending_review.is_none() || self.review_cursor == 0 {
+        if self.pending_review.is_none() {
+            return;
+        }
+        if self.collapse_review_selection(false) {
+            return;
+        }
+        if self.review_cursor == 0 {
             return;
         }
         self.review_cursor = self.review_text[..self.review_cursor]
@@ -1475,7 +1559,13 @@ impl App {
     }
 
     pub fn review_cursor_right(&mut self) {
-        if self.pending_review.is_none() || self.review_cursor >= self.review_text.len() {
+        if self.pending_review.is_none() {
+            return;
+        }
+        if self.collapse_review_selection(true) {
+            return;
+        }
+        if self.review_cursor >= self.review_text.len() {
             return;
         }
         self.review_cursor += self.review_text[self.review_cursor..]
@@ -1489,6 +1579,7 @@ impl App {
         if self.pending_review.is_none() {
             return;
         }
+        self.collapse_review_selection(false);
         self.review_cursor = self.review_text[..self.review_cursor]
             .rfind('\n')
             .map(|index| index + 1)
@@ -1499,6 +1590,7 @@ impl App {
         if self.pending_review.is_none() {
             return;
         }
+        self.collapse_review_selection(true);
         self.review_cursor = self.review_text[self.review_cursor..]
             .find('\n')
             .map(|offset| self.review_cursor + offset)
@@ -1507,12 +1599,14 @@ impl App {
 
     pub fn review_cursor_document_start(&mut self) {
         if self.pending_review.is_some() {
+            self.collapse_review_selection(false);
             self.review_cursor = 0;
         }
     }
 
     pub fn review_cursor_document_end(&mut self) {
         if self.pending_review.is_some() {
+            self.collapse_review_selection(true);
             self.review_cursor = self.review_text.len();
         }
     }
@@ -1528,6 +1622,9 @@ impl App {
     fn review_move_vertical(&mut self, direction: i8) {
         if self.pending_review.is_none() {
             return;
+        }
+        if self.review_selection.is_some() {
+            self.collapse_review_selection(direction > 0);
         }
         let before = &self.review_text[..self.review_cursor];
         let line_start = before.rfind('\n').map(|index| index + 1).unwrap_or(0);
@@ -2123,6 +2220,68 @@ mod tests {
         app.set_hermes_review_enabled(true);
         assert!(app.review_hermes_responses);
         assert!(app.status.contains("rejoined"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn ctrl_a_selects_entire_review_and_typing_replaces_it() {
+        use crate::hermes_review::ReviewRequest;
+        use std::sync::mpsc;
+
+        let (mut app, path) = test_app();
+        let (reply, _decision) = mpsc::sync_channel(1);
+        app.begin_hermes_review(ReviewRequest {
+            request_id: "review-select-all-001".to_string(),
+            session_id: String::new(),
+            model: String::new(),
+            platform: String::new(),
+            response_text: "Original answer with Café and multiple lines.\nSecond line.".to_string(),
+            expires_at: Instant::now() + Duration::from_secs(30),
+            reply,
+        });
+
+        let original_len = app.review_text.len();
+        app.review_select_all();
+        assert_eq!(app.review_selected_range(), Some((0, original_len)));
+        assert_eq!(app.review_cursor, original_len);
+
+        app.review_insert_text("Replacement answer.");
+        assert_eq!(app.review_text, "Replacement answer.");
+        assert_eq!(app.review_cursor, "Replacement answer.".len());
+        assert_eq!(app.review_selection, None);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn backspace_and_delete_remove_a_selected_review_range() {
+        use crate::hermes_review::ReviewRequest;
+        use std::sync::mpsc;
+
+        let (mut app, path) = test_app();
+        let (reply, _decision) = mpsc::sync_channel(1);
+        app.begin_hermes_review(ReviewRequest {
+            request_id: "review-select-delete-001".to_string(),
+            session_id: String::new(),
+            model: String::new(),
+            platform: String::new(),
+            response_text: "Delete this entire response.".to_string(),
+            expires_at: Instant::now() + Duration::from_secs(30),
+            reply,
+        });
+
+        app.review_select_all();
+        app.review_backspace();
+        assert!(app.review_text.is_empty());
+        assert_eq!(app.review_cursor, 0);
+        assert_eq!(app.review_selection, None);
+
+        app.review_insert_text("Another response.");
+        app.review_select_all();
+        app.review_delete();
+        assert!(app.review_text.is_empty());
+        assert_eq!(app.review_cursor, 0);
 
         let _ = fs::remove_file(path);
     }
