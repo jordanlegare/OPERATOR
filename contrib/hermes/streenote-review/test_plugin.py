@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import json
 import os
@@ -103,8 +104,13 @@ class HermesReviewPluginTests(unittest.TestCase):
 
         context = Context()
         PLUGIN.register(context)
-        self.assertEqual(set(context.hooks), {"pre_llm_call", "transform_llm_output"})
-        self.assertIs(context.hooks["pre_llm_call"][0], PLUGIN.capture_user_prompt)
+        self.assertEqual(
+            set(context.hooks),
+            {"pre_llm_call", "pre_api_request", "post_llm_call", "transform_llm_output"},
+        )
+        self.assertIs(context.hooks["pre_llm_call"][0], PLUGIN.capture_pre_llm_prompt)
+        self.assertIs(context.hooks["pre_api_request"][0], PLUGIN.capture_pre_api_prompt)
+        self.assertIs(context.hooks["post_llm_call"][0], PLUGIN.capture_post_llm_prompt)
         self.assertEqual(context.hooks["pre_llm_call"][1], {})
         self.assertIs(context.hooks["transform_llm_output"][0], PLUGIN.review_response)
         self.assertTrue(context.hooks["transform_llm_output"][1]["hold_stream"])
@@ -313,6 +319,58 @@ class HermesReviewPluginTests(unittest.TestCase):
         self.assertEqual(len(prompt_events), 1)
         self.assertEqual(prompt_events[0]["delivered"], 3)
         self.assertEqual(prompt_events[0]["recipients"], 3)
+
+        for listener in listeners:
+            listener.close()
+
+
+    def test_prompt_capture_falls_back_to_last_user_message_in_conversation_history(self):
+        registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
+        registry.mkdir(mode=0o700, parents=True)
+        listeners = []
+        for instance_id in ("a1", "b2"):
+            socket_path = registry / f"{instance_id}.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(socket_path))
+            os.chmod(socket_path, 0o600)
+            listener.listen(1)
+            listeners.append(listener)
+            manifest = registry / f"{instance_id}.json"
+            manifest.write_text(json.dumps({
+                "version": 1,
+                "instance_id": instance_id,
+                "socket_path": str(socket_path),
+                "review_enabled": True,
+            }))
+            os.chmod(manifest, 0o600)
+
+        PLUGIN.capture_pre_api_prompt(
+            session_id="fallback-session",
+            turn_id="fallback-turn",
+            user_message=None,
+            conversation_history=[
+                {"role": "system", "content": "not captured"},
+                {"role": "user", "content": "The first prompt is in history."},
+            ],
+        )
+
+        for instance_id in ("a1", "b2"):
+            inbox = registry / "inboxes" / instance_id / "ready"
+            events = [json.loads(path.read_text()) for path in inbox.glob("*.json")]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["text"], "The first prompt is in history.")
+            self.assertEqual(
+                events[0]["event_id"],
+                CAPTURE.make_event_id(
+                    "pre_llm_call", "fallback-session", "fallback-turn"
+                ),
+            )
+
+        records = [json.loads(line) for line in self.diagnostic_path.read_text().splitlines()]
+        invoked = [record for record in records if record["event"] == "PROMPT_HOOK_INVOKED"]
+        self.assertEqual(len(invoked), 1)
+        self.assertEqual(invoked[0]["hook"], "pre_api_request")
+        self.assertEqual(invoked[0]["message_source"], "conversation_history")
 
         for listener in listeners:
             listener.close()
