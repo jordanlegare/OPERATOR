@@ -133,6 +133,15 @@ pub struct ReviewRequest {
     pub reply: SyncSender<ReviewDecision>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReviewBroadcast {
+    pub request_id: String,
+    pub session_id: String,
+    pub model: String,
+    pub platform: String,
+    pub response_text: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReviewDecision {
     Approve,
@@ -150,6 +159,8 @@ struct WireRequest {
     model: String,
     #[serde(default)]
     platform: String,
+    #[serde(default)]
+    observe_only: bool,
     response_text: String,
 }
 
@@ -165,6 +176,7 @@ struct WireResponse {
 
 pub struct HermesReviewServer {
     receiver: Receiver<ReviewRequest>,
+    broadcast_receiver: Receiver<ReviewBroadcast>,
     enabled: Arc<AtomicBool>,
     socket_path: PathBuf,
     instance_id: Option<String>,
@@ -214,6 +226,7 @@ impl HermesReviewServer {
             "instance_id": instance_id,
             "socket_path": server.socket_path,
             "pid": std::process::id(),
+            "review_enabled": false,
         });
         write_session_registration(&registration_path, &registration)?;
         append_diagnostic_event("REVIEW_SERVER_REGISTERED", serde_json::json!({
@@ -267,6 +280,7 @@ impl HermesReviewServer {
         listener.set_nonblocking(true)?;
 
         let (sender, receiver) = mpsc::channel();
+        let (broadcast_sender, broadcast_receiver) = mpsc::channel();
         let enabled = Arc::new(AtomicBool::new(false));
         let worker_enabled = Arc::clone(&enabled);
         let stop = Arc::new(AtomicBool::new(false));
@@ -281,6 +295,7 @@ impl HermesReviewServer {
                             // accept loop can keep polling, and listener shutdown
                             // never waits for an operator to decide a pending answer.
                             let connection_sender = sender.clone();
+                            let connection_broadcast_sender = broadcast_sender.clone();
                             let connection_enabled = Arc::clone(&worker_enabled);
                             let connection_stop = Arc::clone(&worker_stop);
                             let _ = thread::Builder::new()
@@ -289,6 +304,7 @@ impl HermesReviewServer {
                                     if let Err(error) = handle_connection(
                                         stream,
                                         &connection_sender,
+                                        &connection_broadcast_sender,
                                         &connection_enabled,
                                         &connection_stop,
                                     ) {
@@ -315,6 +331,7 @@ impl HermesReviewServer {
 
         Ok(Self {
             receiver,
+            broadcast_receiver,
             enabled,
             socket_path,
             instance_id: None,
@@ -346,11 +363,34 @@ impl HermesReviewServer {
     }
 
     pub fn set_enabled(&self, enabled: bool) {
-        self.enabled.store(enabled, Ordering::Relaxed);
+        let previous = self.enabled.swap(enabled, Ordering::Relaxed);
+        if previous != enabled {
+            if let (Some(instance_id), Some(registration_path)) =
+                (self.instance_id.as_deref(), self.registration_path.as_ref())
+            {
+                let registration = serde_json::json!({
+                    "version": 1,
+                    "instance_id": instance_id,
+                    "socket_path": self.socket_path,
+                    "pid": std::process::id(),
+                    "review_enabled": enabled,
+                });
+                if let Err(error) = write_session_registration(registration_path, &registration) {
+                    append_diagnostic_event("REVIEW_REGISTRATION_UPDATE_FAILED", serde_json::json!({
+                        "instance_id": instance_id,
+                        "error": error.to_string(),
+                    }));
+                }
+            }
+        }
     }
 
     pub fn try_recv(&self) -> Option<ReviewRequest> {
         self.receiver.try_recv().ok()
+    }
+
+    pub fn try_recv_broadcast(&self) -> Option<ReviewBroadcast> {
+        self.broadcast_receiver.try_recv().ok()
     }
 
     #[cfg(test)]
@@ -509,6 +549,7 @@ fn resolve_review_socket_path(
 fn handle_connection(
     mut stream: std::os::unix::net::UnixStream,
     sender: &Sender<ReviewRequest>,
+    broadcast_sender: &Sender<ReviewBroadcast>,
     enabled: &AtomicBool,
     stop: &AtomicBool,
 ) -> io::Result<()> {
@@ -575,7 +616,41 @@ fn handle_connection(
         "request_id": request.request_id,
         "platform": request.platform,
         "model": request.model,
+        "observe_only": request.observe_only,
     }));
+
+    // Observer copies are read-only notifications. They are delivered to
+    // every other connected terminal, acknowledged immediately, and cannot
+    // approve, edit, or reject the held Hermes response.
+    if request.observe_only {
+        let broadcast = ReviewBroadcast {
+            request_id: request.request_id.clone(),
+            session_id: request.session_id.clone(),
+            model: request.model.clone(),
+            platform: request.platform.clone(),
+            response_text: request.response_text.clone(),
+        };
+        if broadcast_sender.send(broadcast).is_err() {
+            return write_wire_response(
+                &mut stream,
+                WireResponse {
+                    version: 1,
+                    decision: "reject",
+                    response_text: None,
+                    error: Some("STREENOTE broadcast queue is unavailable".to_string()),
+                },
+            );
+        }
+        return write_wire_response(
+            &mut stream,
+            WireResponse {
+                version: 1,
+                decision: "observed",
+                response_text: None,
+                error: None,
+            },
+        );
+    }
 
     // A missing STREENOTE toggle must never surprise the operator with a
     // blocking prompt. The plugin remains loaded, but the original response
