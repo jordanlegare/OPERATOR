@@ -146,6 +146,8 @@ pub struct HermesReviewServer {
     receiver: Receiver<ReviewRequest>,
     enabled: Arc<AtomicBool>,
     socket_path: PathBuf,
+    instance_id: Option<String>,
+    registration_path: Option<PathBuf>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
@@ -155,14 +157,49 @@ impl std::fmt::Debug for HermesReviewServer {
         formatter
             .debug_struct("HermesReviewServer")
             .field("socket_path", &self.socket_path)
+            .field("instance_id", &self.instance_id)
+            .field("registration_path", &self.registration_path)
             .field("enabled", &self.enabled.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
 }
 
 impl HermesReviewServer {
+    /// Start an independently addressable listener for this STREENOTE process.
+    ///
+    /// Each interactive SSH session receives a unique socket and registry
+    /// manifest. Hermes routes a stable session ID to one registered instance.
     pub fn start() -> io::Result<Self> {
-        Self::start_at(default_review_socket_path())
+        Self::start_registered(default_review_session_dir())
+    }
+
+    fn start_registered(session_dir: PathBuf) -> io::Result<Self> {
+        fs::create_dir_all(&session_dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&session_dir, fs::Permissions::from_mode(0o700))?;
+        }
+
+        let instance_id = new_review_instance_id();
+        let socket_path = session_dir.join(format!("{instance_id}.sock"));
+        let registration_path = session_dir.join(format!("{instance_id}.json"));
+        let mut server = Self::start_at(socket_path)?;
+        server.instance_id = Some(instance_id.clone());
+        server.registration_path = Some(registration_path.clone());
+
+        let registration = serde_json::json!({
+            "version": 1,
+            "instance_id": instance_id,
+            "socket_path": server.socket_path,
+            "pid": std::process::id(),
+        });
+        write_session_registration(&registration_path, &registration)?;
+        append_diagnostic_event("REVIEW_SERVER_REGISTERED", serde_json::json!({
+            "instance_id": server.instance_id,
+            "socket_path": server.socket_path,
+        }));
+        Ok(server)
     }
 
     #[cfg(unix)]
@@ -259,6 +296,8 @@ impl HermesReviewServer {
             receiver,
             enabled,
             socket_path,
+            instance_id: None,
+            registration_path: None,
             stop,
             worker: Some(worker),
         })
@@ -284,6 +323,11 @@ impl HermesReviewServer {
     fn start_at_for_test(socket_path: PathBuf) -> io::Result<Self> {
         Self::start_at(socket_path)
     }
+
+    #[cfg(test)]
+    fn start_registered_in_for_test(session_dir: PathBuf) -> io::Result<Self> {
+        Self::start_registered(session_dir)
+    }
 }
 
 impl Drop for HermesReviewServer {
@@ -299,12 +343,80 @@ impl Drop for HermesReviewServer {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+        if let Some(registration_path) = &self.registration_path {
+            let _ = fs::remove_file(registration_path);
+        }
         let _ = fs::remove_file(&self.socket_path);
     }
 }
 
-/// The gateway process resolves the same path independently of the PTY
-/// environment. An explicit override is available for non-standard layouts.
+/// Resolve the shared registry directory used by independently running
+/// STREENOTE TUI instances. The Hermes gateway uses the same environment and
+/// UID-based default.
+pub fn default_review_session_dir() -> PathBuf {
+    let explicit = env::var_os("STREENOTE_HERMES_REVIEW_SESSION_DIR").map(PathBuf::from);
+    resolve_review_session_dir(explicit, default_review_socket_path())
+}
+
+fn resolve_review_session_dir(explicit: Option<PathBuf>, legacy_socket: PathBuf) -> PathBuf {
+    if let Some(directory) = explicit.filter(|path| path.is_absolute()) {
+        return directory;
+    }
+    legacy_socket
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("review-sessions")
+}
+
+fn new_review_instance_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{:x}-{nanos:x}", std::process::id())
+}
+
+fn write_session_registration(path: &PathBuf, registration: &serde_json::Value) -> io::Result<()> {
+    use std::io::Write;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("review registration has no parent directory"))?;
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_stem().and_then(|name| name.to_str()).unwrap_or("review"),
+        std::process::id()
+    ));
+    let bytes = serde_json::to_vec(registration)
+        .map_err(|error| io::Error::other(format!("serialize review registration: {error}")))?;
+
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| {
+        let mut file = options.open(&temporary)?;
+        file.write_all(&bytes)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// The legacy single-listener socket remains available as a compatibility
+/// endpoint for older STREENOTE binaries.
 pub fn default_review_socket_path() -> PathBuf {
     // A user service and an interactive PTY can have different HOME and
     // XDG_DATA_HOME values. /run/user/<uid> is stable across those process
@@ -540,7 +652,8 @@ fn write_wire_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_review_socket_path, HermesReviewServer, ReviewDecision, MAX_REVIEW_BYTES,
+        resolve_review_session_dir, resolve_review_socket_path, HermesReviewServer,
+        ReviewDecision, MAX_REVIEW_BYTES,
     };
     use serde_json::json;
     use std::{
@@ -560,6 +673,65 @@ mod tests {
             "streenote-hermes-review-{}-{id}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn review_session_directory_uses_explicit_override_or_legacy_socket_parent() {
+        assert_eq!(
+            resolve_review_session_dir(
+                Some(PathBuf::from("/srv/streenote/review-clients")),
+                PathBuf::from("/run/user/1000/streenote/review.sock"),
+            ),
+            PathBuf::from("/srv/streenote/review-clients")
+        );
+        assert_eq!(
+            resolve_review_session_dir(
+                None,
+                PathBuf::from("/run/user/1000/streenote/review.sock"),
+            ),
+            PathBuf::from("/run/user/1000/streenote/review-sessions")
+        );
+        assert_eq!(
+            resolve_review_session_dir(
+                Some(PathBuf::from("relative/path")),
+                PathBuf::from("/home/test/.local/share/streenote/review.sock"),
+            ),
+            PathBuf::from("/home/test/.local/share/streenote/review-sessions")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_streenote_instances_register_distinct_review_sockets() {
+        let root = test_root().join("review-sessions");
+        let first = HermesReviewServer::start_registered_in_for_test(root.clone())
+            .expect("start first session listener");
+        let second = HermesReviewServer::start_registered_in_for_test(root.clone())
+            .expect("start second session listener");
+
+        assert_ne!(first.socket_path, second.socket_path);
+        assert_ne!(first.instance_id, second.instance_id);
+        let first_socket = first.socket_path.clone();
+        let second_socket = second.socket_path.clone();
+        let first_registration = first.registration_path.clone().expect("first registration");
+        let second_registration = second.registration_path.clone().expect("second registration");
+        assert!(first_socket.exists());
+        assert!(second_socket.exists());
+        assert!(first_registration.exists());
+        assert!(second_registration.exists());
+        assert_eq!(
+            fs::read_dir(&root).expect("read session registry").count(),
+            4
+        );
+
+        drop(first);
+        assert!(!first_registration.exists());
+        assert!(!first_socket.exists());
+        assert!(second_registration.exists());
+        assert!(second_socket.exists());
+
+        drop(second);
+        let _ = fs::remove_dir_all(root.parent().expect("test root"));
     }
 
     #[test]

@@ -24,6 +24,7 @@ class HermesReviewPluginTests(unittest.TestCase):
             os.environ,
             {
                 "STREENOTE_HERMES_REVIEW_SOCKET": str(self.socket_path),
+                "STREENOTE_HERMES_REVIEW_SESSION_DIR": str(Path(self.temp_dir.name) / "sessions"),
                 "STREENOTE_HERMES_REVIEW_LOG": str(self.diagnostic_path),
             },
             clear=False,
@@ -34,12 +35,15 @@ class HermesReviewPluginTests(unittest.TestCase):
         self.env.stop()
         self.temp_dir.cleanup()
 
-    def _serve(self, reply):
+    def _serve(self, reply, socket_path=None):
         errors = []
         requests = []
+        path = Path(socket_path) if socket_path is not None else self.socket_path
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        listener.bind(str(self.socket_path))
+        listener.bind(str(path))
+        os.chmod(path, 0o600)
         listener.listen(1)
+        listener.settimeout(4)
 
         def run():
             try:
@@ -55,12 +59,14 @@ class HermesReviewPluginTests(unittest.TestCase):
                     connection.sendall(
                         json.dumps(reply, ensure_ascii=False).encode("utf-8") + b"\n"
                     )
+            except socket.timeout:
+                pass
             except Exception as error:  # surfaced in the test thread below
                 errors.append(error)
             finally:
                 listener.close()
                 try:
-                    self.socket_path.unlink()
+                    path.unlink()
                 except FileNotFoundError:
                     pass
 
@@ -68,10 +74,10 @@ class HermesReviewPluginTests(unittest.TestCase):
         worker.start()
         return worker, requests, errors
 
-    def _call(self):
+    def _call(self, session_id="session-123"):
         return PLUGIN.review_response(
             "The unreviewed draft.",
-            session_id="session-123",
+            session_id=session_id,
             model="qwen3.5:latest",
             platform="tui",
         )
@@ -92,6 +98,97 @@ class HermesReviewPluginTests(unittest.TestCase):
         self.assertTrue(context.hook[2]["hold_stream"])
         records = [json.loads(line) for line in self.diagnostic_path.read_text().splitlines()]
         self.assertEqual(records[-1]["event"], "PLUGIN_REGISTERED")
+
+    def test_review_sessions_are_stickily_distributed_across_unique_sockets(self):
+        registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
+        registry.mkdir(mode=0o700, parents=True)
+        instance_ids = ["a1", "b2", "c3"]
+        workers = []
+        server_error_lists = []
+        for instance_id in instance_ids:
+            socket_path = registry / f"{instance_id}.sock"
+            worker, _, listener_errors = self._serve(
+                {
+                    "version": 1,
+                    "decision": "replace",
+                    "response_text": f"routed:{instance_id}",
+                },
+                socket_path=socket_path,
+            )
+            workers.append(worker)
+            server_error_lists.append(listener_errors)
+            manifest = {
+                "version": 1,
+                "instance_id": instance_id,
+                "socket_path": str(socket_path),
+                "pid": os.getpid(),
+            }
+            manifest_path = registry / f"{instance_id}.json"
+            manifest_path.write_text(json.dumps(manifest))
+            os.chmod(manifest_path, 0o600)
+
+        routes, directory = PLUGIN._load_review_routes()
+        self.assertEqual({route["instance_id"] for route in routes}, set(instance_ids))
+
+        sessions = {}
+        for index in range(500):
+            session_id = f"hermes-session-{index}"
+            selected = PLUGIN._select_review_route(session_id, routes, directory)
+            sessions.setdefault(selected["instance_id"], session_id)
+            if len(sessions) >= 2:
+                break
+        self.assertGreaterEqual(len(sessions), 2)
+
+        for instance_id, session_id in list(sessions.items())[:2]:
+            self.assertEqual(
+                PLUGIN._select_review_route(session_id, routes, directory)["instance_id"],
+                instance_id,
+            )
+            self.assertEqual(
+                PLUGIN.review_response(
+                    "Unreviewed response",
+                    session_id=session_id,
+                    model="qwen3.5:latest",
+                    platform="api_server",
+                ),
+                f"routed:{instance_id}",
+            )
+
+        for worker in workers:
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+        self.assertFalse(any(server_error_lists))
+
+    def test_multiple_review_sessions_require_hermes_session_id(self):
+        registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
+        registry.mkdir(mode=0o700, parents=True)
+        sockets = []
+        for instance_id in ("a1", "b2"):
+            socket_path = registry / f"{instance_id}.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(socket_path))
+            os.chmod(socket_path, 0o600)
+            listener.listen(1)
+            sockets.append(listener)
+            manifest_path = registry / f"{instance_id}.json"
+            manifest_path.write_text(json.dumps({
+                "version": 1,
+                "instance_id": instance_id,
+                "socket_path": str(socket_path),
+            }))
+            os.chmod(manifest_path, 0o600)
+        try:
+            with patch.dict(os.environ, {"STREENOTE_HERMES_REVIEW_REQUIRED": "1"}):
+                with self.assertRaisesRegex(RuntimeError, "multiple STREENOTE review sessions"):
+                    PLUGIN.review_response(
+                        "Unreviewed response",
+                        session_id="",
+                        model="qwen3.5:latest",
+                        platform="api_server",
+                    )
+        finally:
+            for listener in sockets:
+                listener.close()
 
     def test_runtime_socket_path_is_shared_by_processes_with_different_home_values(self):
         with tempfile.TemporaryDirectory(prefix="streenote-runtime-") as runtime:
@@ -205,6 +302,7 @@ class HermesReviewPluginTests(unittest.TestCase):
     def test_stale_socket_path_is_not_treated_as_inactive_review(self):
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         listener.bind(str(self.socket_path))
+        os.chmod(self.socket_path, 0o600)
         listener.close()
         with self.assertRaisesRegex(RuntimeError, "stale"):
             self._call()
