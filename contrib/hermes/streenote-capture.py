@@ -335,7 +335,7 @@ def review_session_registry_candidates() -> list[Path]:
     runtime_root = Path(f"/run/user/{uid}")
     try:
         runtime_stat = runtime_root.stat()
-        if runtime_stat.is_dir() and runtime_stat.st_uid == uid:
+        if stat.S_ISDIR(runtime_stat.st_mode) and runtime_stat.st_uid == uid:
             candidates.append(runtime_root / "streenote" / "review-sessions")
     except OSError:
         pass
