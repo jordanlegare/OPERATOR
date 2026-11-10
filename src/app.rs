@@ -134,6 +134,8 @@ pub struct App {
     pub review_hermes_responses: bool,
     /// Number of live STREENOTE terminals currently opted into review.
     pub active_reviewer_count: usize,
+    /// Explicit review decisions completed in this STREENOTE terminal session.
+    pub reviews_handled: u64,
     /// Active final-response review; its channel is the only release path to Hermes.
     pub pending_review: Option<ReviewRequest>,
     /// Editable copy of the held answer and its UTF-8 byte cursor.
@@ -217,6 +219,7 @@ impl App {
             // this instance out temporarily with /review off.
             review_hermes_responses: true,
             active_reviewer_count: 0,
+            reviews_handled: 0,
             pending_review: None,
             review_text: String::new(),
             review_cursor: 0,
@@ -1362,6 +1365,7 @@ impl App {
         let Some(request) = self.pending_review.take() else {
             return;
         };
+        self.reviews_handled = self.reviews_handled.saturating_add(1);
         let result = request.reply.send(ReviewDecision::Approve);
         self.review_text.clear();
         self.review_cursor = 0;
@@ -1394,6 +1398,7 @@ impl App {
         let Some(request) = self.pending_review.take() else {
             return;
         };
+        self.reviews_handled = self.reviews_handled.saturating_add(1);
         let edited = self.review_text.clone();
         let result = request.reply.send(ReviewDecision::Replace(edited));
         self.review_text.clear();
@@ -1416,6 +1421,7 @@ impl App {
         let Some(request) = self.pending_review.take() else {
             return;
         };
+        self.reviews_handled = self.reviews_handled.saturating_add(1);
         let result = request.reply.send(ReviewDecision::Reject);
         self.review_text.clear();
         self.review_cursor = 0;
@@ -2207,6 +2213,7 @@ mod tests {
         );
         assert!(app.pending_review.is_none());
         assert!(app.review_text.is_empty());
+        assert_eq!(app.reviews_handled, 1, "edited review counts on this terminal");
 
         let _ = fs::remove_file(path);
     }
@@ -2336,6 +2343,7 @@ mod tests {
         assert!(app.pending_review.is_none());
         assert!(app.review_text.is_empty());
         assert!(app.status.contains("withheld"));
+        assert_eq!(app.reviews_handled, 0, "an expired review was not handled by this operator");
 
         let _ = fs::remove_file(path);
     }
@@ -2361,6 +2369,7 @@ mod tests {
             decision.recv().expect("receive original decision"),
             ReviewDecision::Approve
         );
+        assert_eq!(app.reviews_handled, 1);
 
         let (reply, decision) = mpsc::sync_channel(1);
         app.begin_hermes_review(ReviewRequest {
@@ -2378,6 +2387,7 @@ mod tests {
             ReviewDecision::Reject
         );
         assert!(app.pending_review.is_none());
+        assert_eq!(app.reviews_handled, 2, "original approval and rejection both count");
 
         let _ = fs::remove_file(path);
     }
