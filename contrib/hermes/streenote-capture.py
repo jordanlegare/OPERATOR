@@ -140,7 +140,7 @@ def render_user_message(value) -> str | None:
             elif "file" in part_type:
                 rendered_parts.append("[file attachment]")
 
-        return "\\n".join(rendered_parts) if rendered_parts else None
+        return "\n".join(rendered_parts) if rendered_parts else None
 
     return None
 
