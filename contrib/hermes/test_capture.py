@@ -52,12 +52,21 @@ class CapturePromptFanoutTests(unittest.TestCase):
             listener.close()
         self.tempdir.cleanup()
 
-    def _run_hook(self, payload):
+    def _run_hook(self, payload, *, registry_env=None):
         environment = {
             "STREENOTE_HERMES_INBOX": str(self.inboxes["a1"]),
-            "STREENOTE_HERMES_REVIEW_SESSION_DIR": str(self.registry),
         }
-        with patch.dict(CAPTURE.os.environ, environment):
+        if registry_env is not None:
+            environment["STREENOTE_HERMES_REVIEW_SESSION_DIR"] = str(registry_env)
+
+        with patch.dict(CAPTURE.os.environ, environment, clear=True), patch.object(
+            CAPTURE,
+            "review_session_registry_candidates",
+            return_value=[
+                self.root / "stale-review-registry",
+                self.registry,
+            ],
+        ):
             previous_stdin = CAPTURE.sys.stdin
             CAPTURE.sys.stdin = io.StringIO(json.dumps(payload))
             try:
@@ -77,6 +86,8 @@ class CapturePromptFanoutTests(unittest.TestCase):
         ]
 
     def test_original_prompt_and_initial_history_reach_every_terminal(self):
+        # Simulate a systemd gateway that did not inherit the
+        # STREENOTE_HERMES_REVIEW_SESSION_DIR from an SSH PTY.
         self._run_hook({
             "hook_event_name": "pre_llm_call",
             "session_id": "shared-hermes-session",
