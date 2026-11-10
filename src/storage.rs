@@ -196,11 +196,11 @@ impl Journal {
                 fs::create_dir_all(parent)?;
             }
         }
+        let _journal_lock = JournalFileLock::acquire(&path)?;
         if !path.exists() {
             File::create(&path)?;
         }
 
-        let _journal_lock = JournalFileLock::acquire(&path)?;
         let file = File::open(&path)?;
         let reader = BufReader::new(file);
         let mut entries = Vec::new();
