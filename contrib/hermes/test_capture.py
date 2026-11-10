@@ -57,10 +57,17 @@ class CapturePromptFanoutTests(unittest.TestCase):
             "STREENOTE_HERMES_INBOX": str(self.inboxes["terminal-a"]),
             "STREENOTE_HERMES_REVIEW_SESSION_DIR": str(self.registry),
         }
-        with patch.dict(os.environ, environment), patch(
-            "sys.stdin", io.StringIO(json.dumps(payload))
-        ):
-            self.assertEqual(CAPTURE.main(), 0)
+        with patch.dict(CAPTURE.os.environ, environment):
+            previous_stdin = CAPTURE.sys.stdin
+            CAPTURE.sys.stdin = io.StringIO(json.dumps(payload))
+            try:
+                self.assertEqual(
+                    CAPTURE.os.environ.get("STREENOTE_HERMES_INBOX"),
+                    environment["STREENOTE_HERMES_INBOX"],
+                )
+                self.assertEqual(CAPTURE.main(), 0)
+            finally:
+                CAPTURE.sys.stdin = previous_stdin
 
     def _events(self, inbox):
         ready = inbox / "ready"
