@@ -121,14 +121,15 @@ def write_review_session_route(
                 and existing_stat.st_size <= 4096
             ):
                 existing = json.loads(assignment.read_text(encoding="utf-8"))
-                owner = existing.get("instance_id") if isinstance(existing, dict) else None
-                if (
-                    existing.get("version") == 1
-                    and existing.get("session_hash") == session_hash
-                    and isinstance(owner, str)
-                    and _review_instance_is_active(registry, owner)
-                ):
-                    return assignment
+                if isinstance(existing, dict):
+                    owner = existing.get("instance_id")
+                    if (
+                        existing.get("version") == 1
+                        and existing.get("session_hash") == session_hash
+                        and isinstance(owner, str)
+                        and _review_instance_is_active(registry, owner)
+                    ):
+                        return assignment
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             pass
 
