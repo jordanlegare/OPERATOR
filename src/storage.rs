@@ -970,6 +970,55 @@ mod shared_journal_tests {
     }
 
     #[test]
+    fn live_terminal_mirrors_peer_hermes_writes_from_shared_journal_without_inbox_delivery() {
+        let path = journal_path();
+        let mut first = Journal::open(path.clone()).expect("open first terminal journal");
+        let mut second = Journal::open(path.clone()).expect("open second terminal journal");
+        let event = Entry::with_external_event(
+            EntryKind::HermesUser,
+            "First prompt must appear in every live terminal.".to_string(),
+            "2026-11-10T12:00:00-05:00".to_string(),
+            "shared-journal-prompt-001".to_string(),
+            Some("conversation-1".to_string()),
+            Some("session-1".to_string()),
+            None,
+            Some("turn-1".to_string()),
+            None,
+            None,
+        );
+
+        first.append(event.clone()).expect("first terminal persists prompt");
+        assert!(second.entries.is_empty(), "second cache starts unchanged");
+
+        assert_eq!(
+            second.refresh_external_hermes_entries().expect("poll shared journal"),
+            1,
+            "second terminal must import the externally appended prompt",
+        );
+        assert_eq!(second.entries.len(), 1);
+        assert_eq!(
+            second.entries[0].text,
+            "First prompt must appear in every live terminal."
+        );
+
+        // A later duplicate from the second terminal's private inbox must not
+        // add a second in-memory row or a second durable JSONL record.
+        second.append(event).expect("deduplicate its private inbox copy");
+        assert_eq!(second.entries.len(), 1);
+
+        drop(first);
+        drop(second);
+        let contents = fs::read_to_string(&path).expect("read shared journal");
+        assert_eq!(
+            contents.lines().filter(|line| line.contains("shared-journal-prompt-001")).count(),
+            1,
+        );
+        let _ = fs::remove_file(&path);
+        let lock = PathBuf::from(format!("{}.lock", path.display()));
+        let _ = fs::remove_file(lock);
+    }
+
+    #[test]
     fn same_hermes_event_imported_by_two_ssh_instances_is_persisted_once_and_cached_in_both() {
         let path = journal_path();
         let mut first = Journal::open(path.clone()).expect("open first terminal journal");
