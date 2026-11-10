@@ -137,6 +137,9 @@ class HermesReviewPluginTests(unittest.TestCase):
         session_b = "hermes-session-origin-b"
         CAPTURE.write_review_session_route(registry, session_a, "a1")
         CAPTURE.write_review_session_route(registry, session_b, "c3")
+        # Concurrent turns for the same Hermes session must not let another
+        # SSH-launched STREENOTE process steal its live origin assignment.
+        CAPTURE.write_review_session_route(registry, session_a, "b2")
 
         routes, directory = PLUGIN._load_review_routes()
         self.assertEqual({route["instance_id"] for route in routes}, set(instance_ids))
@@ -197,8 +200,11 @@ class HermesReviewPluginTests(unittest.TestCase):
             }))
             os.chmod(manifest_path, 0o600)
         try:
-            with patch.dict(os.environ, {"STREENOTE_HERMES_REVIEW_REQUIRED": "1"}):
-                with self.assertRaisesRegex(RuntimeError, "No STREENOTE SSH-session affinity"):
+            # Ambiguous routing must fail closed even when the optional global
+            # STREENOTE_HERMES_REVIEW_REQUIRED switch is unset.
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("STREENOTE_HERMES_REVIEW_REQUIRED", None)
+                with self.assertRaisesRegex(RuntimeError, "response was withheld"):
                     PLUGIN.review_response(
                         "Unreviewed response",
                         session_id="session-without-origin-affinity",
