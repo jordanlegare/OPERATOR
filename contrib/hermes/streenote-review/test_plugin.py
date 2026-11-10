@@ -5,6 +5,7 @@ import os
 import socket
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -117,11 +118,12 @@ class HermesReviewPluginTests(unittest.TestCase):
         records = [json.loads(line) for line in self.diagnostic_path.read_text().splitlines()]
         self.assertEqual(records[-1]["event"], "PLUGIN_REGISTERED")
 
-    def test_response_is_broadcast_to_all_terminals_and_reviewed_by_one_enabled_terminal(self):
+    def test_response_is_dispatched_only_to_enabled_reviewer_terminals(self):
         registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
         registry.mkdir(mode=0o700, parents=True)
         instance_ids = ("a1", "b2", "c3")
         workers = []
+        listeners = {}
         requests_by_instance = {}
         errors_by_instance = {}
 
@@ -130,9 +132,13 @@ class HermesReviewPluginTests(unittest.TestCase):
             worker, requests, errors = self._serve(
                 {"version": 1, "decision": "approve"},
                 socket_path=socket_path,
-                accept_count=2,
+                accept_count=1,
             )
             workers.append(worker)
+            listeners[instance_id] = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listeners[instance_id].settimeout(0.15)
+            # The worker owns this socket for all instances; this mapping keeps
+            # the test's intended eligibility explicit below.
             requests_by_instance[instance_id] = requests
             errors_by_instance[instance_id] = errors
             manifest = registry / f"{instance_id}.json"
@@ -145,14 +151,14 @@ class HermesReviewPluginTests(unittest.TestCase):
             os.chmod(manifest, 0o600)
 
         result = PLUGIN.review_response(
-            "One response shared with every connected SSH terminal.",
+            "One response should be delivered to one available reviewer.",
             session_id="shared-session-1",
             model="qwen3.5:latest",
             platform="api_server",
         )
         self.assertEqual(
             result,
-            "One response shared with every connected SSH terminal.",
+            "One response should be delivered to one available reviewer.",
         )
 
         for worker in workers:
@@ -163,32 +169,16 @@ class HermesReviewPluginTests(unittest.TestCase):
         delivered = {
             instance_id: requests[0]
             for instance_id, requests in requests_by_instance.items()
+            if requests
         }
-        self.assertEqual(set(delivered), set(instance_ids))
-        active = [
-            instance_id for instance_id, request in delivered.items()
-            if not request.get("observe_only", False)
-        ]
-        observers = [
-            instance_id for instance_id, request in delivered.items()
-            if request.get("observe_only", False)
-        ]
-        self.assertEqual(len(active), 1)
-        self.assertIn(active[0], ("a1", "b2"))
-        self.assertEqual(set(observers), set(instance_ids) - set(active))
-        self.assertEqual(delivered["c3"]["observe_only"], True)
-        for instance_id in instance_ids:
-            self.assertEqual(len(requests_by_instance[instance_id]), 2)
-            final_message = requests_by_instance[instance_id][1]
-            self.assertTrue(final_message.get("observe_only"))
-            self.assertEqual(final_message.get("phase"), "result")
-            self.assertEqual(final_message.get("decision"), "approve")
-            self.assertEqual(
-                final_message["response_text"],
-                "One response shared with every connected SSH terminal.",
-            )
+        self.assertEqual(len(delivered), 1)
+        reviewer_id, request = next(iter(delivered.items()))
+        self.assertIn(reviewer_id, ("a1", "b2"))
+        self.assertFalse(request.get("observe_only", False))
+        self.assertEqual(request["response_text"], "One response should be delivered to one available reviewer.")
+        self.assertNotIn("c3", delivered)
 
-    def test_edited_final_answer_is_propagated_to_reviewer_and_observer_terminals(self):
+    def test_edited_final_answer_is_returned_only_by_the_selected_reviewer(self):
         registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
         registry.mkdir(mode=0o700, parents=True)
         requests_by_instance = {}
@@ -200,10 +190,10 @@ class HermesReviewPluginTests(unittest.TestCase):
                 {
                     "version": 1,
                     "decision": "replace",
-                    "response_text": "Edited answer delivered to every terminal.",
+                    "response_text": "Edited answer returned only to Hermes.",
                 },
                 socket_path=socket_path,
-                accept_count=2,
+                accept_count=1,
             )
             workers.append(worker)
             requests_by_instance[instance_id] = requests
@@ -219,27 +209,92 @@ class HermesReviewPluginTests(unittest.TestCase):
 
         result = PLUGIN.review_response(
             "Original unedited answer.",
-            session_id="edited-broadcast-session",
+            session_id="edited-review-session",
             model="qwen3.5:latest",
             platform="api_server",
         )
-        self.assertEqual(result, "Edited answer delivered to every terminal.")
+        self.assertEqual(result, "Edited answer returned only to Hermes.")
 
         for worker in workers:
             worker.join(timeout=5)
             self.assertFalse(worker.is_alive())
         self.assertFalse(any(error for errors in errors_by_instance.values() for error in errors))
+        self.assertEqual(len(requests_by_instance["a1"]), 1)
+        self.assertFalse(requests_by_instance["a1"][0].get("observe_only", False))
+        self.assertEqual(requests_by_instance["b2"], [])
 
-        for instance_id in ("a1", "b2"):
-            self.assertEqual(len(requests_by_instance[instance_id]), 2)
-            final_message = requests_by_instance[instance_id][1]
-            self.assertTrue(final_message["observe_only"])
-            self.assertEqual(final_message["phase"], "result")
-            self.assertEqual(final_message["decision"], "replace")
-            self.assertEqual(
-                final_message["response_text"],
-                "Edited answer delivered to every terminal.",
-            )
+    def test_all_reviewers_opted_out_bypass_without_contact_even_when_review_required(self):
+        registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
+        registry.mkdir(mode=0o700, parents=True)
+        socket_path = registry / "a1.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(socket_path))
+        os.chmod(socket_path, 0o600)
+        listener.listen(1)
+        listener.settimeout(0.15)
+        manifest = registry / "a1.json"
+        manifest.write_text(json.dumps({
+            "version": 1,
+            "instance_id": "a1",
+            "socket_path": str(socket_path),
+            "review_enabled": False,
+        }))
+        os.chmod(manifest, 0o600)
+
+        with patch.dict(os.environ, {"STREENOTE_HERMES_REVIEW_REQUIRED": "1"}):
+            self.assertIsNone(self._call())
+        with self.assertRaises(socket.timeout):
+            listener.accept()
+        listener.close()
+
+    def test_scheduler_refreshes_live_registration_when_operator_opts_out_while_queued(self):
+        registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
+        registry.mkdir(mode=0o700, parents=True)
+        socket_path = registry / "a1.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(socket_path))
+        os.chmod(socket_path, 0o600)
+        listener.listen(1)
+        manifest = registry / "a1.json"
+        manifest.write_text(json.dumps({
+            "version": 1,
+            "instance_id": "a1",
+            "socket_path": str(socket_path),
+            "review_enabled": True,
+        }))
+        os.chmod(manifest, 0o600)
+
+        routes, registry_dir = PLUGIN._load_review_routes()
+        lock_path = registry / "dispatch" / "a1.lock"
+        lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        PLUGIN.fcntl.flock(lock_fd, PLUGIN.fcntl.LOCK_EX | PLUGIN.fcntl.LOCK_NB)
+        outcome = []
+        worker = threading.Thread(
+            target=lambda: outcome.append(
+                PLUGIN._acquire_review_slot(routes, registry_dir, timeout=1.5)
+            ),
+            daemon=True,
+        )
+        worker.start()
+        try:
+            time.sleep(0.15)
+            temporary = manifest.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps({
+                "version": 1,
+                "instance_id": "a1",
+                "socket_path": str(socket_path),
+                "review_enabled": False,
+            }))
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, manifest)
+            worker.join(timeout=1)
+            self.assertFalse(worker.is_alive(), "dispatcher should notice /review off promptly")
+            self.assertEqual(outcome, [None])
+        finally:
+            PLUGIN.fcntl.flock(lock_fd, PLUGIN.fcntl.LOCK_UN)
+            os.close(lock_fd)
+            listener.close()
 
     def test_review_pool_round_robins_and_skips_a_terminal_with_an_active_lease(self):
         registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
