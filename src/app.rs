@@ -133,6 +133,8 @@ pub struct App {
     pub conversation_focus_entry: Option<usize>,
     /// Whether final Hermes responses must be approved before client delivery.
     pub review_hermes_responses: bool,
+    /// Throttle disk checks while synchronizing the per-user review preference.
+    last_review_settings_check: Instant,
     /// Active final-response review; its channel is the only release path to Hermes.
     pub pending_review: Option<ReviewRequest>,
     /// Read-only copies of final responses delivered to this non-reviewing terminal.
@@ -214,6 +216,7 @@ impl App {
             conversation_follow_tail: true,
             conversation_focus_entry: None,
             review_hermes_responses: settings.review_hermes_responses,
+            last_review_settings_check: Instant::now(),
             pending_review: None,
             review_broadcasts: VecDeque::new(),
             review_broadcast_scroll: 0,
@@ -1280,6 +1283,26 @@ impl App {
                 "Banner visibility changed for this session but could not be saved: {error}"
             ),
         };
+    }
+
+    /// Synchronize the per-user review preference written by another SSH-launched
+    /// STREENOTE process. A single /review on therefore makes every live
+    /// terminal eligible for the shared reviewer pool.
+    pub fn sync_hermes_review_setting(&mut self) -> bool {
+        if self.last_review_settings_check.elapsed() < Duration::from_millis(250) {
+            return false;
+        }
+        self.last_review_settings_check = Instant::now();
+        let persisted = Settings::load().review_hermes_responses;
+        if persisted == self.review_hermes_responses {
+            return false;
+        }
+        self.review_hermes_responses = persisted;
+        self.status = format!(
+            "Shared Hermes response review is now {} in all connected STREENOTE terminals.",
+            if persisted { "ON" } else { "OFF" }
+        );
+        true
     }
 
     pub fn set_hermes_review_enabled(&mut self, enabled: bool) {
