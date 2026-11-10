@@ -118,7 +118,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the interactive shell and Hermes' pre_llm_call capture hook.
     let mut review_server = HermesReviewServer::start()?;
     if let Some(instance_id) = review_server.instance_id() {
-        std::env::set_var("STREENOTE_HERMES_REVIEW_INSTANCE_ID", instance_id);
         if let Some(registry_dir) = review_server.session_registry_dir() {
             std::env::set_var("STREENOTE_HERMES_REVIEW_SESSION_DIR", &registry_dir);
             // Each SSH-launched TUI consumes its own inbox fan-out. The capture
