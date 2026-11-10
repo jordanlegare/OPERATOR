@@ -210,6 +210,46 @@ class HermesReviewPluginTests(unittest.TestCase):
             if second_fd >= 0:
                 PLUGIN._release_review_slot(second_fd)
 
+    def test_capture_fans_each_hook_event_out_to_each_live_terminal_inbox(self):
+        registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
+        registry.mkdir(mode=0o700, parents=True)
+        listeners = []
+        instance_ids = ("a1", "b2", "c3")
+        for instance_id in instance_ids:
+            socket_path = registry / f"{instance_id}.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(socket_path))
+            os.chmod(socket_path, 0o600)
+            listener.listen(1)
+            listeners.append(listener)
+            manifest = registry / f"{instance_id}.json"
+            manifest.write_text(json.dumps({
+                "version": 1,
+                "instance_id": instance_id,
+                "socket_path": str(socket_path),
+                "review_enabled": True,
+            }))
+            os.chmod(manifest, 0o600)
+
+        event = {
+            "version": 1,
+            "event_id": "fanout-event-001",
+            "kind": "hermes_user",
+            "timestamp": "2026-11-10T12:00:00-05:00",
+            "text": "A prompt that every connected terminal must receive.",
+            "session_id": "session-shared",
+        }
+        CAPTURE.write_inbox_event(Path(self.temp_dir.name) / "unused-single-inbox", event)
+
+        for instance_id in instance_ids:
+            inbox = registry / "inboxes" / instance_id / "ready"
+            records = list(inbox.glob("*.json"))
+            self.assertEqual(len(records), 1, f"{instance_id} must get its own event copy")
+            self.assertEqual(json.loads(records[0].read_text())["event_id"], "fanout-event-001")
+
+        for listener in listeners:
+            listener.close()
+
     def test_runtime_socket_path_is_shared_by_processes_with_different_home_values(self):
         with tempfile.TemporaryDirectory(prefix="streenote-runtime-") as runtime:
             runtime_root = Path(runtime)
@@ -253,7 +293,7 @@ class HermesReviewPluginTests(unittest.TestCase):
         events = [record["event"] for record in records]
         self.assertIn("CALLBACK_INVOKED", events)
         self.assertIn("SOCKET_ROUTES_RESOLVED", events)
-        self.assertIn("SESSION_ROUTE_SELECTED", events)
+        self.assertIn("SESSION_REVIEW_ASSIGNED", events)
         self.assertIn("SOCKET_CONNECT_OK", events)
         self.assertIn("REQUEST_SENT", events)
         self.assertIn("DECISION_RECEIVED", events)
