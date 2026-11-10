@@ -178,11 +178,11 @@ hermes hooks doctor
 
 Rebuild and restart STREENOTE so its Rust-created PTYs receive the inbox variable, then launch Hermes from that shell. If your Hermes configuration routes hooks through a separate gateway service, point the hook command at a gateway wrapper that exports the same inbox path; see the process-boundary note above.
 
-- `pre_llm_call` captures the user's prompt as a `hermes_user` entry and, once per session, any prior user/assistant/tool history as a `hermes_history` entry (`HCTX`).
+- `pre_llm_call` captures Hermes' original `user_message`—before hook-injected skill/plugin context—as a `hermes_user` entry. Every registered terminal receives the same prompt event in its private inbox. Text-only prompts are preserved; for multimodal prompts, readable text parts are retained and image/audio/file payloads are represented by safe placeholders rather than storing binary data or data URLs.
+- Once per session, the first non-empty `conversation_history` is captured as a `hermes_history` entry (`HCTX`), allowing a resumed session to bring its earlier user/assistant/tool messages into the same thread. The shared journal preserves this history for terminals that connect later; subsequent turns append only their new prompt and conversation events.
 - `post_llm_call` captures the final assistant response as a `hermes_assistant` entry.
 - `pre_tool_call` captures the tool name and arguments as a `hermes_tool_call` entry.
 - `post_tool_call` captures the tool result, status, duration, and error details (when present) as a `hermes_tool_result` entry.
-- On the first observed `pre_llm_call` for a session, STREENOTE imports a one-time snapshot of the existing `conversation_history`. This lets a resumed Hermes session bring its earlier user, assistant, and tool messages into the same thread instead of starting with a partial transcript. The snapshot is stored once per session; subsequent turns append only new events.
 - Capture begins when Hermes fires its hook for a submitted turn. Text typed into the Hermes input editor but not submitted is not visible to shell hooks and is not captured.
 - The history snapshot excludes system and developer messages. Message bodies, tool calls, and tool results pass through the same best-effort redaction before capture. The snapshot is capped at 1 MiB of rendered text; the inbox accepts events up to 8 MiB.
 - `on_stream_start`, `on_stream_delta`, and `on_stream_end` capture assistant text incrementally. Reasoning deltas are intentionally excluded.
