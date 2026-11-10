@@ -39,7 +39,7 @@ use ratatui::{
 };
 
 use app::{App, ConversationView, InputMode};
-use hermes_bridge::HermesBridge;
+use hermes_bridge::{HermesBridge, HERMES_INBOX_ENV};
 use hermes_review::HermesReviewServer;
 use shell::ShellSession;
 use storage::Journal;
@@ -120,7 +120,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(instance_id) = review_server.instance_id() {
         std::env::set_var("STREENOTE_HERMES_REVIEW_INSTANCE_ID", instance_id);
         if let Some(registry_dir) = review_server.session_registry_dir() {
-            std::env::set_var("STREENOTE_HERMES_REVIEW_SESSION_DIR", registry_dir);
+            std::env::set_var("STREENOTE_HERMES_REVIEW_SESSION_DIR", &registry_dir);
+            // Each SSH-launched TUI consumes its own inbox fan-out. The capture
+            // hook writes every Hermes event to every live instance's inbox.
+            let instance_inbox = registry_dir.join("inboxes").join(instance_id);
+            std::env::set_var(HERMES_INBOX_ENV, instance_inbox);
         }
     }
 
