@@ -92,7 +92,7 @@ fn draw_hermes_broadcast(frame: &mut Frame, app: &App, theme: Theme) {
                 " HERMES RESPONSE · WITHHELD · SHARED STATUS ",
                 "The reviewer withheld this answer. No answer text was released to Hermes.",
                 "The response was rejected and withheld.",
-                theme.error,
+                theme.warning,
             ),
             _ => (
                 " HERMES RESPONSE · REVIEW RESULT · SHARED ",
