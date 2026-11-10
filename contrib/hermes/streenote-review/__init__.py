@@ -217,7 +217,7 @@ def _write_dispatch_cursor(path: Path, instance_id: str) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        os.write(descriptor, (instance_id + "\\n").encode("utf-8"))
+        os.write(descriptor, (instance_id + "\n").encode("utf-8"))
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
@@ -286,7 +286,11 @@ def _acquire_review_slot(
                 except BlockingIOError:
                     os.close(lock_fd)
                     continue
-                _write_dispatch_cursor(cursor_path, route["instance_id"])
+                try:
+                    _write_dispatch_cursor(cursor_path, route["instance_id"])
+                except Exception:
+                    _release_review_slot(lock_fd)
+                    raise
                 selected = (route, lock_fd)
                 break
         finally:
@@ -533,15 +537,16 @@ def review_response(
     selected_route: dict[str, Any] | None = None
     max_attempts = max(1, len(routes))
     for _ in range(max_attempts):
+        reviewers_were_configured = any(
+            route.get("review_enabled", True) for route in routes
+        )
         try:
             selected_route, slot_fd = _acquire_review_slot(
                 routes, registry_dir, excluded=excluded
             )
         except RuntimeError as error:
             _log_event("REVIEW_POOL_UNAVAILABLE", error=str(error), required=required)
-            if required:
-                raise
-            if any(route.get("review_enabled", True) for route in routes):
+            if reviewers_were_configured or required:
                 raise
             selected_route = None
             break
