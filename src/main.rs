@@ -1400,7 +1400,7 @@ fn run_terminal_workspace_loop(
             continue;
         }
         if !app.review_broadcasts.is_empty() {
-            run_workspace_broadcast_overlay(terminal, app)?;
+            run_workspace_broadcast_overlay(terminal, app, review_server)?;
             continue;
         }
 
@@ -1535,6 +1535,7 @@ fn run_workspace_review_overlay(
 fn run_workspace_broadcast_overlay(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
+    review_server: &mut HermesReviewServer,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut out = stdout();
     execute!(
@@ -1552,6 +1553,16 @@ fn run_workspace_broadcast_overlay(
 
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         while !app.review_broadcasts.is_empty() {
+            // A newly assigned review takes priority over this read-only
+            // notification. Never leave a pool slot idle behind an observer
+            // overlay in the F1 raw-terminal workspace.
+            drain_review_broadcasts(app, review_server);
+            if app.pending_review.is_none() {
+                if let Some(request) = review_server.try_recv() {
+                    app.begin_hermes_review(request);
+                    break;
+                }
+            }
             terminal.draw(|frame| ui::draw(frame, app))?;
             if !event::poll(Duration::from_millis(40))? {
                 continue;
@@ -1695,7 +1706,7 @@ fn run_terminal_workspace_loop(
             continue;
         }
         if !app.review_broadcasts.is_empty() {
-            run_workspace_broadcast_overlay(_terminal, app)?;
+            run_workspace_broadcast_overlay(_terminal, app, review_server)?;
             continue;
         }
         match drain_hermes_events(app, hermes_bridge) {
