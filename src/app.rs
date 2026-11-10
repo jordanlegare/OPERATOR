@@ -2112,6 +2112,22 @@ mod tests {
     }
 
     #[test]
+    fn reviewer_availability_can_be_disabled_and_reenabled_for_this_terminal() {
+        let (mut app, path) = test_app();
+        assert!(app.review_hermes_responses, "new terminals join the reviewer pool");
+
+        app.set_hermes_review_enabled(false);
+        assert!(!app.review_hermes_responses);
+        assert!(app.status.contains("this terminal"));
+
+        app.set_hermes_review_enabled(true);
+        assert!(app.review_hermes_responses);
+        assert!(app.status.contains("rejoined"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn observer_review_broadcast_is_ignored_without_opening_review_ui() {
         use crate::hermes_review::ReviewBroadcast;
 
