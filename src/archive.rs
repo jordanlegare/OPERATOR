@@ -5,7 +5,6 @@
 //! hits, so archive size does not determine the search result memory footprint.
 
 use std::{
-    collections::VecDeque,
     fs::File,
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -17,7 +16,6 @@ use crate::storage::{Entry, EntryKind};
 
 const DEFAULT_PAGE_LIMIT: usize = 200;
 const MAX_PAGE_LIMIT: usize = 500;
-const MAX_PAGE_OFFSET: usize = 10_000;
 const MAX_ARCHIVE_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -155,30 +153,63 @@ fn search_file(path: &Path, request_id: u64, raw_query: &str) -> ArchiveSearchRe
         error: None,
     };
 
-    let file = match File::open(path) {
-        Ok(file) => file,
+    let archive_len = match File::open(path).and_then(|file| file.metadata()) {
+        Ok(metadata) => metadata.len(),
         Err(error) => {
             result.error = Some(format!("open JSONL archive: {error}"));
             return result;
         }
     };
-    let mut reader = BufReader::new(file);
+
+    // First pass counts the full result set without retaining hit records.
+    // Second pass captures only the requested page, so even offset:100000000
+    // consumes O(limit) result memory rather than O(offset + limit).
+    let total = match scan_archive(path, archive_len, &needle, None) {
+        Ok((total, _)) => total,
+        Err(error) => {
+            result.error = Some(error);
+            return result;
+        }
+    };
+    let page_start = total.saturating_sub(offset.saturating_add(limit));
+    let page_end = total.saturating_sub(offset);
+    let (_, mut hits) = match scan_archive(path, archive_len, &needle, Some((page_start, page_end))) {
+        Ok(scanned) => scanned,
+        Err(error) => {
+            result.error = Some(error);
+            return result;
+        }
+    };
+
+    result.total = total;
+    result.hits = hits.drain(..).rev().collect();
+    result
+}
+
+/// Scan a stable byte-length snapshot of the append-only archive. Match indices
+/// are chronological; an optional half-open range limits retained page hits.
+fn scan_archive(
+    path: &Path,
+    archive_len: u64,
+    needle: &str,
+    capture_range: Option<(usize, usize)>,
+) -> Result<(usize, Vec<ArchiveSearchHit>), String> {
+    let file = File::open(path).map_err(|error| format!("open JSONL archive: {error}"))?;
+    let mut reader = BufReader::new(file).take(archive_len);
     let mut buffer = Vec::new();
     let mut byte_offset = 0u64;
     let mut line_number = 0usize;
-    let mut recent_hits = VecDeque::with_capacity(offset.saturating_add(limit));
+    let mut matched_count = 0usize;
+    let mut hits = Vec::with_capacity(
+        capture_range.map(|(start, end)| end.saturating_sub(start)).unwrap_or(0),
+    );
     let mut pending_delta: Option<(Entry, u64, u64, usize)> = None;
 
     loop {
         buffer.clear();
         let start_offset = byte_offset;
-        let count = match reader.read_until(b'\n', &mut buffer) {
-            Ok(count) => count,
-            Err(error) => {
-                result.error = Some(format!("read JSONL archive: {error}"));
-                return result;
-            }
-        };
+        let count = reader.read_until(b'\\n', &mut buffer)
+            .map_err(|error| format!("read JSONL archive: {error}"))?;
         if count == 0 {
             break;
         }
@@ -186,7 +217,7 @@ fn search_file(path: &Path, request_id: u64, raw_query: &str) -> ArchiveSearchRe
         line_number = line_number.saturating_add(1);
 
         // A crash can leave a partial final append. Ignore that incomplete row.
-        if !buffer.ends_with(b"\n") {
+        if !buffer.ends_with(b"\\n") {
             break;
         }
         let Ok(entry) = serde_json::from_slice::<Entry>(&buffer) else {
@@ -202,15 +233,9 @@ fn search_file(path: &Path, request_id: u64, raw_query: &str) -> ArchiveSearchRe
                 }
                 _ => {
                     if let Some((previous, start, end, first_line)) = pending_delta.take() {
-                        add_match(
-                            previous,
-                            start,
-                            end,
-                            first_line,
-                            &needle,
-                            &mut result.total,
-                            &mut recent_hits,
-                            offset.saturating_add(limit),
+                        collect_match(
+                            previous, start, end, first_line, needle,
+                            capture_range, &mut matched_count, &mut hits,
                         );
                     }
                     pending_delta = Some((entry, start_offset, byte_offset, line_number));
@@ -220,73 +245,52 @@ fn search_file(path: &Path, request_id: u64, raw_query: &str) -> ArchiveSearchRe
         }
 
         if let Some((previous, start, end, first_line)) = pending_delta.take() {
-            add_match(
-                previous,
-                start,
-                end,
-                first_line,
-                &needle,
-                &mut result.total,
-                &mut recent_hits,
-                offset.saturating_add(limit),
+            collect_match(
+                previous, start, end, first_line, needle,
+                capture_range, &mut matched_count, &mut hits,
             );
         }
 
         if !matches!(entry.kind, EntryKind::HermesStreamStart | EntryKind::HermesStreamEnd) {
-            add_match(
-                entry,
-                start_offset,
-                byte_offset,
-                line_number,
-                &needle,
-                &mut result.total,
-                &mut recent_hits,
-                offset.saturating_add(limit),
+            collect_match(
+                entry, start_offset, byte_offset, line_number, needle,
+                capture_range, &mut matched_count, &mut hits,
             );
         }
     }
 
     if let Some((previous, start, end, first_line)) = pending_delta {
-        add_match(
-            previous,
-            start,
-            end,
-            first_line,
-            &needle,
-            &mut result.total,
-            &mut recent_hits,
-            offset.saturating_add(limit),
+        collect_match(
+            previous, start, end, first_line, needle,
+            capture_range, &mut matched_count, &mut hits,
         );
     }
 
-    // Newest matches appear first. Retain only offset + limit lightweight hits,
-    // regardless of how many matching rows exist in the archive.
-    result.hits = recent_hits
-        .into_iter()
-        .rev()
-        .skip(offset)
-        .take(limit)
-        .collect();
-    result
+    Ok((matched_count, hits))
 }
 
-fn add_match(
+fn collect_match(
     entry: Entry,
     start_offset: u64,
     end_offset: u64,
     line_number: usize,
     needle: &str,
-    total: &mut usize,
-    recent_hits: &mut VecDeque<ArchiveSearchHit>,
-    keep: usize,
+    capture_range: Option<(usize, usize)>,
+    matched_count: &mut usize,
+    hits: &mut Vec<ArchiveSearchHit>,
 ) {
     if !entry.text.to_lowercase().contains(needle) {
         return;
     }
 
-    *total = total.saturating_add(1);
+    let match_index = *matched_count;
+    *matched_count = matched_count.saturating_add(1);
+    if !capture_range.is_some_and(|(start, end)| match_index >= start && match_index < end) {
+        return;
+    }
+
     let record_id = entry.record_id.clone().unwrap_or_else(|| format!("archive-line-{line_number}"));
-    let hit = ArchiveSearchHit {
+    hits.push(ArchiveSearchHit {
         record_id,
         kind: entry_kind_name(entry.kind).to_string(),
         occurred_at: entry.timestamp,
@@ -294,15 +298,7 @@ fn add_match(
         line_number,
         start_offset,
         end_offset,
-    };
-
-    if keep == 0 {
-        return;
-    }
-    if recent_hits.len() == keep {
-        recent_hits.pop_front();
-    }
-    recent_hits.push_back(hit);
+    });
 }
 
 fn parse_query(raw_query: &str) -> Result<(String, usize, usize), String> {
@@ -311,8 +307,14 @@ fn parse_query(raw_query: &str) -> Result<(String, usize, usize), String> {
     let mut offset = 0usize;
 
     for token in raw_query.split_whitespace() {
-        if token == "--literal" || token == "--web" {
-            continue;
+        match token {
+            "--literal" => continue,
+            "--web" | "--phrase" | "--tsquery" | "--fuzzy" => {
+                return Err(format!(
+                    "{token} search mode requires the PostgreSQL backend; local JSONL archive search supports literal substrings"
+                ));
+            }
+            _ => {}
         }
         if let Some(value) = token.strip_prefix("limit:") {
             let parsed = value.parse::<usize>().map_err(|_| format!("invalid limit {value:?}"))?;
@@ -321,13 +323,13 @@ fn parse_query(raw_query: &str) -> Result<(String, usize, usize), String> {
             }
             limit = parsed.min(MAX_PAGE_LIMIT);
         } else if let Some(value) = token.strip_prefix("offset:") {
-            let parsed = value.parse::<usize>().map_err(|_| format!("invalid offset {value:?}"))?;
-            offset = parsed.min(MAX_PAGE_OFFSET);
-        } else if token.contains(':') && token.split_once(':').is_some_and(|(key, _)| {
+            offset = value.parse::<usize>().map_err(|_| format!("invalid offset {value:?}"))?;
+        } else if token.split_once(':').is_some_and(|(key, _)| {
             matches!(key, "kind" | "session" | "conversation" | "after" | "before")
         }) {
-            // These structured filters are currently provided by PostgreSQL.
-            continue;
+            return Err(format!(
+                "filter {token:?} requires the PostgreSQL backend; remove the filter for a full literal archive scan"
+            ));
         } else {
             terms.push(token);
         }
