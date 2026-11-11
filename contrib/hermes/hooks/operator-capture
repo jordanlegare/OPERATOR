@@ -1,5 +1,11 @@
 #!/bin/sh
+set -eu
+
+: "${HOME:?HOME must be set for the OPERATOR Hermes hook}"
 export OPERATOR_HERMES_REVIEW_SESSION_DIR="${OPERATOR_HERMES_REVIEW_SESSION_DIR:-/run/user/$(id -u)/operator/review-sessions}"
 : "${XDG_DATA_HOME:=$HOME/.local/share}"
 export OPERATOR_HERMES_INBOX="${OPERATOR_HERMES_INBOX:-$XDG_DATA_HOME/operator/hermes-inbox}"
-exec "$HOME/.hermes/hooks/operator-capture.py"
+
+# The installed Python file is intentionally allowed to be mode 0644. Invoke
+# it through the interpreter instead of trying to exec it as a binary.
+exec python3 "$HOME/.hermes/hooks/operator-capture.py"
