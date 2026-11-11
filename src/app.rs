@@ -278,12 +278,35 @@ impl App {
         if removed > 0 {
             self.selected_row = None;
             self.message_view_index = None;
-            self.archive_detail_entry = None;
             self.conversation_view = None;
-            self.clear_search();
-            self.jump_to_latest();
+            self.conversation_focus_entry = None;
+
+            if self.search_view {
+                // Archive results and a loaded historical detail are independent
+                // of the hot transcript. Keep them open, but refresh links to
+                // any search rows that still happen to be in the recent cache.
+                let index_by_record_id: HashMap<&str, usize> = self.journal.entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, entry)| {
+                        entry.record_id.as_deref().map(|record_id| (record_id, index))
+                    })
+                    .collect();
+                self.search_hit_entry_indices = self.search_hits
+                    .iter()
+                    .map(|hit| index_by_record_id.get(hit.record_id.as_str()).copied())
+                    .collect();
+                self.matches = self.search_hit_entry_indices.iter().flatten().copied().collect();
+                self.selected_row = self.active_match
+                    .and_then(|position| self.search_hit_entry_indices.get(position).copied().flatten());
+            } else {
+                self.archive_detail_entry = None;
+                self.clear_search();
+                self.jump_to_latest();
+            }
+
             self.status = format!(
-                "Pruned {removed} expired row(s); transcript now retains the trailing {} days. Archive remains searchable.",
+                "Pruned {removed} expired row(s); transcript retains the trailing {} days. Archive history and open search results are preserved.",
                 crate::storage::HOT_WINDOW_DAYS
             );
         }
