@@ -7,10 +7,16 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use chrono::{DateTime, Local, SecondsFormat};
+use chrono::{DateTime, Duration as ChronoDuration, Local, SecondsFormat, Utc};
 
-use crate::postgres::{PostgresJournal, SearchResult as PostgresSearchResult, Update as PostgresUpdate};
+use crate::{
+    archive::{ArchiveSearchHit, ArchiveSearchResult, ArchiveSearcher},
+    postgres::{PostgresJournal, SearchResult as PostgresSearchResult, Update as PostgresUpdate},
+};
 use serde::{Deserialize, Serialize};
+
+/// The live transcript retains the trailing 30 days; the JSONL/PostgreSQL archive remains complete.
+pub const HOT_WINDOW_DAYS: i64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -160,6 +166,7 @@ pub struct Journal {
     /// PostgreSQL is authoritative when configured; path remains the JSONL import/export path.
     postgres: Option<PostgresJournal>,
     postgres_search_results: Vec<PostgresSearchResult>,
+    archive_searcher: Option<ArchiveSearcher>,
 }
 
 #[cfg(unix)]
@@ -241,9 +248,12 @@ impl Journal {
         let mut entries = Vec::new();
         let mut total_text_bytes = 0usize;
         let mut skipped_corrupt_lines = 0usize;
+        let cutoff = Utc::now() - ChronoDuration::days(HOT_WINDOW_DAYS);
         let mut persisted_event_ids = HashSet::new();
         let mut persisted_record_ids = HashSet::new();
 
+        // Scan the durable file, but retain only the hot window and its IDs.
+        // Historical records stay on disk and are searched by ArchiveSearcher.
         for line in reader.lines() {
             let line = line?;
             if line.trim().is_empty() {
@@ -252,9 +262,10 @@ impl Journal {
             match serde_json::from_str::<Entry>(&line) {
                 Ok(mut entry) => {
                     entry.text = sanitize_entry_text(entry.kind, &entry.text);
+                    if !is_hot_entry_at(&entry, cutoff) {
+                        continue;
+                    }
                     if let Some(event_id) = entry.event_id.as_ref() {
-                        // A retry after a crash may leave both the original and
-                        // a later import attempt in JSONL. Keep the first copy.
                         if !persisted_event_ids.insert(event_id.clone()) {
                             continue;
                         }
@@ -267,8 +278,6 @@ impl Journal {
                     if entry.kind == EntryKind::TerminalOutput
                         && should_suppress_terminal_output(&entry.text)
                     {
-                        // Old empty rows and shell prompts are omitted from the
-                        // in-memory transcript without rewriting the user's journal.
                         continue;
                     }
                     total_text_bytes = total_text_bytes.saturating_add(entry.text.len());
@@ -285,6 +294,7 @@ impl Journal {
         }
 
         let journal_scan_offset = fs::metadata(&path)?.len();
+        let archive_searcher = Some(ArchiveSearcher::new(path.clone())?);
         Ok(Self {
             path,
             entries,
@@ -300,21 +310,23 @@ impl Journal {
             journal_scan_offset,
             postgres: None,
             postgres_search_results: Vec::new(),
+            archive_searcher,
         })
     }
 
     /// Opens PostgreSQL as the authoritative journal, importing legacy JSONL
     /// records only when the configured database is empty.
     pub fn open_postgres(path: PathBuf, database_url: String) -> io::Result<(Self, usize)> {
-        let (legacy_entries, skipped_corrupt_lines) = read_jsonl_for_import(&path)?;
+        // PostgreSQL imports the legacy JSONL source incrementally only when
+        // the database is empty; normal startup never materializes the archive.
         let (postgres, database_entries, imported_count) =
-            PostgresJournal::connect(database_url, legacy_entries)?;
+            PostgresJournal::connect(database_url, Some(path.clone()))?;
 
         let mut journal = Self {
             path,
             entries: Vec::new(),
             total_text_bytes: 0,
-            skipped_corrupt_lines,
+            skipped_corrupt_lines: 0,
             pending: Vec::new(),
             persisted_event_ids: HashSet::new(),
             persisted_record_ids: HashSet::new(),
@@ -325,10 +337,14 @@ impl Journal {
             journal_scan_offset: 0,
             postgres: Some(postgres),
             postgres_search_results: Vec::new(),
+            archive_searcher: None,
         };
 
         for mut entry in database_entries {
             entry.text = sanitize_entry_text(entry.kind, &entry.text);
+            if !is_hot_entry(&entry) {
+                continue;
+            }
             if let Some(event_id) = entry.event_id.as_ref() {
                 if !journal.persisted_event_ids.insert(event_id.clone()) { continue; }
             }
@@ -356,6 +372,44 @@ impl Journal {
         std::mem::take(&mut self.postgres_search_results)
     }
 
+    pub fn search_archive(&self, request_id: u64, query: String) -> io::Result<()> {
+        self.archive_searcher
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "archive scan is available with the JSONL backend"))?
+            .search(request_id, query)
+    }
+
+    pub fn drain_archive_search_results(&self) -> Vec<ArchiveSearchResult> {
+        self.archive_searcher
+            .as_ref()
+            .map(ArchiveSearcher::drain_results)
+            .unwrap_or_default()
+    }
+
+    pub fn load_archive_hit(&self, hit: &ArchiveSearchHit) -> io::Result<Entry> {
+        self.archive_searcher
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "archive record loading is unavailable"))?
+            .read_hit(hit)
+    }
+
+    /// Prune expired in-memory rows while leaving the durable archive untouched.
+    /// Call periodically so the hot window remains exactly the trailing 30 days.
+    pub fn prune_hot_cache(&mut self) -> usize {
+        let cutoff = Utc::now() - ChronoDuration::days(HOT_WINDOW_DAYS);
+        let before = self.entries.len();
+        self.entries.retain(|entry| is_hot_entry_at(entry, cutoff));
+        let removed = before.saturating_sub(self.entries.len());
+        if removed > 0 {
+            self.total_text_bytes = self.entries.iter().map(|entry| entry.text.len()).sum();
+            self.cached_event_ids = self.entries.iter().filter_map(|entry| entry.event_id.clone()).collect();
+            self.cached_record_ids = self.entries.iter().filter_map(|entry| entry.record_id.clone()).collect();
+            self.persisted_event_ids = self.cached_event_ids.clone();
+            self.persisted_record_ids = self.cached_record_ids.clone();
+        }
+        removed
+    }
+
     pub fn backend_label(&self) -> &'static str {
         if self.postgres.is_some() { "PostgreSQL" } else { "JSONL" }
     }
@@ -377,12 +431,15 @@ impl Journal {
             {
                 return Ok(());
             }
+            let hot = is_hot_entry(&entry);
             self.push_entry_to_memory(entry.clone());
-            if let Some(record_id) = entry.record_id.as_ref() {
-                self.cached_record_ids.insert(record_id.clone());
-            }
-            if let Some(event_id) = entry.event_id.as_ref() {
-                self.cached_event_ids.insert(event_id.clone());
+            if hot {
+                if let Some(record_id) = entry.record_id.as_ref() {
+                    self.cached_record_ids.insert(record_id.clone());
+                }
+                if let Some(event_id) = entry.event_id.as_ref() {
+                    self.cached_event_ids.insert(event_id.clone());
+                }
             }
             if let Err(error) = self.postgres.as_ref().expect("PostgreSQL backend configured").enqueue(entry.clone()) {
                 self.pending.push(entry);
@@ -416,6 +473,11 @@ impl Journal {
         self.refresh_external_entries_locked()?;
 
         if let Some(event_id) = event_id.as_ref() {
+            if !self.persisted_event_ids.contains(event_id)
+                && archive_contains_event_id(&self.path, event_id)?
+            {
+                return Ok(());
+            }
             if self.persisted_event_ids.contains(event_id) {
                 // Another SSH instance may have persisted this event first.
                 // If the shared-journal poll has not already mirrored it into
@@ -439,12 +501,15 @@ impl Journal {
             }
         }
 
+        let hot = is_hot_entry(&entry);
         self.push_entry_to_memory(entry.clone());
-        if let Some(event_id) = entry.event_id.as_ref() {
-            self.cached_event_ids.insert(event_id.clone());
-        }
-        if let Some(record_id) = record_id.as_ref() {
-            self.cached_record_ids.insert(record_id.clone());
+        if hot {
+            if let Some(event_id) = entry.event_id.as_ref() {
+                self.cached_event_ids.insert(event_id.clone());
+            }
+            if let Some(record_id) = record_id.as_ref() {
+                self.cached_record_ids.insert(record_id.clone());
+            }
         }
 
         // Never let a newer entry overtake an older entry whose disk append failed.
@@ -461,21 +526,25 @@ impl Journal {
 
         match append_jsonl(&self.path, &entry) {
             Ok(()) => {
-                if let Some(event_id) = entry.event_id.as_ref() {
-                    self.persisted_event_ids.insert(event_id.clone());
-                }
-                if let Some(record_id) = record_id.as_ref() {
-                    self.persisted_record_ids.insert(record_id.clone());
+                if hot {
+                    if let Some(event_id) = entry.event_id.as_ref() {
+                        self.persisted_event_ids.insert(event_id.clone());
+                    }
+                    if let Some(record_id) = record_id.as_ref() {
+                        self.persisted_record_ids.insert(record_id.clone());
+                    }
                 }
                 self.journal_scan_offset = fs::metadata(&self.path)?.len();
                 Ok(())
             }
             Err(error) => {
-                if let Some(event_id) = entry.event_id.as_ref() {
-                    self.pending_event_ids.insert(event_id.clone());
-                }
-                if let Some(record_id) = record_id.as_ref() {
-                    self.pending_record_ids.insert(record_id.clone());
+                if hot {
+                    if let Some(event_id) = entry.event_id.as_ref() {
+                        self.pending_event_ids.insert(event_id.clone());
+                    }
+                    if let Some(record_id) = record_id.as_ref() {
+                        self.pending_record_ids.insert(record_id.clone());
+                    }
                 }
                 self.pending.push(entry);
                 Err(error)
@@ -484,6 +553,9 @@ impl Journal {
     }
 
     fn push_entry_to_memory(&mut self, entry: Entry) {
+        if !is_hot_entry(&entry) {
+            return;
+        }
         self.total_text_bytes = self.total_text_bytes.saturating_add(entry.text.len());
         if let Some(previous) = self.entries.last_mut().filter(|previous| {
             can_merge_stream_delta(previous, &entry)
@@ -573,6 +645,7 @@ impl Journal {
         let mut line = Vec::new();
         let mut scanned = 0u64;
         let mut mirrored = 0usize;
+        let cutoff = Utc::now() - ChronoDuration::days(HOT_WINDOW_DAYS);
         loop {
             line.clear();
             let count = reader.read_until(b'\n', &mut line)?;
@@ -580,16 +653,26 @@ impl Journal {
                 break;
             }
             if let Ok(mut entry) = serde_json::from_slice::<Entry>(&line) {
-                let record_id_is_new = entry
-                    .record_id
-                    .as_ref()
-                    .map(|record_id| self.persisted_record_ids.insert(record_id.clone()));
+                if is_hot_entry_at(&entry, cutoff) {
+                    let record_id_is_new = entry
+                        .record_id
+                        .as_ref()
+                        .map(|record_id| self.persisted_record_ids.insert(record_id.clone()));
 
-                let should_mirror = if is_hermes_journal_kind(entry.kind) {
-                    if let Some(event_id) = entry.event_id.as_ref() {
-                        let is_new = self.persisted_event_ids.insert(event_id.clone());
-                        is_new && self.cached_event_ids.insert(event_id.clone())
-                    } else {
+                    let should_mirror = if is_hermes_journal_kind(entry.kind) {
+                        if let Some(event_id) = entry.event_id.as_ref() {
+                            let is_new = self.persisted_event_ids.insert(event_id.clone());
+                            is_new && self.cached_event_ids.insert(event_id.clone())
+                        } else {
+                            match (record_id_is_new, entry.record_id.as_ref()) {
+                                (Some(true), Some(record_id)) => {
+                                    self.cached_record_ids.insert(record_id.clone())
+                                }
+                                (None, None) => true,
+                                _ => false,
+                            }
+                        }
+                    } else if entry.kind == EntryKind::Note {
                         match (record_id_is_new, entry.record_id.as_ref()) {
                             (Some(true), Some(record_id)) => {
                                 self.cached_record_ids.insert(record_id.clone())
@@ -597,28 +680,18 @@ impl Journal {
                             (None, None) => true,
                             _ => false,
                         }
-                    }
-                } else if entry.kind == EntryKind::Note {
-                    match (record_id_is_new, entry.record_id.as_ref()) {
-                        (Some(true), Some(record_id)) => {
-                            self.cached_record_ids.insert(record_id.clone())
-                        }
-                        // Legacy journal rows created before record IDs were
-                        // introduced are still mirrored once by their byte offset.
-                        (None, None) => true,
-                        _ => false,
-                    }
-                } else {
-                    false
-                };
+                    } else {
+                        false
+                    };
 
-                if should_mirror {
-                    if let Some(record_id) = entry.record_id.as_ref() {
-                        self.cached_record_ids.insert(record_id.clone());
+                    if should_mirror {
+                        if let Some(record_id) = entry.record_id.as_ref() {
+                            self.cached_record_ids.insert(record_id.clone());
+                        }
+                        entry.text = sanitize_entry_text(entry.kind, &entry.text);
+                        self.push_entry_to_memory(entry);
+                        mirrored += 1;
                     }
-                    entry.text = sanitize_entry_text(entry.kind, &entry.text);
-                    self.push_entry_to_memory(entry);
-                    mirrored += 1;
                 }
             }
             scanned = scanned.saturating_add(count as u64);
@@ -626,6 +699,7 @@ impl Journal {
         self.journal_scan_offset = self.journal_scan_offset.saturating_add(scanned);
         Ok(mirrored)
     }
+
     /// Batch append is used for PTY output so high-volume commands do not force
     /// one fsync per output line. Entries enter the cache before any disk I/O.
     pub fn append_batch(&mut self, entries: Vec<Entry>) -> io::Result<()> {
@@ -650,11 +724,14 @@ impl Journal {
                 {
                     continue;
                 }
-                if let Some(record_id) = entry.record_id.as_ref() {
-                    self.cached_record_ids.insert(record_id.clone());
-                }
-                if let Some(event_id) = entry.event_id.as_ref() {
-                    self.cached_event_ids.insert(event_id.clone());
+                let hot = is_hot_entry(&entry);
+                if hot {
+                    if let Some(record_id) = entry.record_id.as_ref() {
+                        self.cached_record_ids.insert(record_id.clone());
+                    }
+                    if let Some(event_id) = entry.event_id.as_ref() {
+                        self.cached_event_ids.insert(event_id.clone());
+                    }
                 }
                 self.push_entry_to_memory(entry.clone());
                 accepted.push(entry);
@@ -676,23 +753,27 @@ impl Journal {
         self.refresh_external_entries_locked()?;
 
         for entry in &entries {
-            self.total_text_bytes = self.total_text_bytes.saturating_add(entry.text.len());
-            if let Some(event_id) = entry.event_id.as_ref() {
-                self.cached_event_ids.insert(event_id.clone());
+            let hot = is_hot_entry(entry);
+            self.push_entry_to_memory(entry.clone());
+            if hot {
+                if let Some(event_id) = entry.event_id.as_ref() {
+                    self.cached_event_ids.insert(event_id.clone());
+                }
+                if let Some(record_id) = entry.record_id.as_ref() {
+                    self.cached_record_ids.insert(record_id.clone());
+                }
             }
-            if let Some(record_id) = entry.record_id.as_ref() {
-                self.cached_record_ids.insert(record_id.clone());
-            }
-            self.entries.push(entry.clone());
         }
 
         if !self.pending.is_empty() {
             for entry in &entries {
-                if let Some(event_id) = entry.event_id.as_ref() {
-                    self.pending_event_ids.insert(event_id.clone());
-                }
-                if let Some(record_id) = entry.record_id.as_ref() {
-                    self.pending_record_ids.insert(record_id.clone());
+                if is_hot_entry(entry) {
+                    if let Some(event_id) = entry.event_id.as_ref() {
+                        self.pending_event_ids.insert(event_id.clone());
+                    }
+                    if let Some(record_id) = entry.record_id.as_ref() {
+                        self.pending_record_ids.insert(record_id.clone());
+                    }
                 }
             }
             self.pending.extend(entries);
@@ -700,11 +781,13 @@ impl Journal {
         }
 
         for entry in &entries {
-            if let Some(event_id) = entry.event_id.as_ref() {
-                self.pending_event_ids.insert(event_id.clone());
-            }
-            if let Some(record_id) = entry.record_id.as_ref() {
-                self.pending_record_ids.insert(record_id.clone());
+            if is_hot_entry(entry) {
+                if let Some(event_id) = entry.event_id.as_ref() {
+                    self.pending_event_ids.insert(event_id.clone());
+                }
+                if let Some(record_id) = entry.record_id.as_ref() {
+                    self.pending_record_ids.insert(record_id.clone());
+                }
             }
         }
 
@@ -973,6 +1056,38 @@ fn is_hermes_journal_kind(kind: EntryKind) -> bool {
             | EntryKind::HermesInterim
             | EntryKind::HermesSession
     )
+}
+
+fn is_hot_entry(entry: &Entry) -> bool {
+    is_hot_entry_at(entry, Utc::now() - ChronoDuration::days(HOT_WINDOW_DAYS))
+}
+
+fn is_hot_entry_at(entry: &Entry, cutoff: DateTime<Utc>) -> bool {
+    DateTime::parse_from_rfc3339(&entry.timestamp)
+        .map(|timestamp| timestamp.with_timezone(&Utc) >= cutoff)
+        // Preserve malformed legacy timestamps rather than silently hiding data.
+        .unwrap_or(true)
+}
+
+/// Historical event IDs are not retained in RAM. Check the durable archive
+/// only on a cache miss so retries of events older than the hot window remain
+/// idempotent without an archive-sized HashSet.
+fn archive_contains_event_id(path: &Path, event_id: &str) -> io::Result<bool> {
+    let encoded = serde_json::to_string(event_id).map_err(io::Error::other)?;
+    let file = File::open(path)?;
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        if line.contains(&encoded) {
+            if serde_json::from_str::<Entry>(&line)
+                .ok()
+                .and_then(|entry| entry.event_id)
+                .as_deref() == Some(event_id)
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn read_jsonl_for_import(path: &Path) -> io::Result<(Vec<Entry>, usize)> {
