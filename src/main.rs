@@ -1216,6 +1216,7 @@ fn drain_shared_journal_updates(
     let shared_journal_imported = app.journal.refresh_external_entries()?;
     app.apply_archive_search_results();
     app.apply_postgres_search_results();
+    app.apply_postgres_archive_record_results();
     if app.journal.entries.len() > previous_len {
         app.update_selected_tail_after_append(was_tracking_tail);
     }
