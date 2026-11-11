@@ -34,6 +34,7 @@ jobs:
           cargo test hermes_bridge::tool_event_tests
       - name: Smoke-test Hermes shell hook
         run: |
+          sh -n contrib/hermes/hooks/operator-capture
           python3 -m py_compile contrib/hermes/hooks/operator-capture.py
           inbox="$(mktemp -d)"
           printf '%s' '{"hook_event_name":"pre_llm_call","session_id":"ci-session","extra":{"turn_id":"ci-turn","user_message":"capture smoke test","conversation_history":[{"role":"system","content":"SYSTEM MUST NOT BE RECORDED"},{"role":"user","content":"earlier prompt"},{"role":"assistant","content":"earlier answer"},{"role":"tool","name":"terminal","content":"api_key=topsecret"}]}}' \
