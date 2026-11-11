@@ -4,16 +4,16 @@ A Rust terminal workspace combining a live **Debian shell**, a persistent comman
 
 ### Bidirectional clipboard over SSH
 
-STREENOTE synchronizes clipboard operations in both directions:
+OPERATOR synchronizes clipboard operations in both directions:
 
-- **Ctrl+C in STREENOTE** stores the copied text in a private per-user server cache at `~/.local/share/streenote/clipboard.txt` (mode 0600) and sends OSC 52 to update the attached client terminal clipboard.
+- **Ctrl+C in OPERATOR** stores the copied text in a private per-user server cache at `~/.local/share/operator/clipboard.txt` (mode 0600) and sends OSC 52 to update the attached client terminal clipboard.
 - **Ctrl+V / right-click in the input panel** first asks the client terminal for its clipboard using an OSC 52 read query. The text is cached on the current server and inserted at the input cursor.
-- If the terminal denies or does not support OSC 52 reads, STREENOTE falls back to the current server's clipboard cache and then server-side clipboard tools.
+- If the terminal denies or does not support OSC 52 reads, OPERATOR falls back to the current server's clipboard cache and then server-side clipboard tools.
 - The terminal's own paste shortcut continues to work through bracketed-paste events and also refreshes the server cache.
 
 OSC 52 clipboard **reads are security-sensitive**: a terminal may prompt for permission or disable them. They are supported by only some terminal emulators; OSC 52 writes are more widely supported. Over SSH or across multiple servers, OSC 52 is the mechanism that carries copied text through the client terminal; the private file cache is local to each server.
 
-For tmux, STREENOTE's OSC 52 writes from inside a pane need clipboard writes from pane applications enabled:
+For tmux, OPERATOR's OSC 52 writes from inside a pane need clipboard writes from pane applications enabled:
 
 ```tmux
 set -s set-clipboard on
@@ -31,11 +31,11 @@ set -s get-clipboard request
 
 Inside tmux, verify `tmux info | grep Ms` reports the OSC 52 capability. Depending on the outer terminal and `TERM`, you may need a `terminal-features` or `terminal-overrides` entry. Clipboard reads may prompt for approval and are subject to terminal-emulator security settings. See the [tmux clipboard guide](https://github.com/tmux/tmux/wiki/Clipboard) for terminal-specific setup.
 
-**Nested SSH / F1 workspace:** the F1 workspace forwards raw terminal input bytes to its child PTY, rather than parsing and re-encoding them. That lets OSC 52 clipboard replies from the client pass through an outer STREENOTE session into a second STREENOTE instance on another SSH server. F1 itself remains reserved to return to the parent transcript.
+**Nested SSH / F1 workspace:** the F1 workspace forwards raw terminal input bytes to its child PTY, rather than parsing and re-encoding them. That lets OSC 52 clipboard replies from the client pass through an outer OPERATOR session into a second OPERATOR instance on another SSH server. F1 itself remains reserved to return to the parent transcript.
 
 ## What's new: embedded Debian shell
 
-StreamNote starts the configured interactive shell (`$SHELL`, falling back to `/bin/bash`) in a real pseudo-terminal (PTY) when the application initializes. The PTY gives commands a TTY rather than plain stdin/stdout pipes.
+OPERATOR starts the configured interactive shell (`$SHELL`, falling back to `/bin/bash`) in a real pseudo-terminal (PTY) when the application initializes. The PTY gives commands a TTY rather than plain stdin/stdout pipes.
 
 - Type a shell command in the footer and press Enter.
 - Each non-secret submitted command is recorded once as a `CMD` journal entry. PTY input echo (including newline echo) is disabled, so the submitted command is not duplicated as an `OUT` row. Secret input is still omitted from the journal.
@@ -47,11 +47,11 @@ StreamNote starts the configured interactive shell (`$SHELL`, falling back to `/
 - The shell is launched at startup using the user's normal interactive shell configuration.
 - PTY dimensions follow the terminal window size.
 
-When STREENOTE is installed as an SSH login shell, SSH non-interactive requests are dispatched before the TUI starts. SFTP subsystem requests execute the configured external SFTP server directly with the original SSH stdin/stdout/stderr; legacy SCP server requests are delegated to Bash. Ordinary remote SSH commands are also run through Bash. No transfer data enters the STREENOTE PTYs, terminal renderer, transcript, or journal.
+When OPERATOR is installed as an SSH login shell, SSH non-interactive requests are dispatched before the TUI starts. SFTP subsystem requests execute the configured external SFTP server directly with the original SSH stdin/stdout/stderr; legacy SCP server requests are delegated to Bash. Ordinary remote SSH commands are also run through Bash. No transfer data enters the OPERATOR PTYs, terminal renderer, transcript, or journal.
 
-Use `/scp on`, `/scp off`, or `/scp status` inside STREENOTE to control SCP/SFTP passthrough for new SSH connections. The bottom hint line continuously displays `/scp ON` or `/scp OFF` so the active setting is visible without opening the status command. It is enabled by default and persisted in `~/.config/streenote/config.json` (or `$XDG_CONFIG_HOME/streenote/config.json`). The same file stores `theme_index`, `wrap_transcript`, and `show_banner`; F2–F10, Ctrl+W, and F12 save their changes immediately. Disabling it rejects recognized SFTP subsystem and legacy SCP server requests; it does not disable ordinary remote SSH commands.
+Use `/scp on`, `/scp off`, or `/scp status` inside OPERATOR to control SCP/SFTP passthrough for new SSH connections. The bottom hint line continuously displays `/scp ON` or `/scp OFF` so the active setting is visible without opening the status command. It is enabled by default and persisted in `~/.config/operator/config.json` (or `$XDG_CONFIG_HOME/operator/config.json`). The same file stores `theme_index`, `wrap_transcript`, and `show_banner`; F2–F10, Ctrl+W, and F12 save their changes immediately. Disabling it rejects recognized SFTP subsystem and legacy SCP server requests; it does not disable ordinary remote SSH commands.
 
-Press F1 to open a separate interactive terminal workspace backed by its own independent PTY and shell process. Full-screen programs such as `vim`, `nano`, `less`, `top`, and `htop` use the terminal emulator normally. Press F1 again to return to the transcript; closing the workspace does not interrupt STREENOTE's primary shell. Workspace terminal output is displayed directly and is not added to the journal. Opening, closing, and exiting the F1 workspace do not create journal entries. The primary STREENOTE shell and its transcript continue independently.
+Press F1 to open a separate interactive terminal workspace backed by its own independent PTY and shell process. Full-screen programs such as `vim`, `nano`, `less`, `top`, and `htop` use the terminal emulator normally. Press F1 again to return to the transcript; closing the workspace does not interrupt OPERATOR's primary shell. Workspace terminal output is displayed directly and is not added to the journal. Opening, closing, and exiting the F1 workspace do not create journal entries. The primary OPERATOR shell and its transcript continue independently.
 
 ## Modes
 
@@ -61,10 +61,10 @@ The default input mode is **TERMINAL**.
 - In TERMINAL mode, an ordinary submitted line runs in the Debian shell.
 - In NOTES mode, an ordinary submitted line becomes a note.
 - `/note text` saves a note without changing mode. `/note` by itself switches to NOTES mode.
-- Notes are shared live across every running STREENOTE terminal using the same journal path. A note submitted in one SSH terminal appears in the others on their next journal poll (normally within one 40 ms UI cycle). Stable row IDs and the journal's inter-process file lock prevent duplicate replication when terminals write concurrently. This live fan-out applies to notes; shell commands and raw terminal output are not echoed into other active terminals.
+- Notes are shared live across every running OPERATOR terminal using the same journal path. A note submitted in one SSH terminal appears in the others on their next journal poll (normally within one 40 ms UI cycle). Stable row IDs and the journal's inter-process file lock prevent duplicate replication when terminals write concurrently. This live fan-out applies to notes; shell commands and raw terminal output are not echoed into other active terminals.
 - Prefix a line with `!` to run it as a shell command even while in NOTES mode.
-- Recognized StreamNote commands (such as `/search`, `/save`, and `/stats`) are handled locally in either mode.
-- Absolute shell paths such as `/usr/bin/ls` are sent to the shell in TERMINAL mode; they are not mistaken for local StreamNote commands.
+- Recognized OPERATOR commands (such as `/search`, `/save`, and `/stats`) are handled locally in either mode.
+- Absolute shell paths such as `/usr/bin/ls` are sent to the shell in TERMINAL mode; they are not mistaken for local OPERATOR commands.
 
 ## Other features
 
@@ -88,96 +88,96 @@ The default input mode is **TERMINAL**.
 
 ## Hermes CLI conversation capture
 
-STREENOTE captures Hermes CLI prompts, assistant responses, tool calls/results, and live text-stream deltas in the same chronological JSONL journal as notes and shell activity. The active review plugin captures the original prompt through Hermes' native `pre_llm_call` hook, with independent `pre_api_request` and `post_llm_call` fallback observers; it fans each event out using the live socket registry. Session and turn identifiers correlate those events into expandable conversations; this uses Hermes hooks rather than scraping terminal rendering or maintaining a second conversation journal.
+OPERATOR captures Hermes CLI prompts, assistant responses, tool calls/results, and live text-stream deltas in the same chronological JSONL journal as notes and shell activity. The active review plugin captures the original prompt through Hermes' native `pre_llm_call` hook, with independent `pre_api_request` and `post_llm_call` fallback observers; it fans each event out using the live socket registry. Session and turn identifiers correlate those events into expandable conversations; this uses Hermes hooks rather than scraping terminal rendering or maintaining a second conversation journal.
 
-Every SSH-launched STREENOTE instance receives its own `STREENOTE_HERMES_INBOX` under `/run/user/<uid>/streenote/review-sessions/inboxes/<instance-id>/`. The variable name is centralized as `HERMES_INBOX_ENV` in `src/hermes_bridge.rs`; Rust injects the per-instance path into the primary shell PTY and the F1 workspace. The shared registry is also passed to Hermes as `STREENOTE_HERMES_REVIEW_SESSION_DIR`. No export in `.bashrc`, a shell startup file, or the F1 launcher is required.
+Every SSH-launched OPERATOR instance receives its own `OPERATOR_HERMES_INBOX` under `/run/user/<uid>/operator/review-sessions/inboxes/<instance-id>/`. The variable name is centralized as `HERMES_INBOX_ENV` in `src/hermes_bridge.rs`; Rust injects the per-instance path into the primary shell PTY and the F1 workspace. The shared registry is also passed to Hermes as `OPERATOR_HERMES_REVIEW_SESSION_DIR`. No export in `.bashrc`, a shell startup file, or the F1 launcher is required.
 
-The native review-plugin `pre_llm_call` observer fans the original prompt directly to every registered terminal inbox, and `pre_api_request` plus `post_llm_call` provide independent fallbacks; the shell capture hook remains a redundant prompt path and captures the initial history snapshot. Other shell-hook events fan every assistant event, tool call/result, and stream delta out into a separate private inbox for every live STREENOTE registration. Each TUI therefore imports its own copy instead of competing with other SSH windows to consume one shared queue. Every process appends into the same JSONL journal; an inter-process file lock and incremental event-ID scan ensure the shared file stores each captured event once. Each TUI also tails newly appended Hermes records from that shared journal into its own in-memory view, providing a second live-replication path if a private inbox delivery is delayed or missed. The F1 workspace uses the same per-instance inbox as its parent STREENOTE session. Events with the same Hermes `session_id` are grouped as one conversation across multiple `turn_id` values.
+The native review-plugin `pre_llm_call` observer fans the original prompt directly to every registered terminal inbox, and `pre_api_request` plus `post_llm_call` provide independent fallbacks; the shell capture hook remains a redundant prompt path and captures the initial history snapshot. Other shell-hook events fan every assistant event, tool call/result, and stream delta out into a separate private inbox for every live OPERATOR registration. Each TUI therefore imports its own copy instead of competing with other SSH windows to consume one shared queue. Every process appends into the same JSONL journal; an inter-process file lock and incremental event-ID scan ensure the shared file stores each captured event once. Each TUI also tails newly appended Hermes records from that shared journal into its own in-memory view, providing a second live-replication path if a private inbox delivery is delayed or missed. The F1 workspace uses the same per-instance inbox as its parent OPERATOR session. Events with the same Hermes `session_id` are grouped as one conversation across multiple `turn_id` values.
 
-A systemd-managed Hermes gateway and its hook subprocesses cannot inherit environment variables from an SSH PTY. When Hermes executes hooks through such a gateway, configure the hook command to export both `STREENOTE_HERMES_INBOX` (any absolute fallback inbox path) and `STREENOTE_HERMES_REVIEW_SESSION_DIR` (the shared review registry path) before executing `streenote-capture.py`. The shell capture hook uses the registry to fan events out to all active terminal inboxes. The review plugin independently captures `pre_llm_call` prompts in-process and retries capture from `pre_api_request` and `post_llm_call` when necessary, so the original prompt does not depend on the gateway's shell-hook subprocess or its inherited environment. Content-free `PROMPT_HOOK_INVOKED`, `PROMPT_FANOUT`, and `PROMPT_CAPTURE_SKIPPED` records identify which path ran and how many inboxes received the event. Both prompt paths use the same event ID when Hermes supplies `turn_id`, and the shared journal deduplicates the result. That wrapper is a gateway adapter only; Rust-side PTY injection remains the standard contract for programs and tools launched from STREENOTE shells.
+A systemd-managed Hermes gateway and its hook subprocesses cannot inherit environment variables from an SSH PTY. When Hermes executes hooks through such a gateway, configure the hook command to export both `OPERATOR_HERMES_INBOX` (any absolute fallback inbox path) and `OPERATOR_HERMES_REVIEW_SESSION_DIR` (the shared review registry path) before executing `operator-capture.py`. The shell capture hook uses the registry to fan events out to all active terminal inboxes. The review plugin independently captures `pre_llm_call` prompts in-process and retries capture from `pre_api_request` and `post_llm_call` when necessary, so the original prompt does not depend on the gateway's shell-hook subprocess or its inherited environment. Content-free `PROMPT_HOOK_INVOKED`, `PROMPT_FANOUT`, and `PROMPT_CAPTURE_SKIPPED` records identify which path ran and how many inboxes received the event. Both prompt paths use the same event ID when Hermes supplies `turn_id`, and the shared journal deduplicates the result. That wrapper is a gateway adapter only; Rust-side PTY injection remains the standard contract for programs and tools launched from OPERATOR shells.
 
 Install the hook script and a small gateway adapter:
 
 ```bash
 mkdir -p ~/.hermes/agent-hooks
-install -m 700 contrib/hermes/streenote-capture.py \
-  ~/.hermes/agent-hooks/streenote-capture.py
+install -m 700 contrib/hermes/operator-capture.py \
+  ~/.hermes/agent-hooks/operator-capture.py
 
-cat > ~/.hermes/agent-hooks/streenote-capture <<'SH'
+cat > ~/.hermes/agent-hooks/operator-capture <<'SH'
 #!/bin/sh
 : "${XDG_DATA_HOME:=$HOME/.local/share}"
-export STREENOTE_HERMES_INBOX="${STREENOTE_HERMES_INBOX:-$XDG_DATA_HOME/streenote/hermes-inbox}"
-export STREENOTE_HERMES_REVIEW_SESSION_DIR="${STREENOTE_HERMES_REVIEW_SESSION_DIR:-/run/user/$(id -u)/streenote/review-sessions}"
-exec "$HOME/.hermes/agent-hooks/streenote-capture.py"
+export OPERATOR_HERMES_INBOX="${OPERATOR_HERMES_INBOX:-$XDG_DATA_HOME/operator/hermes-inbox}"
+export OPERATOR_HERMES_REVIEW_SESSION_DIR="${OPERATOR_HERMES_REVIEW_SESSION_DIR:-/run/user/$(id -u)/operator/review-sessions}"
+exec "$HOME/.hermes/agent-hooks/operator-capture.py"
 SH
-chmod 700 ~/.hermes/agent-hooks/streenote-capture
+chmod 700 ~/.hermes/agent-hooks/operator-capture
 ```
 
-The wrapper explicitly supplies the fallback inbox and shared registry when hooks run in a separate systemd-managed gateway. The capture hook discovers the standard `/run/user/<uid>/streenote/review-sessions` registry itself, checks legacy socket/XDG/HOME paths as well, and unions inboxes from every valid candidate instead of stopping at the first partial registry. This avoids silently limiting prompts to the fallback inbox when the gateway was started before SSH terminals. Set `STREENOTE_HERMES_CAPTURE_DEBUG=1` in the hook environment temporarily to log the number of terminal inboxes reached (never prompt text). The hook fans events out to the inbox for every currently registered STREENOTE instance. Merge the following into the existing `hooks:` block in `~/.hermes/config.yaml`. Replace `/home/jordan` with the actual account home directory. Do not create a duplicate top-level `hooks:` key if one already exists.
+The wrapper explicitly supplies the fallback inbox and shared registry when hooks run in a separate systemd-managed gateway. The capture hook discovers the standard `/run/user/<uid>/operator/review-sessions` registry itself, checks legacy socket/XDG/HOME paths as well, and unions inboxes from every valid candidate instead of stopping at the first partial registry. This avoids silently limiting prompts to the fallback inbox when the gateway was started before SSH terminals. Set `OPERATOR_HERMES_CAPTURE_DEBUG=1` in the hook environment temporarily to log the number of terminal inboxes reached (never prompt text). The hook fans events out to the inbox for every currently registered OPERATOR instance. Merge the following into the existing `hooks:` block in `~/.hermes/config.yaml`. Replace `/home/jordan` with the actual account home directory. Do not create a duplicate top-level `hooks:` key if one already exists.
 
 ```yaml
 hooks:
   pre_tool_call:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   post_tool_call:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   pre_llm_call: 
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   post_llm_call:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   on_stream_start:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   on_stream_delta:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   on_stream_end:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   on_interim_message:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   on_session_start:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   on_session_end:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   on_session_finalize:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   on_session_reset:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   post_compaction:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 ```
 
-Hermes requests first-use approval for each hook event/command combination. Review and approve the STREENOTE capture script when prompted, then inspect the result:
+Hermes requests first-use approval for each hook event/command combination. Review and approve the OPERATOR capture script when prompted, then inspect the result:
 
 ```bash
 hermes hooks list
 hermes hooks doctor
 ```
 
-Rebuild and restart STREENOTE so its Rust-created PTYs receive the inbox variable, then launch Hermes from that shell. If your Hermes configuration routes hooks through a separate gateway service, point the hook command at a gateway wrapper that exports the same inbox path; see the process-boundary note above.
+Rebuild and restart OPERATOR so its Rust-created PTYs receive the inbox variable, then launch Hermes from that shell. If your Hermes configuration routes hooks through a separate gateway service, point the hook command at a gateway wrapper that exports the same inbox path; see the process-boundary note above.
 
 - The review plugin's native `pre_llm_call` hook captures Hermes' original `user_message`—before hook-injected skill/plugin context—as a `hermes_user` entry and writes it to every registered terminal inbox. If that hook omits the prompt, the plugin attempts the same capture from `pre_api_request` and `post_llm_call`, falling back to the last user message in conversation history when needed. The shell hook provides a redundant prompt capture plus initial history snapshot; stable event IDs prevent duplicate journal rows. Text-only prompts are preserved; for multimodal prompts, readable text parts are retained and image/audio/file payloads are represented by safe placeholders rather than storing binary data or data URLs.
 - Once per session, the first non-empty `conversation_history` is captured as a `hermes_history` entry (`HCTX`), allowing a resumed session to bring its earlier user/assistant/tool messages into the same thread. The shared journal preserves this history for terminals that connect later; subsequent turns append only their new prompt and conversation events.
@@ -196,50 +196,50 @@ Rebuild and restart STREENOTE so its Rust-created PTYs receive the inbox variabl
 - Full Markdown is retained in JSONL. Prior history snapshots appear as `HCTX`, interim messages as `HINT`, and session lifecycle events as `HSES`; they are included in the expanded thread and thread copy/export. The main transcript shows HUSR prompts but hides other Hermes events, including HCTX, HINT, and HSES. With an empty input bar, Enter on a highlighted HUSR row opens its complete conversation; when the input bar contains text, Enter submits that input instead. Ctrl+C on a highlighted HUSR row also opens its conversation. `/threads` opens the conversation index (Enter or Ctrl+C expands the selected thread). The expanded view includes user prompts, tool calls/results, and one uninterrupted `ASSISTANT - LIVE STREAM` block per active streamed turn, including while tools are running. Stream deltas across iterations are concatenated. Once a final assistant event arrives after the latest stream and tool activity, it replaces the live block so the completed answer appears once without duplication. If a turn is interrupted before a final assistant event arrives, its captured live text remains visible. The viewer follows new stream deltas automatically while it is open. `/view` remains available for an individual event's full body.
 - Hermes events use stable event IDs for retry deduplication. Those IDs are internal metadata, not journal partitions or visible session labels.
 
-Events are staged in `~/.local/share/streenote/hermes-inbox/ready` (or under `$XDG_DATA_HOME/streenote/hermes-inbox/ready`) with private directory/file permissions. STREENOTE imports them through its in-memory journal and normal append/retry path. Malformed or oversized events are moved to the inbox's `failed` directory.
+Events are staged in `~/.local/share/operator/hermes-inbox/ready` (or under `$XDG_DATA_HOME/operator/hermes-inbox/ready`) with private directory/file permissions. OPERATOR imports them through its in-memory journal and normal append/retry path. Malformed or oversized events are moved to the inbox's `failed` directory.
 
 Conversation prompts and answers may contain sensitive information. Protect the journal and its backups accordingly.
 
 ## Hermes final-answer review
 
-STREENOTE can hold Hermes' completed answer until an operator approves the original, edits it, or withholds it. This uses Hermes' `transform_llm_output` plugin hook registered with `hold_stream=True`; Hermes does not stream the unreviewed final answer to the client. The replacement text is returned through the same transform hook, so Hermes persists and delivers the edited response as its actual assistant answer. This does not run another LLM inference.
+OPERATOR can hold Hermes' completed answer until an operator approves the original, edits it, or withholds it. This uses Hermes' `transform_llm_output` plugin hook registered with `hold_stream=True`; Hermes does not stream the unreviewed final answer to the client. The replacement text is returned through the same transform hook, so Hermes persists and delivers the edited response as its actual assistant answer. This does not run another LLM inference.
 
 Install the plugin into the **user-level Hermes plugin directory** on the same host and Unix account that runs the Hermes gateway. A gateway does not load a plugin from the F1 working directory:
 
 ```bash
-mkdir -p ~/.hermes/plugins/streenote-review
-install -m 600 contrib/hermes/streenote-review/plugin.yaml \
-  ~/.hermes/plugins/streenote-review/plugin.yaml
-install -m 700 contrib/hermes/streenote-review/__init__.py \
-  ~/.hermes/plugins/streenote-review/__init__.py
-hermes plugins enable streenote-review
+mkdir -p ~/.hermes/plugins/operator-review
+install -m 600 contrib/hermes/operator-review/plugin.yaml \
+  ~/.hermes/plugins/operator-review/plugin.yaml
+install -m 700 contrib/hermes/operator-review/__init__.py \
+  ~/.hermes/plugins/operator-review/__init__.py
+hermes plugins enable operator-review
 ```
 
-Restart the Hermes gateway/process after installing and enabling the plugin. Every STREENOTE process publishes a private Unix socket and registration manifest in `/run/user/<uid>/streenote/review-sessions/`. The registry is mode `0700`; sockets and manifests are mode `0600`. This supports simultaneous SSH sessions under the same Unix account. Only the selected `/review on` terminal receives the editable review request; opted-out terminals are not contacted. The plugin acquires one available reviewer using a round-robin scheduler and a per-terminal OS file lock. A terminal can hold only one active review at a time; concurrent answers are assigned to other available reviewers or wait for a free slot. If a terminal disappears before accepting a request, the plugin tries another live reviewer. The OS releases a review lease automatically if the gateway callback exits or crashes. The selected reviewer alone can approve, edit, or reject. The final delivered text is returned directly to Hermes; a rejection withholds the answer. Other connected terminals remain in their normal interactive state. The native review-plugin hook captures each incoming prompt directly; the shell capture hook also fans tool events, assistant events, and text-stream deltas into private inboxes for every active terminal; event IDs and a shared journal lock prevent duplicate durable rows. Set `STREENOTE_HERMES_REVIEW_SESSION_DIR` to the same absolute directory in **both** the Hermes gateway and STREENOTE processes if you override the registry location. If you use the older `STREENOTE_HERMES_REVIEW_SOCKET` override, its parent directory is used as the base for `review-sessions/`. The transform hook waits synchronously for the selected operator; its socket-side deadline is nine minutes. Hermes' `plugins.hook_callback_timeout` setting does not govern this transform hook.
+Restart the Hermes gateway/process after installing and enabling the plugin. Every OPERATOR process publishes a private Unix socket and registration manifest in `/run/user/<uid>/operator/review-sessions/`. The registry is mode `0700`; sockets and manifests are mode `0600`. This supports simultaneous SSH sessions under the same Unix account. Only the selected `/review on` terminal receives the editable review request; opted-out terminals are not contacted. The plugin acquires one available reviewer using a round-robin scheduler and a per-terminal OS file lock. A terminal can hold only one active review at a time; concurrent answers are assigned to other available reviewers or wait for a free slot. If a terminal disappears before accepting a request, the plugin tries another live reviewer. The OS releases a review lease automatically if the gateway callback exits or crashes. The selected reviewer alone can approve, edit, or reject. The final delivered text is returned directly to Hermes; a rejection withholds the answer. Other connected terminals remain in their normal interactive state. The native review-plugin hook captures each incoming prompt directly; the shell capture hook also fans tool events, assistant events, and text-stream deltas into private inboxes for every active terminal; event IDs and a shared journal lock prevent duplicate durable rows. Set `OPERATOR_HERMES_REVIEW_SESSION_DIR` to the same absolute directory in **both** the Hermes gateway and OPERATOR processes if you override the registry location. If you use the older `OPERATOR_HERMES_REVIEW_SOCKET` override, its parent directory is used as the base for `review-sessions/`. The transform hook waits synchronously for the selected operator; its socket-side deadline is nine minutes. Hermes' `plugins.hook_callback_timeout` setting does not govern this transform hook.
 
-The plugin writes content-free diagnostics (no prompt or answer text) to `/run/user/<uid>/streenote/hermes-review.log` when that per-user runtime directory is available, so the Hermes gateway and all STREENOTE instances read the same log even with different `HOME` or `XDG_STATE_HOME` values. Otherwise it falls back to `$XDG_STATE_HOME/streenote/hermes-review.log`, or `$HOME/.local/state/streenote/hermes-review.log` when `XDG_STATE_HOME` is unset. The log is private to the user (directory mode `0700`, file mode `0600`). It records plugin registration, callback invocation, route selection, socket connection, request delivery, and the operator decision. `/review status` displays the latest recorded activity.
+The plugin writes content-free diagnostics (no prompt or answer text) to `/run/user/<uid>/operator/hermes-review.log` when that per-user runtime directory is available, so the Hermes gateway and all OPERATOR instances read the same log even with different `HOME` or `XDG_STATE_HOME` values. Otherwise it falls back to `$XDG_STATE_HOME/operator/hermes-review.log`, or `$HOME/.local/state/operator/hermes-review.log` when `XDG_STATE_HOME` is unset. The log is private to the user (directory mode `0700`, file mode `0600`). It records plugin registration, callback invocation, route selection, socket connection, request delivery, and the operator decision. `/review status` displays the latest recorded activity.
 
 To fail closed when the review listener is unavailable or the socket exchange fails, set this environment variable in the **Hermes gateway service environment** before restarting the gateway:
 
 ```bash
-systemctl --user set-environment STREENOTE_HERMES_REVIEW_REQUIRED=1
+systemctl --user set-environment OPERATOR_HERMES_REVIEW_REQUIRED=1
 hermes gateway restart
 ```
 
 With this setting, a missing review pool raises an error and withholds the final answer. An individual `/review off` terminal is simply removed from reviewer eligibility; other connected terminals with `/review on` continue to receive and review responses. If every connected terminal has review disabled, the original answer is broadcast and passed through unchanged. Fail-closed mode protects against unavailable review infrastructure; it does not override the deliberate choice to disable review in every terminal. To restore optional/pass-through behavior:
 
 ```bash
-systemctl --user unset-environment STREENOTE_HERMES_REVIEW_REQUIRED
+systemctl --user unset-environment OPERATOR_HERMES_REVIEW_REQUIRED
 hermes gateway restart
 ```
 
-In STREENOTE, run:
+In OPERATOR, run:
 
 ```text
 /review status
 /review on
 ```
-Reviewer availability is **per terminal session**. New STREENOTE terminals join the active reviewer pool by default. An operator who is busy or unavailable can run `/review off`; this immediately removes only that terminal from new assignments. Running `/review on` rejoins the pool at any time. These commands do not change other terminals and are not written as a shared preference. `/review status` reports this terminal's setting and recent dispatcher diagnostics. The status bar under the STREENOTE banner shows the live number of enabled, connected reviewers across all SSH terminals. It refreshes from the shared session registry every 300 ms, counts only enabled registrations with a live process and socket, and updates on every terminal after an operator changes `/review on` or `/review off`. The adjacent reviews-handled counter is local to that STREENOTE terminal session: it increments when its operator explicitly releases the original answer, releases an edited answer, or withholds a response. It does not include reviews completed by other terminals or reviews that expire without an operator decision; it resets when that STREENOTE process restarts.
+Reviewer availability is **per terminal session**. New OPERATOR terminals join the active reviewer pool by default. An operator who is busy or unavailable can run `/review off`; this immediately removes only that terminal from new assignments. Running `/review on` rejoins the pool at any time. These commands do not change other terminals and are not written as a shared preference. `/review status` reports this terminal's setting and recent dispatcher diagnostics. The status bar under the OPERATOR banner shows the live number of enabled, connected reviewers across all SSH terminals. It refreshes from the shared session registry every 300 ms, counts only enabled registrations with a live process and socket, and updates on every terminal after an operator changes `/review on` or `/review off`. The adjacent reviews-handled counter is local to that OPERATOR terminal session: it increments when its operator explicitly releases the original answer, releases an edited answer, or withholds a response. It does not include reviews completed by other terminals or reviews that expire without an operator decision; it resets when that OPERATOR process restarts.
 
 Hermes assigns each held final answer to one available `/review on` terminal using a round-robin scheduler. A terminal can handle one review at a time. Concurrent answers are assigned to other eligible terminals when possible; if all eligible terminals are busy, they wait for an available review slot. The dispatcher refreshes each terminal's live registration while waiting, so an operator who runs `/review off` is skipped even when a request is queued. If every connected operator has opted out, Hermes passes the original response through unchanged. The selected reviewer alone sees the red review editor; every other terminal continues operating normally.
 
@@ -248,7 +248,7 @@ Hermes assigns each held final answer to one available `/review on` terminal usi
 - **F4** withholds the answer. This does not automatically ask Hermes to regenerate; send a follow-up instruction as a new turn when appropriate.
 Use Ctrl+A to select the complete held answer; type or paste to replace it. Backspace/Delete remove the selection. The arrow keys collapse the selection and move the cursor. Home/End move within a line, Ctrl+Home/End move to the document boundaries, and Enter inserts a newline. Ctrl+V requests the SSH client's clipboard through OSC 52; Shift+Insert is also supported. The terminal emulator's own Paste command (commonly Ctrl+Shift+V) inserts the pasted text directly through bracketed paste. The review footer displays the paste result or the reason clipboard access was unavailable. Escape does not dismiss or release a held answer. Turning `/review off` while this terminal already owns a pending review prevents future assignments but does not cancel that review; finish it with F2, F3, or F4.
 
-The STREENOTE listener waits up to nine minutes. If the selected reviewer rejects the response, the connection fails after accepting the request, or the review deadline expires, the plugin withholds the draft rather than releasing it. If no STREENOTE listener exists, the plugin passes responses through unchanged by default; with `STREENOTE_HERMES_REVIEW_REQUIRED=1`, it withholds them instead. A single `/review off` terminal does not bypass another terminal's active reviewer; pass-through occurs only when every registered terminal has review disabled.
+The OPERATOR listener waits up to nine minutes. If the selected reviewer rejects the response, the connection fails after accepting the request, or the review deadline expires, the plugin withholds the draft rather than releasing it. If no OPERATOR listener exists, the plugin passes responses through unchanged by default; with `OPERATOR_HERMES_REVIEW_REQUIRED=1`, it withholds them instead. A single `/review off` terminal does not bypass another terminal's active reviewer; pass-through occurs only when every registered terminal has review disabled.
 
 This gate covers the **final assistant response**. Hermes commentary between tool calls is not passed through this transform and is hidden on held turns. Tool progress and reasoning are separate display surfaces and are not covered by this approval gate; adjust Hermes' `display.tool_progress` and `display.show_reasoning` settings separately if those surfaces also need to be hidden.
 
@@ -262,10 +262,10 @@ This gate covers the **final assistant response**. Hermes commentary between too
 
 ## Persistent settings
 
-STREENOTE stores visual and SSH-transfer preferences together in:
+OPERATOR stores visual and SSH-transfer preferences together in:
 
 ```text
-~/.config/streenote/config.json
+~/.config/operator/config.json
 ```
 
 Example:
@@ -298,7 +298,7 @@ cargo run --release -- --file ~/Notes/work-log.jsonl
 By default, the journal is stored at:
 
 ```text
-~/.local/share/streenote/journal.jsonl
+~/.local/share/operator/journal.jsonl
 ```
 
 ## Color themes
@@ -317,7 +317,7 @@ Switch palettes directly with the unmodified **F2** through **F10** keys. Each k
 | `F9` | 8 | Arctic Blue |
 | `F10` | 9 | Monochrome Max |
 
-The palettes are built into StreamNote and require no external theme package or configuration download. F1 opens a full-screen interactive terminal workspace with a separate PTY and shell process; press F1 again to return. The primary STREENOTE shell continues running independently. F12 shows or hides the ASCII-art banner.
+The palettes are built into OPERATOR and require no external theme package or configuration download. F1 opens a full-screen interactive terminal workspace with a separate PTY and shell process; press F1 again to return. The primary OPERATOR shell continues running independently. F12 shows or hides the ASCII-art banner.
 
 ## Commands
 
@@ -373,7 +373,7 @@ The palettes are built into StreamNote and require no external theme package or 
 | `Ctrl+S` | Save / retry pending writes |
 | `Ctrl+D` | Send end-of-input to the shell when the terminal input is empty |
 | `Esc` | Clear the current input line; with an empty line, clear an active search |
-| `Ctrl+Q` | Quit StreamNote |
+| `Ctrl+Q` | Quit OPERATOR |
 | `F12` | Show or hide the ASCII-art banner |
 
 ## Journal format
@@ -388,7 +388,7 @@ Each line in `journal.jsonl` is an independent JSON object. Example:
 
 The transcript renders each stored RFC 3339 timestamp as local `YYYY-MM-DD HH:MM:SS ±HH:MM`, so the date, time and UTC offset are visible for every row.
 
-Kinds include `note`, `terminal_command`, `terminal_output`, `system`, `hermes_user`, `hermes_assistant`, `hermes_tool_call`, `hermes_tool_result`, `hermes_stream_start`, `hermes_stream_delta`, `hermes_stream_end`, `hermes_history`, `hermes_interim`, and `hermes_session`. Hermes records also carry optional session, turn, tool-call, and iteration identifiers. Old records without `kind` are treated as notes. The journal is append-only from the application's perspective; malformed lines are skipped at load and counted in the startup status. It is never truncated by StreamNote. Input entered while terminal echo is off is intentionally not included.
+Kinds include `note`, `terminal_command`, `terminal_output`, `system`, `hermes_user`, `hermes_assistant`, `hermes_tool_call`, `hermes_tool_result`, `hermes_stream_start`, `hermes_stream_delta`, `hermes_stream_end`, `hermes_history`, `hermes_interim`, and `hermes_session`. Hermes records also carry optional session, turn, tool-call, and iteration identifiers. Old records without `kind` are treated as notes. The journal is append-only from the application's perspective; malformed lines are skipped at load and counted in the startup status. It is never truncated by OPERATOR. Input entered while terminal echo is off is intentionally not included.
 
 ## Cache and persistence semantics
 
@@ -398,11 +398,11 @@ There is no literal infinite memory on a finite computer. The in-memory vector g
 
 ## Security and privacy
 
-Commands run with the permissions of the user who launched StreamNote. Terminal output is saved to the journal, which may include paths, host information, command output, or other sensitive data. When the PTY's ECHO flag is off (as with normal `sudo` password prompts), StreamNote masks the footer and does not save the submitted input to the command journal or input history. This is a safeguard, not a complete secret-management system: avoid entering secrets as ordinary command arguments, and remember that a program can itself print sensitive data to its output. The journal file inherits the creating user's umask and directory permissions.
+Commands run with the permissions of the user who launched OPERATOR. Terminal output is saved to the journal, which may include paths, host information, command output, or other sensitive data. When the PTY's ECHO flag is off (as with normal `sudo` password prompts), OPERATOR masks the footer and does not save the submitted input to the command journal or input history. This is a safeguard, not a complete secret-management system: avoid entering secrets as ordinary command arguments, and remember that a program can itself print sensitive data to its output. The journal file inherits the creating user's umask and directory permissions.
 
 ## Implementation notes
 
-- PTY stdout and stderr are merged by design; StreamNote records what the shell terminal visibly emits.
+- PTY stdout and stderr are merged by design; OPERATOR records what the shell terminal visibly emits.
 - ANSI escape sequences are removed before storage. This keeps the transcript searchable and avoids injecting terminal control sequences into the UI.
 - The full timestamp is retained in the journal and shown in local time with its UTC offset. Mouse selection operates on rendered transcript columns; OSC 52 copying depends on terminal clipboard support.
 - PTY data can be emitted in partial chunks. An unfinished visible prompt/line is flushed after a brief idle interval and again when the shell exits.
