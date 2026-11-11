@@ -1020,6 +1020,11 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     // Paint the watermark only into unused cells, so transcript text, selections,
     // and wide-character continuation cells always remain untouched.
 
+    if app.show_canada_watermark {
+        draw_maple_watermark(frame, inner, theme);
+    }
+}
+
 fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     let query = app.search_query.as_deref().unwrap_or("");
     let title = format!(
@@ -1125,10 +1130,6 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
     );
 }
 
-    if app.show_canada_watermark {
-        draw_maple_watermark(frame, inner, theme);
-    }
-}
 
 fn draw_maple_watermark(frame: &mut Frame, area: Rect, theme: Theme) {
     const WATERMARK_ART: [&str; 17] = [
