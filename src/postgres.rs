@@ -775,8 +775,11 @@ async fn search_records(pool: &PgPool, raw_query: &str, request_id: u64) -> Sear
             "rank DESC, d.entry_id DESC",
         ),
         SearchMode::Fuzzy => (
-            "lower(d.body) % lower($1)",
-            "similarity(lower(d.body), lower($1))",
+            // Compare the query against word-sized extents of the document.
+            // Whole-document similarity (%/similarity) penalizes long journal
+            // entries even when one word is an excellent typo-tolerant match.
+            "lower($1) <% lower(d.body)",
+            "word_similarity(lower($1), lower(d.body))",
             "substring(d.body from greatest(position(lower($1) in lower(d.body)) - 100, 1) for 260)",
             "rank DESC, d.entry_id DESC",
         ),
@@ -1233,6 +1236,46 @@ mod tests {
             }
             assert!(completed, "PostgreSQL search mode {query:?} timed out");
         }
+
+        // Regression: fuzzy search must match a misspelled word inside a
+        // long transcript document, not compare the query to the entire body.
+        let fuzzy_text = format!(
+            "Client 192.168.50.54 connected to interactive shell (/bin/bash); commands are recorded once; PTY input echo is disabled. {}",
+            "additional transcript context ".repeat(12)
+        );
+        let fuzzy_entry = Entry::with_kind(EntryKind::Note, fuzzy_text);
+        let fuzzy_record_id = fuzzy_entry.record_id.clone().expect("fuzzy fixture record ID");
+        writer.enqueue(fuzzy_entry).expect("queue fuzzy-search fixture");
+        writer.flush().expect("commit fuzzy-search fixture");
+
+        let request_id = reader
+            .search("--fuzzy conected kind:note".to_string())
+            .expect("submit misspelled word-similarity search");
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        let mut found_fuzzy_record = false;
+        while std::time::Instant::now() < deadline && !found_fuzzy_record {
+            for update in reader.drain_updates() {
+                if let Update::SearchResult(result) = update {
+                    if result.request_id == request_id {
+                        assert!(
+                            result.error.is_none(),
+                            "fuzzy search failed: {:?}",
+                            result.error
+                        );
+                        found_fuzzy_record = result.hits.iter().any(|hit| {
+                            hit.record_id == fuzzy_record_id && hit.rank > 0.0
+                        });
+                    }
+                }
+            }
+            if !found_fuzzy_record {
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+        assert!(
+            found_fuzzy_record,
+            "fuzzy search did not find 'connected' from the misspelling 'conected' in a long document"
+        );
 
         // The logical search document must reassemble deltas so a substring
         // split across adjacent Hermes stream events remains searchable.
