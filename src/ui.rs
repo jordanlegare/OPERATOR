@@ -1077,21 +1077,37 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
                 .unwrap_or_else(|| entry_display_text(entry));
             let preview = preview.split_whitespace().collect::<Vec<_>>().join(" ");
             let preview = preview.chars().take(320).collect::<String>();
-            let kind = match entry.kind {
-                EntryKind::Note => "NOTE",
-                EntryKind::TerminalCommand => "COMMAND",
-                EntryKind::TerminalOutput => "OUTPUT",
-                EntryKind::System => "SYSTEM",
-                EntryKind::HermesUser => "HERMES USER",
-                EntryKind::HermesAssistant => "HERMES ASSISTANT",
-                EntryKind::HermesToolCall => "HERMES TOOL",
-                EntryKind::HermesToolResult => "HERMES RESULT",
-                EntryKind::HermesStreamStart => "STREAM START",
-                EntryKind::HermesStreamDelta => "STREAM DELTA",
-                EntryKind::HermesStreamEnd => "STREAM END",
-                EntryKind::HermesHistory => "HERMES HISTORY",
-                EntryKind::HermesInterim => "HERMES INTERIM",
-                EntryKind::HermesSession => "HERMES SESSION",
+            let kind = match app.search_kinds.get(&index).map(String::as_str).unwrap_or("") {
+                "note" => "NOTE",
+                "terminal_command" => "COMMAND",
+                "terminal_output" => "OUTPUT",
+                "system" => "SYSTEM",
+                "hermes_user" => "HERMES USER",
+                "hermes_assistant" => "HERMES ASSISTANT",
+                "hermes_tool_call" => "HERMES TOOL",
+                "hermes_tool_result" => "HERMES RESULT",
+                "hermes_stream_start" => "STREAM START",
+                "hermes_stream_delta" => "STREAM DELTA",
+                "hermes_stream_end" => "STREAM END",
+                "hermes_history" => "HERMES HISTORY",
+                "hermes_interim" => "HERMES INTERIM",
+                "hermes_session" => "HERMES SESSION",
+                _ => match entry.kind {
+                    EntryKind::Note => "NOTE",
+                    EntryKind::TerminalCommand => "COMMAND",
+                    EntryKind::TerminalOutput => "OUTPUT",
+                    EntryKind::System => "SYSTEM",
+                    EntryKind::HermesUser => "HERMES USER",
+                    EntryKind::HermesAssistant => "HERMES ASSISTANT",
+                    EntryKind::HermesToolCall => "HERMES TOOL",
+                    EntryKind::HermesToolResult => "HERMES RESULT",
+                    EntryKind::HermesStreamStart => "STREAM START",
+                    EntryKind::HermesStreamDelta => "STREAM DELTA",
+                    EntryKind::HermesStreamEnd => "STREAM END",
+                    EntryKind::HermesHistory => "HERMES HISTORY",
+                    EntryKind::HermesInterim => "HERMES INTERIM",
+                    EntryKind::HermesSession => "HERMES SESSION",
+                }
             };
             lines.push(Line::from(vec![
                 Span::styled(
@@ -1099,7 +1115,7 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
                     Style::default().fg(theme.primary).patch(row_style),
                 ),
                 Span::styled(
-                    format!("{}  ", format_timestamp(&entry.timestamp)),
+                    format!("{}  ", format_timestamp(app.search_timestamps.get(&index).map(String::as_str).unwrap_or(&entry.timestamp))),
                     Style::default().fg(theme.success).patch(row_style),
                 ),
                 Span::styled(
