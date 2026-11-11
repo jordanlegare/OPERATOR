@@ -370,7 +370,7 @@ impl Journal {
         }
 
         if self.postgres.is_some() {
-            let _ = self.refresh_external_entries();
+            let refresh_error = self.refresh_external_entries().err();
             entry.ensure_record_id();
             if entry.record_id.as_ref().is_some_and(|id| self.cached_record_ids.contains(id))
                 || entry.event_id.as_ref().is_some_and(|id| self.cached_event_ids.contains(id))
@@ -386,6 +386,9 @@ impl Journal {
             }
             if let Err(error) = self.postgres.as_ref().expect("PostgreSQL backend configured").enqueue(entry.clone()) {
                 self.pending.push(entry);
+                return Err(error);
+            }
+            if let Some(error) = refresh_error {
                 return Err(error);
             }
             return Ok(());
@@ -638,7 +641,7 @@ impl Journal {
         }
 
         if self.postgres.is_some() {
-            let _ = self.refresh_external_entries();
+            let refresh_error = self.refresh_external_entries().err();
             let mut accepted = Vec::with_capacity(entries.len());
             for mut entry in entries {
                 entry.ensure_record_id();
@@ -661,6 +664,9 @@ impl Journal {
             }
             if let Err(error) = self.postgres.as_ref().expect("PostgreSQL backend configured").enqueue_batch(accepted.clone()) {
                 self.pending.extend(accepted);
+                return Err(error);
+            }
+            if let Some(error) = refresh_error {
                 return Err(error);
             }
             return Ok(());
