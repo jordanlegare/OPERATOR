@@ -362,7 +362,7 @@ impl Journal {
 
     /// Adds to the in-memory cache first, then persists the record.
     /// No cache limit or truncation is applied. A failed disk write stays queued for retry.
-    pub fn append(&mut self, entry: Entry) -> io::Result<()> {
+    pub fn append(&mut self, mut entry: Entry) -> io::Result<()> {
         if entry.kind == EntryKind::TerminalOutput
             && should_suppress_terminal_output(&entry.text)
         {
