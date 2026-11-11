@@ -45,3 +45,7 @@ CREATE INDEX IF NOT EXISTS operator_journal_search_trgm_idx
 
 CREATE INDEX IF NOT EXISTS operator_journal_search_entry_idx
     ON operator_journal_search_documents (entry_id);
+
+-- Supports loading a full historical search result by its stable record ID.
+CREATE INDEX IF NOT EXISTS operator_journal_search_record_idx
+    ON operator_journal_search_documents (record_id);
