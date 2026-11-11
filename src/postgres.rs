@@ -1074,18 +1074,48 @@ async fn run_worker(
                     }
                     Some(Command::FetchRecord { request_id, record_id }) => {
                         let result = async {
-                            let payload: Option<String> = sqlx::query_scalar(
-                                "SELECT payload::text FROM operator_journal_entries WHERE record_id = $1"
+                            let row = sqlx::query(
+                                r#"SELECT e.payload::text AS payload,
+                                          d.body AS indexed_body,
+                                          d.kind AS indexed_kind,
+                                          d.occurred_at AS indexed_at
+                                   FROM operator_journal_entries e
+                                   LEFT JOIN operator_journal_search_documents d
+                                     ON d.record_id = e.record_id
+                                   WHERE e.record_id = $1
+                                   LIMIT 1"#
                             )
                             .bind(&record_id)
                             .fetch_optional(&pool)
                             .await
-                            .map_err(|error| format!("fetch historical PostgreSQL record: {error}"))?;
-                            let payload = payload.ok_or_else(|| {
-                                format!("archive record {record_id} no longer exists")
-                            })?;
-                            serde_json::from_str::<Entry>(&payload)
-                                .map_err(|error| format!("decode historical PostgreSQL record: {error}"))
+                            .map_err(|error| format!("fetch historical PostgreSQL record: {error}"))?
+                            .ok_or_else(|| format!("archive record {record_id} no longer exists"))?;
+
+                            let payload: String = row.try_get("payload")
+                                .map_err(|error| format!("read historical PostgreSQL payload: {error}"))?;
+                            let mut entry = serde_json::from_str::<Entry>(&payload)
+                                .map_err(|error| format!("decode historical PostgreSQL record: {error}"))?;
+
+                            // A Hermes stream's search document is its logical,
+                            // reconstructed message. Use that body for the
+                            // selected archive result instead of returning only
+                            // the first token-delta row.
+                            let indexed_body: Option<String> = row.try_get("indexed_body")
+                                .map_err(|error| format!("read indexed historical body: {error}"))?;
+                            if let Some(body) = indexed_body {
+                                entry.text = body;
+                            }
+                            let indexed_kind: Option<String> = row.try_get("indexed_kind")
+                                .map_err(|error| format!("read indexed historical kind: {error}"))?;
+                            if let Some(kind) = indexed_kind.as_deref().and_then(entry_kind_from_name) {
+                                entry.kind = kind;
+                            }
+                            let indexed_at: Option<DateTime<Utc>> = row.try_get("indexed_at")
+                                .map_err(|error| format!("read indexed historical timestamp: {error}"))?;
+                            if let Some(timestamp) = indexed_at {
+                                entry.timestamp = timestamp.to_rfc3339();
+                            }
+                            Ok(entry)
                         }.await;
                         let _ = updates.send(Update::ArchiveRecord { request_id, result });
                     }
@@ -1194,6 +1224,26 @@ async fn export_jsonl_from_database(pool: &PgPool, destination: &Path) -> Result
         format!("publish JSONL export: {error}")
     })?;
     Ok(())
+}
+
+fn entry_kind_from_name(kind: &str) -> Option<EntryKind> {
+    Some(match kind {
+        "note" => EntryKind::Note,
+        "terminal_command" => EntryKind::TerminalCommand,
+        "terminal_output" => EntryKind::TerminalOutput,
+        "system" => EntryKind::System,
+        "hermes_user" => EntryKind::HermesUser,
+        "hermes_assistant" => EntryKind::HermesAssistant,
+        "hermes_tool_call" => EntryKind::HermesToolCall,
+        "hermes_tool_result" => EntryKind::HermesToolResult,
+        "hermes_stream_start" => EntryKind::HermesStreamStart,
+        "hermes_stream_delta" => EntryKind::HermesStreamDelta,
+        "hermes_stream_end" => EntryKind::HermesStreamEnd,
+        "hermes_history" => EntryKind::HermesHistory,
+        "hermes_interim" => EntryKind::HermesInterim,
+        "hermes_session" => EntryKind::HermesSession,
+        _ => return None,
+    })
 }
 
 fn entry_kind_name(kind: EntryKind) -> &'static str {
