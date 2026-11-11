@@ -1826,8 +1826,7 @@ impl App {
                 };
                 match self.journal.export_plain_text(&destination) {
                     Ok(()) => self.status = format!(
-                        "Exported {} entries to {}",
-                        self.journal.entries.len(),
+                        "Exported the complete journal archive to {}",
                         destination.display()
                     ),
                     Err(error) => self.status = format!("Export failed: {error}"),
