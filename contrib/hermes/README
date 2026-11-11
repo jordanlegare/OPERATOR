@@ -1,0 +1,3 @@
+streenote-review directory and it's content go in ~/.hermes/plugins
+
+the ~/.hermes/hooks directory should contains the files within this hook folder.
