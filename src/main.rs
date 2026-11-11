@@ -2040,15 +2040,25 @@ fn handle_key(
             KeyCode::Char('q') if modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
             KeyCode::Char('s') if modifiers.contains(KeyModifiers::CONTROL) => app.save(),
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(index) = app.active_match.and_then(|position| app.matches.get(position).copied()) {
-                    if let Some(entry) = app.journal.entries.get(index) {
-                        if entry.text.len() > 60_000 {
-                            app.status = "Search result exceeds the 60 KB terminal clipboard limit.".to_string();
-                        } else {
-                            match copy_to_terminal_clipboard(&entry.text) {
-                                Ok(()) => app.status = format!("Copied {} characters from search result.", entry.text.chars().count()),
-                                Err(error) => app.status = format!("Could not copy search result: {error}"),
-                            }
+                let selected = app.active_match.and_then(|position| {
+                    let hit = app.search_hits.get(position)?;
+                    let local = app.search_hit_entry_indices.get(position).copied().flatten();
+                    let text = local
+                        .and_then(|index| app.journal.entries.get(index).map(|entry| entry.text.clone()))
+                        .unwrap_or_else(|| hit.snippet.clone());
+                    Some((text, local.is_some()))
+                });
+                if let Some((text, full_record)) = selected {
+                    if text.len() > 60_000 {
+                        app.status = "Search result exceeds the 60 KB terminal clipboard limit.".to_string();
+                    } else {
+                        match copy_to_terminal_clipboard(&text) {
+                            Ok(()) => app.status = format!(
+                                "Copied {} characters from {} search result.",
+                                text.chars().count(),
+                                if full_record { "full" } else { "indexed snippet" }
+                            ),
+                            Err(error) => app.status = format!("Could not copy search result: {error}"),
                         }
                     }
                 }
