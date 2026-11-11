@@ -2029,6 +2029,36 @@ fn handle_key(
     }
 
     // Unmodified F2-F10 select the nine built-in color themes.
+    // The dedicated search workspace owns transcript navigation until Escape.
+    // The main event loop continues capturing shell and peer journal activity.
+    if app.search_view {
+        match code {
+            KeyCode::Esc => app.exit_search_view(),
+            KeyCode::Up => {
+                let current = app.active_match.unwrap_or(0);
+                app.select_search_result(current.saturating_sub(1));
+            }
+            KeyCode::Down => {
+                let current = app.active_match.unwrap_or(0);
+                if !app.matches.is_empty() {
+                    app.select_search_result(current.saturating_add(1).min(app.matches.len() - 1));
+                }
+            }
+            KeyCode::PageUp => app.scroll_up(app.feed_viewport_height.max(1)),
+            KeyCode::PageDown => app.scroll_down(app.feed_viewport_height.max(1)),
+            KeyCode::Home => app.select_search_result(0),
+            KeyCode::End => app.select_search_result(app.matches.len().saturating_sub(1)),
+            KeyCode::Char('n') => app.next_match(),
+            KeyCode::Char('N') => app.previous_match(),
+            KeyCode::Enter => app.open_active_search_result(),
+            KeyCode::Left if modifiers.contains(KeyModifiers::ALT) => app.scroll_feed_left(8),
+            KeyCode::Right if modifiers.contains(KeyModifiers::ALT) => app.scroll_feed_right(8),
+            _ => {}
+        }
+        return Ok(false);
+    }
+
+
     if let Some(number) = theme_number_from_key(code, modifiers) {
         app.set_theme(number);
         return Ok(false);
@@ -2097,11 +2127,14 @@ fn handle_key(
 
     match code {
         KeyCode::Esc => {
-            if !app.input.is_empty() {
+            if app.search_view {
+                app.exit_search_view();
+            } else if !app.input.is_empty() {
                 app.clear_input();
                 app.status = "Input line cleared.".to_string();
             } else if app.search_query.is_some() {
                 app.clear_search();
+                app.jump_to_latest();
             } else {
                 app.show_help = false;
             }
