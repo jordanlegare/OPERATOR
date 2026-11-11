@@ -118,6 +118,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start review routing before the PTY so its identity can be inherited by
     // the interactive shell and Hermes' pre_llm_call capture hook.
     let mut review_server = HermesReviewServer::start()?;
+    paths::set_compatible_env(
+        "OPERATOR_HERMES_REVIEW_SOCKET",
+        hermes_review::default_review_socket_path(),
+    );
     if let Some(instance_id) = review_server.instance_id() {
         if let Some(registry_dir) = review_server.session_registry_dir() {
             paths::set_compatible_env("OPERATOR_HERMES_REVIEW_SESSION_DIR", &registry_dir);
