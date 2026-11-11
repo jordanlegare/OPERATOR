@@ -1235,45 +1235,6 @@ fn archive_contains_record_id(path: &Path, record_id: &str) -> io::Result<bool> 
     Ok(false)
 }
 
-fn read_jsonl_for_import(path: &Path) -> io::Result<(Vec<Entry>, usize)> {
-    if !path.exists() {
-        return Ok((Vec::new(), 0));
-    }
-
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut entries = Vec::new();
-    let mut skipped_corrupt_lines = 0usize;
-    let mut record_ids = HashSet::new();
-    let mut event_ids = HashSet::new();
-
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<Entry>(&line) {
-            Ok(mut entry) => {
-                entry.text = sanitize_entry_text(entry.kind, &entry.text);
-                entry.ensure_record_id();
-                if let Some(event_id) = entry.event_id.as_ref() {
-                    if !event_ids.insert(event_id.clone()) {
-                        continue;
-                    }
-                }
-                if let Some(record_id) = entry.record_id.as_ref() {
-                    if !record_ids.insert(record_id.clone()) {
-                        continue;
-                    }
-                }
-                entries.push(entry);
-            }
-            Err(_) => skipped_corrupt_lines += 1,
-        }
-    }
-
-    Ok((entries, skipped_corrupt_lines))
-}
 
 fn can_merge_stream_delta(previous: &Entry, next: &Entry) -> bool {
     previous.kind == EntryKind::HermesStreamDelta
