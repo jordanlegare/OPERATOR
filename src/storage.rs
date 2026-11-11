@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -152,6 +152,10 @@ pub struct Journal {
     persisted_event_ids: HashSet<String>,
     /// Record IDs already durably present in the shared journal.
     persisted_record_ids: HashSet<String>,
+    /// Timestamps for raw durable record/event IDs in the rolling hot window.
+    /// These let expiry prune deduplication state without rescanning the archive.
+    hot_event_timestamps: HashMap<String, DateTime<Utc>>,
+    hot_record_timestamps: HashMap<String, DateTime<Utc>>,
     /// Record IDs already represented in this process's in-memory cache.
     cached_record_ids: HashSet<String>,
     /// Record IDs accepted into memory but not yet confirmed durable.
@@ -251,6 +255,8 @@ impl Journal {
         let cutoff = Utc::now() - ChronoDuration::days(HOT_WINDOW_DAYS);
         let mut persisted_event_ids = HashSet::new();
         let mut persisted_record_ids = HashSet::new();
+        let mut hot_event_timestamps = HashMap::new();
+        let mut hot_record_timestamps = HashMap::new();
 
         // Scan the durable file, but retain only the hot window and its IDs.
         // Historical records stay on disk and are searched by ArchiveSearcher.
@@ -265,15 +271,18 @@ impl Journal {
                     if !is_hot_entry_at(&entry, cutoff) {
                         continue;
                     }
+                    let occurred_at = entry_timestamp_utc(&entry);
                     if let Some(event_id) = entry.event_id.as_ref() {
                         if !persisted_event_ids.insert(event_id.clone()) {
                             continue;
                         }
+                        hot_event_timestamps.insert(event_id.clone(), occurred_at);
                     }
                     if let Some(record_id) = entry.record_id.as_ref() {
                         if !persisted_record_ids.insert(record_id.clone()) {
                             continue;
                         }
+                        hot_record_timestamps.insert(record_id.clone(), occurred_at);
                     }
                     if entry.kind == EntryKind::TerminalOutput
                         && should_suppress_terminal_output(&entry.text)
@@ -305,6 +314,8 @@ impl Journal {
             persisted_event_ids,
             cached_record_ids: persisted_record_ids.clone(),
             persisted_record_ids,
+            hot_event_timestamps,
+            hot_record_timestamps,
             pending_record_ids: HashSet::new(),
             pending_event_ids: HashSet::new(),
             journal_scan_offset,
@@ -330,6 +341,8 @@ impl Journal {
             pending: Vec::new(),
             persisted_event_ids: HashSet::new(),
             persisted_record_ids: HashSet::new(),
+            hot_event_timestamps: HashMap::new(),
+            hot_record_timestamps: HashMap::new(),
             cached_record_ids: HashSet::new(),
             pending_record_ids: HashSet::new(),
             cached_event_ids: HashSet::new(),
@@ -355,6 +368,7 @@ impl Journal {
                 && should_suppress_terminal_output(&entry.text) {
                 continue;
             }
+            journal.remember_hot_identity(&entry);
             journal.push_entry_to_memory(entry);
         }
         journal.cached_event_ids = journal.persisted_event_ids.clone();
@@ -402,17 +416,31 @@ impl Journal {
         let removed = before.saturating_sub(self.entries.len());
         if removed > 0 {
             self.total_text_bytes = self.entries.iter().map(|entry| entry.text.len()).sum();
-            // Stream IDs are intentionally collapsed to one in-memory row, so
-            // rebuild deduplication sets from the durable hot window instead
-            // of deriving them from the coalesced transcript vector.
-            if let Ok((event_ids, record_ids)) = read_hot_record_ids(&self.path, cutoff) {
-                self.persisted_event_ids = event_ids;
-                self.persisted_record_ids = record_ids;
-                self.cached_event_ids = self.persisted_event_ids.clone();
-                self.cached_record_ids = self.persisted_record_ids.clone();
-            }
+            // Expire identity metadata incrementally. No full archive scan is
+            // needed when old rows cross the 30-day boundary.
+            self.hot_event_timestamps.retain(|_, timestamp| *timestamp >= cutoff);
+            self.hot_record_timestamps.retain(|_, timestamp| *timestamp >= cutoff);
+            self.persisted_event_ids = self.hot_event_timestamps.keys().cloned().collect();
+            self.persisted_record_ids = self.hot_record_timestamps.keys().cloned().collect();
+            self.cached_event_ids = self.persisted_event_ids.clone();
+            self.cached_record_ids = self.persisted_record_ids.clone();
+            self.cached_event_ids.extend(self.pending_event_ids.iter().cloned());
+            self.cached_record_ids.extend(self.pending_record_ids.iter().cloned());
         }
         removed
+    }
+
+    fn remember_hot_identity(&mut self, entry: &Entry) {
+        if !is_hot_entry(entry) {
+            return;
+        }
+        let timestamp = entry_timestamp_utc(entry);
+        if let Some(event_id) = entry.event_id.as_ref() {
+            self.hot_event_timestamps.insert(event_id.clone(), timestamp);
+        }
+        if let Some(record_id) = entry.record_id.as_ref() {
+            self.hot_record_timestamps.insert(record_id.clone(), timestamp);
+        }
     }
 
     pub fn backend_label(&self) -> &'static str {
@@ -449,6 +477,9 @@ impl Journal {
             if let Err(error) = self.postgres.as_ref().expect("PostgreSQL backend configured").enqueue(entry.clone()) {
                 self.pending.push(entry);
                 return Err(error);
+            }
+            if hot {
+                self.remember_hot_identity(&entry);
             }
             if let Some(error) = refresh_error {
                 return Err(error);
@@ -538,6 +569,7 @@ impl Journal {
                     if let Some(record_id) = record_id.as_ref() {
                         self.persisted_record_ids.insert(record_id.clone());
                     }
+                    self.remember_hot_identity(&entry);
                 }
                 self.journal_scan_offset = fs::metadata(&self.path)?.len();
                 Ok(())
@@ -599,6 +631,7 @@ impl Journal {
                             if let Some(id) = entry.event_id.as_ref() {
                                 self.persisted_event_ids.insert(id.clone());
                             }
+                            self.remember_hot_identity(&entry);
                             // Preserve the established live-sharing contract:
                             // notes and Hermes events fan out to peers; shell commands,
                             // raw PTY output, and system notices stay in their origin TUI.
@@ -690,6 +723,7 @@ impl Journal {
                     };
 
                     if should_mirror {
+                        self.remember_hot_identity(&entry);
                         if let Some(record_id) = entry.record_id.as_ref() {
                             self.cached_record_ids.insert(record_id.clone());
                         }
@@ -747,6 +781,9 @@ impl Journal {
             if let Err(error) = self.postgres.as_ref().expect("PostgreSQL backend configured").enqueue_batch(accepted.clone()) {
                 self.pending.extend(accepted);
                 return Err(error);
+            }
+            for entry in &accepted {
+                self.remember_hot_identity(entry);
             }
             if let Some(error) = refresh_error {
                 return Err(error);
@@ -877,6 +914,9 @@ impl Journal {
         }
         file.flush()?;
         file.sync_data()?;
+        for entry in &pending {
+            self.remember_hot_identity(entry);
+        }
         self.persisted_event_ids.extend(self.pending_event_ids.drain());
         self.persisted_record_ids.extend(self.pending_record_ids.drain());
         self.journal_scan_offset = fs::metadata(&self.path)?.len();
@@ -1094,29 +1134,10 @@ fn export_plain_text_from_jsonl(source: &Path, destination: &Path) -> io::Result
     output.sync_all()
 }
 
-fn read_hot_record_ids(
-    path: &Path,
-    cutoff: DateTime<Utc>,
-) -> io::Result<(HashSet<String>, HashSet<String>)> {
-    let reader = BufReader::new(File::open(path)?);
-    let mut event_ids = HashSet::new();
-    let mut record_ids = HashSet::new();
-    for line in reader.lines() {
-        let line = line?;
-        let Ok(entry) = serde_json::from_str::<Entry>(&line) else {
-            continue;
-        };
-        if !is_hot_entry_at(&entry, cutoff) {
-            continue;
-        }
-        if let Some(event_id) = entry.event_id {
-            event_ids.insert(event_id);
-        }
-        if let Some(record_id) = entry.record_id {
-            record_ids.insert(record_id);
-        }
-    }
-    Ok((event_ids, record_ids))
+fn entry_timestamp_utc(entry: &Entry) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(&entry.timestamp)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now())
 }
 
 fn is_hot_entry(entry: &Entry) -> bool {
