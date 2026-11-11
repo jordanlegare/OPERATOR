@@ -1897,12 +1897,12 @@ impl App {
             self.conversation_view = None;
             self.conversation_focus_entry = None;
 
-            if !self.matches.is_empty() {
+            if !self.search_hits.is_empty() {
                 self.select_search_result(0);
                 self.status = format!(
                     "PostgreSQL {} · {} result(s) on this page · {} total · offset {}. Esc returns LIVE.",
                     self.search_mode_label,
-                    self.matches.len(),
+                    self.search_hits.len(),
                     self.search_total,
                     self.search_page_offset
                 );
@@ -3445,6 +3445,30 @@ mod tests {
 
 
     #[test]
+    fn postgres_search_workspace_retains_remote_hits_without_local_rows() {
+        let (mut app, path) = test_app();
+        app.search_view = true;
+        app.search_total = 1;
+        app.search_hits = vec![crate::postgres::SearchHit {
+            record_id: "record-on-another-terminal".to_string(),
+            kind: "terminal_output".to_string(),
+            occurred_at: "2026-11-11T12:00:00Z".to_string(),
+            snippet: "remote journal result".to_string(),
+            rank: 0.4,
+        }];
+        app.search_hit_entry_indices = vec![None];
+
+        app.select_search_result(0);
+
+        assert_eq!(app.active_match, Some(0));
+        assert!(app.selected_row.is_none());
+        assert_eq!(app.search_hits[0].snippet, "remote journal result");
+        app.open_active_search_result();
+        assert!(app.status.contains("another live terminal"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn postgres_search_results_workspace_returns_to_live_tail_on_escape() {
         use crate::storage::{Entry, EntryKind};
 
@@ -3478,6 +3502,30 @@ mod tests {
             app.journal.append(Entry::with_kind(EntryKind::Note, text.to_string())).expect("append result");
         }
         app.search_view = true;
+        app.search_hits = vec![
+            crate::postgres::SearchHit {
+                record_id: app.journal.entries[2].record_id.clone().unwrap(),
+                kind: "note".to_string(),
+                occurred_at: app.journal.entries[2].timestamp.clone(),
+                snippet: "result two".to_string(),
+                rank: 0.9,
+            },
+            crate::postgres::SearchHit {
+                record_id: app.journal.entries[0].record_id.clone().unwrap(),
+                kind: "note".to_string(),
+                occurred_at: app.journal.entries[0].timestamp.clone(),
+                snippet: "result zero".to_string(),
+                rank: 0.8,
+            },
+            crate::postgres::SearchHit {
+                record_id: app.journal.entries[1].record_id.clone().unwrap(),
+                kind: "note".to_string(),
+                occurred_at: app.journal.entries[1].timestamp.clone(),
+                snippet: "result one".to_string(),
+                rank: 0.7,
+            },
+        ];
+        app.search_hit_entry_indices = vec![Some(2), Some(0), Some(1)];
         app.matches = vec![2, 0, 1];
         app.search_total = 3;
         app.feed_viewport_height = 4;
