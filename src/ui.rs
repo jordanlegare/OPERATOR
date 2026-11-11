@@ -270,6 +270,26 @@ fn draw_hermes_message(
     frame.render_widget(Clear, popup);
 
     let title = match entry.kind {
+        EntryKind::Note => format!(
+            " JOURNAL NOTE · ROW {} · {} ",
+            index + 1,
+            format_timestamp(&entry.timestamp)
+        ),
+        EntryKind::TerminalCommand => format!(
+            " TERMINAL COMMAND · ROW {} · {} ",
+            index + 1,
+            format_timestamp(&entry.timestamp)
+        ),
+        EntryKind::TerminalOutput => format!(
+            " TERMINAL OUTPUT · ROW {} · {} ",
+            index + 1,
+            format_timestamp(&entry.timestamp)
+        ),
+        EntryKind::System => format!(
+            " SYSTEM EVENT · ROW {} · {} ",
+            index + 1,
+            format_timestamp(&entry.timestamp)
+        ),
         EntryKind::HermesUser => format!(
             " HERMES USER MESSAGE · ROW {} · {} ",
             index + 1,
@@ -908,7 +928,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         InputMode::Terminal => theme.success,
         InputMode::Notes => theme.warning,
     };
-    let mode = if app.follow_tail { "LIVE" } else { "SCROLLBACK" };
+    let mode = if app.search_view { "SEARCH" } else if app.follow_tail { "LIVE" } else { "SCROLLBACK" };
     let privacy_hint = if app.secret_input { "  ·  HIDDEN INPUT" } else { "" };
     let reviewer_label = if app.active_reviewer_count == 1 {
         "reviewer"
@@ -945,6 +965,11 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
 }
 
 fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
+    if app.search_view {
+        draw_search_results_feed(frame, area, app, theme);
+        return;
+    }
+
     let title = format!(
         " TRANSCRIPT  ·  {} RECORDS  ·  {}  ·  SEARCHABLE ",
         app.visible_transcript_count(),
@@ -1014,9 +1039,113 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
 
     // Paint the watermark only into unused cells, so transcript text, selections,
     // and wide-character continuation cells always remain untouched.
+
     if app.show_canada_watermark {
         draw_maple_watermark(frame, inner, theme);
     }
+}
+
+fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
+    let query = app.search_query.as_deref().unwrap_or("");
+    let title = format!(
+        " {} · {} RESULT(S) · OFFSET {} · LIMIT {} · ESC RETURNS LIVE ",
+        app.search_mode_label,
+        app.search_total,
+        app.search_page_offset,
+        app.search_page_limit
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.info))
+        .title(Span::styled(title, Style::default().fg(theme.primary).add_modifier(Modifier::BOLD)))
+        .style(Style::default().bg(theme.panel));
+    let inner = block.inner(area);
+    app.feed_area = inner;
+    app.feed_viewport_height = inner.height.max(1) as usize;
+    frame.render_widget(block, area);
+
+    let mut lines = Vec::new();
+    if let Some(error) = app.search_error.as_deref() {
+        lines.push(Line::from(Span::styled(
+            format!("  Search error: {error}"),
+            Style::default().fg(theme.warning).add_modifier(Modifier::BOLD),
+        )));
+    } else if app.pending_postgres_search_is_pending() {
+        lines.push(Line::from(Span::styled(
+            format!("  Searching PostgreSQL: {query}"),
+            Style::default().fg(theme.info),
+        )));
+    } else if app.search_hits.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  No results for {query:?}. Press Esc to return to the live transcript."),
+            Style::default().fg(theme.muted),
+        )));
+    } else {
+        for (position, hit) in app.search_hits.iter().enumerate() {
+            let index = app.search_hit_entry_indices.get(position).copied().flatten();
+            let selected = app.active_match == Some(position);
+            let row_style = if selected {
+                Style::default().bg(theme.selected_row).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let kind = match hit.kind.as_str() {
+                "note" => "NOTE",
+                "terminal_command" => "COMMAND",
+                "terminal_output" => "OUTPUT",
+                "system" => "SYSTEM",
+                "hermes_user" => "HERMES USER",
+                "hermes_assistant" => "HERMES ASSISTANT",
+                "hermes_tool_call" => "HERMES TOOL",
+                "hermes_tool_result" => "HERMES RESULT",
+                "hermes_stream_start" => "STREAM START",
+                "hermes_stream_delta" => "STREAM DELTA",
+                "hermes_stream_end" => "STREAM END",
+                "hermes_history" => "HERMES HISTORY",
+                "hermes_interim" => "HERMES INTERIM",
+                "hermes_session" => "HERMES SESSION",
+                other => other,
+            };
+            let row_label = index
+                .map(|row| format!("[ROW {}]", row + 1))
+                .unwrap_or_else(|| format!("[DB {}]", hit.record_id.chars().take(10).collect::<String>()));
+            let preview = hit.snippet.split_whitespace().collect::<Vec<_>>().join(" ");
+            let preview = preview.chars().take(320).collect::<String>();
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{} {:>5}  ", if selected { "▶" } else { " " }, app.search_page_offset + position + 1),
+                    Style::default().fg(theme.primary).patch(row_style),
+                ),
+                Span::styled(
+                    format!("{}  ", format_timestamp(&hit.occurred_at)),
+                    Style::default().fg(theme.success).patch(row_style),
+                ),
+                Span::styled(
+                    format!("{kind:<16}"),
+                    Style::default().fg(theme.info).add_modifier(Modifier::BOLD).patch(row_style),
+                ),
+                Span::styled(
+                    format!("  {row_label}  score:{:.3}", hit.rank),
+                    Style::default().fg(theme.muted).patch(row_style),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("       ", Style::default().patch(row_style)),
+                Span::styled(preview, Style::default().fg(theme.text).patch(row_style)),
+            ]));
+        }
+        lines.push(Line::from(Span::styled(
+            format!("  Query: {query}"),
+            Style::default().fg(theme.muted),
+        )));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().fg(theme.text).bg(theme.panel))
+            .scroll(((app.search_scroll.saturating_mul(2)).min(u16::MAX as usize) as u16, app.feed_hscroll)),
+        inner,
+    );
 }
 
 fn draw_maple_watermark(frame: &mut Frame, area: Rect, theme: Theme) {
@@ -1245,7 +1374,9 @@ fn apply_selection(
 
 fn draw_input(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     app.input_area = area;
-    let title = if app.secret_input {
+    let title = if app.search_view {
+        " SEARCH RESULTS  ·  ↑/↓ SELECT  ·  n/N NEXT/PREVIOUS  ·  ENTER OPEN CONTEXT  ·  ESC RETURN LIVE "
+    } else if app.secret_input {
         " HIDDEN INPUT  ·  ENTER TO SEND WITHOUT LOGGING  ·  CTRL+V / RIGHT-CLICK TO PASTE  ·  CTRL+C TO INTERRUPT "
     } else {
         match app.input_mode {
@@ -1317,6 +1448,22 @@ fn visible_input(app: &App) -> String {
 }
 
 fn draw_hints(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
+    if app.search_view {
+        let hints = Line::from(vec![
+            Span::styled(" ↑/↓ ", Style::default().fg(theme.primary)),
+            Span::styled("select result  ", Style::default().fg(theme.muted)),
+            Span::styled("PgUp/PgDn ", Style::default().fg(theme.primary)),
+            Span::styled("scroll  ", Style::default().fg(theme.muted)),
+            Span::styled("n/N ", Style::default().fg(theme.primary)),
+            Span::styled("next/previous  ", Style::default().fg(theme.muted)),
+            Span::styled("Enter ", Style::default().fg(theme.primary)),
+            Span::styled("open context  ", Style::default().fg(theme.muted)),
+            Span::styled("Esc ", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)),
+            Span::styled("return to LIVE", Style::default().fg(theme.muted)),
+        ]);
+        frame.render_widget(Paragraph::new(hints), area);
+        return;
+    }
     let hints = Line::from(vec![
         Span::styled(" Ctrl+T ", Style::default().fg(theme.primary)),
         Span::styled("mode  ", Style::default().fg(theme.muted)),
@@ -1405,11 +1552,16 @@ fn help_lines(theme: Theme) -> Vec<Line<'static>> {
         ]),
         Line::from(vec![
             Span::styled("SEARCH    ", Style::default().fg(theme.success).add_modifier(Modifier::BOLD)),
-            Span::raw("/search words uses PostgreSQL indexes when OPERATOR_DATABASE_URL is configured; otherwise it searches the local JSONL cache."),
+            Span::raw("/search runs indexed PostgreSQL full-text, phrase, tsquery, literal and trigram searches; Esc returns LIVE."),
         ]),
         Line::from(""),
         Line::from(vec![Span::styled("LOCAL COMMANDS", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD))]),
-        Line::from(vec![Span::styled("/search WORDS", Style::default().fg(theme.warning)), Span::raw("  Search full text across every journal entry and Hermes conversation; n/N navigates hits.")]),
+        Line::from(vec![Span::styled("/search WORDS", Style::default().fg(theme.warning)), Span::raw("  Web search; quotes, OR alternatives and -excluded terms; Esc returns LIVE.")]),
+        Line::from(vec![Span::styled("/search --literal TEXT", Style::default().fg(theme.warning)), Span::raw("  Case-insensitive substring matching with escaped SQL wildcards.")]),
+        Line::from(vec![Span::styled("/search --phrase TEXT", Style::default().fg(theme.warning)), Span::raw("  PostgreSQL phrase search using phraseto_tsquery.")]),
+        Line::from(vec![Span::styled("/search --tsquery QUERY", Style::default().fg(theme.warning)), Span::raw("  Advanced PostgreSQL syntax: &, |, !, <-> and :*.")]),
+        Line::from(vec![Span::styled("/search --fuzzy TEXT", Style::default().fg(theme.warning)), Span::raw("  Trigram similarity search, ranked by similarity().")]),
+        Line::from(vec![Span::styled("Search filters", Style::default().fg(theme.warning)), Span::raw("  kind:, session:, conversation:, after:, before:, limit:, offset:.")]),
         Line::from(vec![Span::styled("/review on|off|status", Style::default().fg(theme.warning)), Span::raw("  Hold Hermes final answers for operator review before delivery.")]),
         Line::from(vec![Span::styled("/view", Style::default().fg(theme.warning)), Span::raw("           Open the full Markdown body of a selected Hermes event.")]),
         Line::from(vec![Span::styled("/threads", Style::default().fg(theme.warning)), Span::raw("        Browse conversations; Enter or Ctrl+C expands the selected thread.")]),

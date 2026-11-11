@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::{
     postgres::{PgConnection, PgListener, PgPool, PgPoolOptions},
     Row,
@@ -29,9 +29,24 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const FETCH_BATCH: i64 = 5_000;
 
 #[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub record_id: String,
+    pub kind: String,
+    pub occurred_at: String,
+    pub snippet: String,
+    pub rank: f32,
+}
+
+#[derive(Debug, Clone)]
 pub struct SearchResult {
     pub request_id: u64,
-    pub record_ids: Vec<String>,
+    pub hits: Vec<SearchHit>,
+    pub total: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub query: String,
+    pub mode: String,
+    pub error: Option<String>,
 }
 
 pub enum Update {
@@ -594,26 +609,263 @@ async fn fetch_new_entries_locked(
     Ok(total)
 }
 
-async fn search_records(pool: &PgPool, query: &str) -> Result<Vec<String>, String> {
-    let pattern = like_pattern(query);
-    let rows = sqlx::query(
-        r#"SELECT record_id
-           FROM operator_journal_search_documents
-           WHERE lower(body) LIKE lower($1) ESCAPE '\'
-              OR search_vector @@ websearch_to_tsquery('simple', $2)
-           ORDER BY entry_id"#,
-    )
-    .bind(pattern)
-    .bind(query)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| format!("search PostgreSQL journal: {error}"))?;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchMode { Web, Literal, Phrase, TsQuery, Fuzzy }
 
-    rows.into_iter()
-        .map(|row| row.try_get("record_id").map_err(|error| error.to_string()))
-        .collect()
+impl SearchMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Web => "WEB FULL-TEXT",
+            Self::Literal => "LITERAL SUBSTRING",
+            Self::Phrase => "EXACT PHRASE",
+            Self::TsQuery => "POSTGRESQL TSQUERY",
+            Self::Fuzzy => "TRIGRAM FUZZY",
+        }
+    }
 }
 
+#[derive(Debug, Clone)]
+struct SearchSpec {
+    mode: SearchMode,
+    query: String,
+    kind: Option<String>,
+    session: Option<String>,
+    conversation: Option<String>,
+    after: Option<DateTime<Utc>>,
+    before: Option<DateTime<Utc>>,
+    limit: usize,
+    offset: usize,
+}
+
+fn parse_search_date(value: &str, exclusive_upper_bound: bool) -> Result<DateTime<Utc>, String> {
+    if let Ok(timestamp) = DateTime::parse_from_rfc3339(value) {
+        return Ok(timestamp.with_timezone(&Utc));
+    }
+    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|_| format!("invalid search date {value:?}; use YYYY-MM-DD or RFC3339"))?;
+    let date = if exclusive_upper_bound {
+        date.succ_opt().ok_or_else(|| format!("search date out of range: {value}"))?
+    } else { date };
+    Ok(date.and_hms_opt(0, 0, 0).expect("midnight is valid").and_utc())
+}
+
+/// Parse a small search language; all expressions are passed to PostgreSQL as bind values.
+fn parse_search_spec(raw: &str) -> Result<SearchSpec, String> {
+    let mut tokens = raw.split_whitespace().collect::<Vec<_>>();
+    let mut mode = SearchMode::Web;
+    while let Some(flag) = tokens.first().copied() {
+        let selected = match flag {
+            "--literal" => Some(SearchMode::Literal),
+            "--phrase" => Some(SearchMode::Phrase),
+            "--tsquery" => Some(SearchMode::TsQuery),
+            "--fuzzy" => Some(SearchMode::Fuzzy),
+            "--web" => Some(SearchMode::Web),
+            _ => None,
+        };
+        let Some(selected) = selected else { break; };
+        mode = selected;
+        tokens.remove(0);
+    }
+
+    let mut query_tokens = Vec::new();
+    let mut kind = None;
+    let mut session = None;
+    let mut conversation = None;
+    let mut after = None;
+    let mut before = None;
+    let mut limit = 200usize;
+    let mut offset = 0usize;
+    for token in tokens {
+        if let Some(value) = token.strip_prefix("kind:") {
+            let value = value.to_ascii_lowercase();
+            let allowed = [
+                "note", "terminal_command", "terminal_output", "system", "hermes_user",
+                "hermes_assistant", "hermes_tool_call", "hermes_tool_result",
+                "hermes_stream_start", "hermes_stream_delta", "hermes_stream_end",
+                "hermes_history", "hermes_interim", "hermes_session",
+            ];
+            if !allowed.contains(&value.as_str()) { return Err(format!("unknown kind filter {value:?}")); }
+            kind = Some(value);
+        } else if let Some(value) = token.strip_prefix("session:") {
+            if value.is_empty() { return Err("session: requires an ID".to_string()); }
+            session = Some(value.to_string());
+        } else if let Some(value) = token.strip_prefix("conversation:") {
+            if value.is_empty() { return Err("conversation: requires an ID".to_string()); }
+            conversation = Some(value.to_string());
+        } else if let Some(value) = token.strip_prefix("after:") {
+            after = Some(parse_search_date(value, false)?);
+        } else if let Some(value) = token.strip_prefix("before:") {
+            before = Some(parse_search_date(value, true)?);
+        } else if let Some(value) = token.strip_prefix("limit:") {
+            let parsed = value.parse::<usize>().map_err(|_| format!("invalid limit {value:?}"))?;
+            if parsed == 0 { return Err("limit must be between 1 and 500".to_string()); }
+            limit = parsed.min(500);
+        } else if let Some(value) = token.strip_prefix("offset:") {
+            let parsed = value.parse::<usize>().map_err(|_| format!("invalid offset {value:?}"))?;
+            offset = parsed.min(1_000_000_000);
+        } else {
+            query_tokens.push(token);
+        }
+    }
+
+    let mut query = query_tokens.join(" ");
+    if matches!(mode, SearchMode::Literal | SearchMode::Phrase | SearchMode::TsQuery | SearchMode::Fuzzy)
+        && query.len() >= 2
+        && ((query.starts_with('"') && query.ends_with('"'))
+            || (query.starts_with('\'') && query.ends_with('\'')))
+    {
+        query = query[1..query.len() - 1].to_string();
+    }
+    if query.trim().is_empty() {
+        return Err("search query is empty; use /search WORDS or /search --literal WORDS".to_string());
+    }
+    if let (Some(start), Some(end)) = (after.as_ref(), before.as_ref()) {
+        if start >= end { return Err("after: must be earlier than before:".to_string()); }
+    }
+    Ok(SearchSpec { mode, query, kind, session, conversation, after, before, limit, offset })
+}
+
+async fn search_records(pool: &PgPool, raw_query: &str, request_id: u64) -> SearchResult {
+    let spec = match parse_search_spec(raw_query) {
+        Ok(spec) => spec,
+        Err(error) => return SearchResult {
+            request_id, hits: Vec::new(), total: 0, offset: 0, limit: 200,
+            query: raw_query.to_string(), mode: "INVALID SEARCH".to_string(), error: Some(error),
+        },
+    };
+
+    let query = &spec.query;
+    let pattern = like_pattern(query);
+    let common_filters = r#"
+        AND ($3::text IS NULL OR d.kind = $3)
+        AND ($4::text IS NULL OR EXISTS (
+            SELECT 1 FROM operator_journal_entries e
+            WHERE e.id = d.entry_id AND (e.session_id = $4 OR e.related_session_id = $4)
+        ))
+        AND ($5::text IS NULL OR EXISTS (
+            SELECT 1 FROM operator_journal_entries e
+            WHERE e.id = d.entry_id AND e.conversation_id = $5
+        ))
+        AND ($6::timestamptz IS NULL OR d.occurred_at >= $6)
+        AND ($7::timestamptz IS NULL OR d.occurred_at < $7)
+    "#;
+    let (predicate, rank_expr, snippet_expr, order) = match spec.mode {
+        SearchMode::Web => (
+            "lower(d.body) LIKE lower($2) ESCAPE '\\' OR d.search_vector @@ websearch_to_tsquery('simple', $1)",
+            "CASE WHEN d.search_vector @@ websearch_to_tsquery('simple', $1) THEN ts_rank_cd(d.search_vector, websearch_to_tsquery('simple', $1)) ELSE 0 END",
+            "CASE WHEN d.search_vector @@ websearch_to_tsquery('simple', $1) THEN ts_headline('simple', d.body, websearch_to_tsquery('simple', $1), 'StartSel=‹,StopSel=›,MaxFragments=2,MaxWords=28,MinWords=8') ELSE substring(d.body from greatest(position(lower($1) in lower(d.body)) - 100, 1) for 260) END",
+            "rank DESC, d.entry_id DESC",
+        ),
+        SearchMode::Literal => (
+            "lower(d.body) LIKE lower($2) ESCAPE '\\'",
+            "1.0::real",
+            "substring(d.body from greatest(position(lower($1) in lower(d.body)) - 100, 1) for 260)",
+            "d.entry_id DESC",
+        ),
+        SearchMode::Phrase => (
+            "d.search_vector @@ phraseto_tsquery('simple', $1)",
+            "ts_rank_cd(d.search_vector, phraseto_tsquery('simple', $1))",
+            "ts_headline('simple', d.body, phraseto_tsquery('simple', $1), 'StartSel=‹,StopSel=›,MaxFragments=2,MaxWords=28,MinWords=8')",
+            "rank DESC, d.entry_id DESC",
+        ),
+        SearchMode::TsQuery => (
+            "d.search_vector @@ to_tsquery('simple', $1)",
+            "ts_rank_cd(d.search_vector, to_tsquery('simple', $1))",
+            "ts_headline('simple', d.body, to_tsquery('simple', $1), 'StartSel=‹,StopSel=›,MaxFragments=2,MaxWords=28,MinWords=8')",
+            "rank DESC, d.entry_id DESC",
+        ),
+        SearchMode::Fuzzy => (
+            "lower(d.body) % lower($1)",
+            "similarity(lower(d.body), lower($1))",
+            "substring(d.body from greatest(position(lower($1) in lower(d.body)) - 100, 1) for 260)",
+            "rank DESC, d.entry_id DESC",
+        ),
+    };
+    let sql = format!(
+        r#"SELECT d.record_id, d.kind, d.occurred_at,
+                  ({rank_expr})::real AS rank, {snippet_expr} AS snippet,
+                  COUNT(*) OVER()::bigint AS total_count
+           FROM operator_journal_search_documents d
+           WHERE ({predicate}) {common_filters}
+           ORDER BY {order} LIMIT $8 OFFSET $9"#
+    );
+    let count_sql = format!(
+        "SELECT COUNT(*)::bigint FROM operator_journal_search_documents d WHERE ({predicate}) {common_filters}"
+    );
+    let rows = match sqlx::query(&sql)
+        .bind(query)
+        .bind(&pattern)
+        .bind(spec.kind.as_deref())
+        .bind(spec.session.as_deref())
+        .bind(spec.conversation.as_deref())
+        .bind(spec.after.clone())
+        .bind(spec.before.clone())
+        .bind(spec.limit as i64)
+        .bind(spec.offset as i64)
+        .fetch_all(pool)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => return SearchResult {
+            request_id, hits: Vec::new(), total: 0, offset: spec.offset, limit: spec.limit,
+            query: spec.query, mode: spec.mode.label().to_string(),
+            error: Some(format!("PostgreSQL {} search failed: {error}", spec.mode.label())),
+        },
+    };
+
+    // COUNT(*) OVER() has no row to carry the total when OFFSET is beyond
+    // the final result. Run a filtered count in that case so paging metadata
+    // remains correct even for an empty out-of-range page.
+    let total = if let Some(row) = rows.first() {
+        row.try_get::<i64, _>("total_count").unwrap_or(0).max(0) as usize
+    } else if spec.offset > 0 {
+        match sqlx::query_scalar::<_, i64>(&count_sql)
+            .bind(query)
+            .bind(&pattern)
+            .bind(spec.kind.as_deref())
+            .bind(spec.session.as_deref())
+            .bind(spec.conversation.as_deref())
+            .bind(spec.after.clone())
+            .bind(spec.before.clone())
+            .fetch_one(pool)
+            .await
+        {
+            Ok(count) => count.max(0) as usize,
+            Err(error) => return SearchResult {
+                request_id, hits: Vec::new(), total: 0, offset: spec.offset, limit: spec.limit,
+                query: spec.query, mode: spec.mode.label().to_string(),
+                error: Some(format!("count PostgreSQL search results: {error}")),
+            },
+        }
+    } else {
+        0
+    };
+    let mut hits = Vec::with_capacity(rows.len());
+    for row in rows {
+        let decoded = (|| -> Result<SearchHit, sqlx::Error> {
+            let occurred_at: DateTime<Utc> = row.try_get("occurred_at")?;
+            Ok(SearchHit {
+                record_id: row.try_get("record_id")?,
+                kind: row.try_get("kind")?,
+                occurred_at: occurred_at.to_rfc3339(),
+                snippet: row.try_get("snippet")?,
+                rank: row.try_get("rank")?,
+            })
+        })();
+        match decoded {
+            Ok(hit) => hits.push(hit),
+            Err(error) => return SearchResult {
+                request_id, hits: Vec::new(), total: 0, offset: spec.offset, limit: spec.limit,
+                query: spec.query, mode: spec.mode.label().to_string(),
+                error: Some(format!("decode PostgreSQL search result: {error}")),
+            },
+        }
+    }
+    SearchResult {
+        request_id, hits, total, offset: spec.offset, limit: spec.limit,
+        query: spec.query, mode: spec.mode.label().to_string(), error: None,
+    }
+}
 fn like_pattern(query: &str) -> String {
     let mut pattern = String::with_capacity(query.len() + 2);
     pattern.push('%');
@@ -761,14 +1013,8 @@ async fn run_worker(
                         if let Err(error) = fetch_new_entries(&pool, last_seen_id, &updates).await {
                             let _ = updates.send(Update::Error(error));
                         }
-                        match search_records(&pool, &query).await {
-                            Ok(record_ids) => {
-                                let _ = updates.send(Update::SearchResult(SearchResult { request_id, record_ids }));
-                            }
-                            Err(error) => {
-                                let _ = updates.send(Update::Error(error));
-                            }
-                        }
+                        let result = search_records(&pool, &query, request_id).await;
+                        let _ = updates.send(Update::SearchResult(result));
                     }
                     Some(Command::Flush(reply)) => {
                         let result = retry_pending(&pool, &mut pending, last_seen_id, &pending_count, &updates).await;
@@ -893,7 +1139,7 @@ mod tests {
             return;
         };
 
-        let searchable_text = format!("operator-postgres-smoke-{}", std::process::id());
+        let searchable_text = format!("operator-postgres-smoke-{} phrase", std::process::id());
         let entry = Entry::with_kind(EntryKind::Note, searchable_text.clone());
         let record_id = entry.record_id.clone().expect("new entry record ID");
 
@@ -921,14 +1167,14 @@ mod tests {
         }
         assert!(received_notification, "peer instance did not receive the committed journal record");
 
-        let request_id = reader.search(searchable_text).expect("submit indexed search");
+        let request_id = reader.search(searchable_text.clone()).expect("submit indexed search");
         let deadline = std::time::Instant::now() + Duration::from_secs(8);
         let mut found_record = false;
         while std::time::Instant::now() < deadline && !found_record {
             for update in reader.drain_updates() {
                 if let Update::SearchResult(result) = update {
                     if result.request_id == request_id {
-                        found_record = result.record_ids.iter().any(|id| id == &record_id);
+                        found_record = result.hits.iter().any(|hit| hit.record_id == record_id);
                     }
                 }
             }
@@ -937,6 +1183,56 @@ mod tests {
             }
         }
         assert!(found_record, "PostgreSQL trigram/full-text index did not return the record");
+
+
+        // An empty page beyond the end must still report the real total.
+        let request_id = reader
+            .search(format!("{searchable_text} kind:note limit:1 offset:999999"))
+            .expect("submit out-of-range page");
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        let mut verified_empty_page = false;
+        while std::time::Instant::now() < deadline && !verified_empty_page {
+            for update in reader.drain_updates() {
+                if let Update::SearchResult(result) = update {
+                    if result.request_id == request_id {
+                        assert!(result.error.is_none(), "out-of-range page count failed: {:?}", result.error);
+                        assert!(result.hits.is_empty());
+                        assert!(result.total >= 1);
+                        verified_empty_page = true;
+                    }
+                }
+            }
+            if !verified_empty_page { thread::sleep(Duration::from_millis(20)); }
+        }
+        assert!(verified_empty_page, "out-of-range page count timed out");
+        for query in [
+            format!("--literal {searchable_text}"),
+            format!("--phrase \"{searchable_text}\""),
+            "--tsquery 'operator & postgres'".to_string(),
+            format!("--fuzzy {searchable_text}"),
+            format!("{searchable_text} kind:note limit:25 offset:0"),
+        ] {
+            let request_id = reader.search(query.clone()).expect("submit PostgreSQL search mode");
+            let deadline = std::time::Instant::now() + Duration::from_secs(8);
+            let mut completed = false;
+            while std::time::Instant::now() < deadline && !completed {
+                for update in reader.drain_updates() {
+                    if let Update::SearchResult(result) = update {
+                        if result.request_id == request_id {
+                            assert!(result.error.is_none(), "search {query:?} failed: {:?}", result.error);
+                            assert!(
+                                result.hits.iter().any(|hit| hit.record_id == record_id),
+                                "PostgreSQL search mode {query:?} did not return its fixture"
+                            );
+                            assert!(result.total >= 1);
+                            completed = true;
+                        }
+                    }
+                }
+                if !completed { thread::sleep(Duration::from_millis(20)); }
+            }
+            assert!(completed, "PostgreSQL search mode {query:?} timed out");
+        }
 
         // The logical search document must reassemble deltas so a substring
         // split across adjacent Hermes stream events remains searchable.
@@ -975,7 +1271,7 @@ mod tests {
             for update in reader.drain_updates() {
                 if let Update::SearchResult(result) = update {
                     if result.request_id == request_id {
-                        found_split_stream = result.record_ids.iter().any(|id| id == &first_delta_record);
+                        found_split_stream = result.hits.iter().any(|hit| hit.record_id == first_delta_record);
                     }
                 }
             }
@@ -984,6 +1280,48 @@ mod tests {
             }
         }
         assert!(found_split_stream, "PostgreSQL search did not reconstruct Hermes stream deltas");
+    }
+
+    #[test]
+    fn search_parser_supports_modes_filters_and_pagination() {
+        use super::{parse_search_spec, SearchMode};
+
+        let web = parse_search_spec(r#""connection refused" OR timeout kind:terminal_output after:2026-11-01 limit:40 offset:80"#)
+            .expect("parse web search");
+        assert_eq!(web.mode, SearchMode::Web);
+        assert_eq!(web.query, r#""connection refused" OR timeout"#);
+        assert_eq!(web.kind.as_deref(), Some("terminal_output"));
+        assert_eq!(web.limit, 40);
+        assert_eq!(web.offset, 80);
+        assert!(web.after.is_some());
+
+        let literal = parse_search_spec("--literal \"100% ready\" kind:note")
+            .expect("parse literal search");
+        assert_eq!(literal.mode, SearchMode::Literal);
+        assert_eq!(literal.query, "100% ready");
+
+        let phrase = parse_search_spec("--phrase \"connection refused\"")
+            .expect("parse phrase search");
+        assert_eq!(phrase.mode, SearchMode::Phrase);
+        assert_eq!(phrase.query, "connection refused");
+
+        let tsquery = parse_search_spec("--tsquery 'connection & !refused'")
+            .expect("parse PostgreSQL tsquery");
+        assert_eq!(tsquery.mode, SearchMode::TsQuery);
+        assert_eq!(tsquery.query, "connection & !refused");
+
+        let fuzzy = parse_search_spec("--fuzzy opertor").expect("parse fuzzy search");
+        assert_eq!(fuzzy.mode, SearchMode::Fuzzy);
+        assert_eq!(fuzzy.query, "opertor");
+    }
+
+    #[test]
+    fn search_parser_rejects_invalid_filters_and_date_ranges() {
+        use super::parse_search_spec;
+        assert!(parse_search_spec("needle kind:not_a_kind").is_err());
+        assert!(parse_search_spec("needle after:not-a-date").is_err());
+        assert!(parse_search_spec("needle after:2026-11-10 before:2026-11-01").is_err());
+        assert!(parse_search_spec("needle limit:0").is_err());
     }
 
     #[test]

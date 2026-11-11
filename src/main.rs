@@ -1297,6 +1297,11 @@ fn run(
                 }
             }
             Event::Mouse(_) if app.pending_review.is_some() => {}
+            Event::Mouse(mouse) if app.search_view => match mouse.kind {
+                MouseEventKind::ScrollUp => app.scroll_up(if mouse.modifiers.contains(KeyModifiers::SHIFT) { 8 } else { 3 }),
+                MouseEventKind::ScrollDown => app.scroll_down(if mouse.modifiers.contains(KeyModifiers::SHIFT) { 8 } else { 3 }),
+                _ => {}
+            },
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Right)
                     if app.message_view_index.is_none()
@@ -2028,6 +2033,62 @@ fn handle_key(
         return Ok(false);
     }
 
+    // The dedicated search workspace owns transcript navigation until Escape.
+    // The main event loop continues capturing shell and peer journal activity.
+    if app.search_view {
+        match code {
+            KeyCode::Char('q') if modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
+            KeyCode::Char('s') if modifiers.contains(KeyModifiers::CONTROL) => app.save(),
+            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                let selected = app.active_match.and_then(|position| {
+                    let hit = app.search_hits.get(position)?;
+                    let local = app.search_hit_entry_indices.get(position).copied().flatten();
+                    let text = local
+                        .and_then(|index| app.journal.entries.get(index).map(|entry| entry.text.clone()))
+                        .unwrap_or_else(|| hit.snippet.clone());
+                    Some((text, local.is_some()))
+                });
+                if let Some((text, full_record)) = selected {
+                    if text.len() > 60_000 {
+                        app.status = "Search result exceeds the 60 KB terminal clipboard limit.".to_string();
+                    } else {
+                        match copy_to_terminal_clipboard(&text) {
+                            Ok(()) => app.status = format!(
+                                "Copied {} characters from {} search result.",
+                                text.chars().count(),
+                                if full_record { "full" } else { "indexed snippet" }
+                            ),
+                            Err(error) => app.status = format!("Could not copy search result: {error}"),
+                        }
+                    }
+                }
+            }
+            KeyCode::Esc => app.exit_search_view(),
+            KeyCode::Up => {
+                let current = app.active_match.unwrap_or(0);
+                app.select_search_result(current.saturating_sub(1));
+            }
+            KeyCode::Down => {
+                let current = app.active_match.unwrap_or(0);
+                if !app.matches.is_empty() {
+                    app.select_search_result(current.saturating_add(1).min(app.matches.len() - 1));
+                }
+            }
+            KeyCode::PageUp => app.scroll_up((app.feed_viewport_height / 2).max(1)),
+            KeyCode::PageDown => app.scroll_down((app.feed_viewport_height / 2).max(1)),
+            KeyCode::Home => app.select_search_result(0),
+            KeyCode::End => app.select_search_result(app.matches.len().saturating_sub(1)),
+            KeyCode::Char('n') => app.next_match(),
+            KeyCode::Char('N') => app.previous_match(),
+            KeyCode::Enter => app.open_active_search_result(),
+            KeyCode::Left if modifiers.contains(KeyModifiers::ALT) => app.scroll_feed_left(8),
+            KeyCode::Right if modifiers.contains(KeyModifiers::ALT) => app.scroll_feed_right(8),
+            _ => {}
+        }
+        return Ok(false);
+    }
+
+
     // Unmodified F2-F10 select the nine built-in color themes.
     if let Some(number) = theme_number_from_key(code, modifiers) {
         app.set_theme(number);
@@ -2097,11 +2158,14 @@ fn handle_key(
 
     match code {
         KeyCode::Esc => {
-            if !app.input.is_empty() {
+            if app.search_view {
+                app.exit_search_view();
+            } else if !app.input.is_empty() {
                 app.clear_input();
                 app.status = "Input line cleared.".to_string();
             } else if app.search_query.is_some() {
                 app.clear_search();
+                app.jump_to_latest();
             } else {
                 app.show_help = false;
             }

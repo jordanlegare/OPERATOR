@@ -33,6 +33,12 @@ jobs:
         run: cargo check --all-targets
       - name: Test full-text journal search
         run: cargo test app::tests::search_
+      - name: Test PostgreSQL search workspace state
+        run: |
+          cargo test app::tests::postgres_search
+          cargo test app::tests::ranked_search_results_keep_database_order
+      - name: Test PostgreSQL search grammar
+        run: cargo test postgres::tests::search_parser
       - name: Test Hermes answer review state and socket
         run: |
           cargo test app::tests::review_

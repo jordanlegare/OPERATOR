@@ -100,6 +100,18 @@ pub struct App {
     pub follow_tail: bool,
     pub search_query: Option<String>,
     pub matches: Vec<usize>,
+    /// Dedicated results view; live capture and persistence continue underneath.
+    pub search_view: bool,
+    pub search_scroll: usize,
+    pub search_total: usize,
+    pub search_page_offset: usize,
+    pub search_page_limit: usize,
+    pub search_mode_label: String,
+    pub search_error: Option<String>,
+    /// Full database hits, including entries not mirrored into this terminal's cache.
+    pub search_hits: Vec<crate::postgres::SearchHit>,
+    /// Local transcript index corresponding to each hit, when this process has it cached.
+    pub search_hit_entry_indices: Vec<Option<usize>>,
     pending_postgres_search: Option<(u64, String)>,
     pub active_match: Option<usize>,
     pub history: Vec<String>,
@@ -198,6 +210,15 @@ impl App {
             follow_tail: true,
             search_query: None,
             matches: Vec::new(),
+            search_view: false,
+            search_scroll: 0,
+            search_total: 0,
+            search_page_offset: 0,
+            search_page_limit: 200,
+            search_mode_label: String::new(),
+            search_error: None,
+            search_hits: Vec::new(),
+            search_hit_entry_indices: Vec::new(),
             pending_postgres_search: None,
             active_match: None,
             history,
@@ -449,6 +470,10 @@ impl App {
     }
 
     pub fn scroll_up(&mut self, amount: usize) {
+        if self.search_view {
+            self.search_scroll = self.search_scroll.saturating_sub(amount);
+            return;
+        }
         let current = self.current_top();
         self.scroll_top = current.saturating_sub(amount);
         self.follow_tail = false;
@@ -456,6 +481,10 @@ impl App {
     }
 
     pub fn scroll_down(&mut self, amount: usize) {
+        if self.search_view {
+            self.scroll_search_results(amount);
+            return;
+        }
         let next = self.current_top().saturating_add(amount).min(self.max_top());
         self.scroll_top = next;
         self.follow_tail = false;
@@ -1804,16 +1833,43 @@ impl App {
         self.active_match = None;
         self.conversation_focus_entry = None;
         self.pending_postgres_search = None;
+        self.search_view = false;
+        self.search_scroll = 0;
+        self.search_total = 0;
+        self.search_page_offset = 0;
+        self.search_page_limit = 200;
+        self.search_mode_label.clear();
+        self.search_error = None;
+        self.search_hits.clear();
+        self.search_hit_entry_indices.clear();
     }
 
-    /// Apply completed asynchronous PostgreSQL search requests on the UI thread.
-    /// Record IDs are translated into this process's in-memory transcript indices.
+    /// Leave the temporary results workspace and resume the newest live row.
+    pub fn exit_search_view(&mut self) {
+        self.clear_search();
+        self.conversation_view = None;
+        self.message_view_index = None;
+        self.jump_to_latest();
+        self.status = "Returned to LIVE transcript.".to_string();
+    }
+
+    /// Apply asynchronous PostgreSQL results on the UI thread, mapping stable
+    /// record IDs back to local transcript indices while preserving rank order.
     pub fn apply_postgres_search_results(&mut self) {
         for result in self.journal.drain_postgres_search_results() {
-            let Some((pending_id, query)) = self.pending_postgres_search.clone() else {
+            let Some((pending_id, original_query)) = self.pending_postgres_search.clone() else {
                 continue;
             };
             if pending_id != result.request_id {
+                continue;
+            }
+            self.pending_postgres_search = None;
+
+            if let Some(error) = result.error {
+                self.matches.clear();
+                self.active_match = None;
+                self.search_error = Some(error.clone());
+                self.status = error;
                 continue;
             }
 
@@ -1824,33 +1880,47 @@ impl App {
                     entry.record_id.as_deref().map(|record_id| (record_id, index))
                 })
                 .collect();
-            self.matches = result.record_ids
-                .iter()
-                .filter_map(|record_id| index_by_record_id.get(record_id.as_str()).copied())
+
+            self.search_hits = result.hits;
+            self.search_hit_entry_indices = self.search_hits.iter()
+                .map(|hit| index_by_record_id.get(hit.record_id.as_str()).copied())
                 .collect();
-            self.search_query = Some(query.clone());
-            self.pending_postgres_search = None;
+            self.matches = self.search_hit_entry_indices.iter().flatten().copied().collect();
+            self.search_query = Some(result.query);
+            self.search_total = result.total;
+            self.search_page_offset = result.offset;
+            self.search_page_limit = result.limit;
+            self.search_mode_label = result.mode;
+            self.search_error = None;
+            self.search_scroll = 0;
+            self.active_match = None;
+            self.conversation_view = None;
             self.conversation_focus_entry = None;
 
-            if !self.matches.is_empty() {
-                let latest_position = self.matches.len() - 1;
-                self.activate_match(latest_position);
+            if !self.search_hits.is_empty() {
+                self.select_search_result(0);
                 self.status = format!(
-                    "Found {} indexed hit(s) for {:?} in PostgreSQL. n/N navigate.",
-                    self.matches.len(),
-                    query
+                    "PostgreSQL {} · {} result(s) on this page · {} total · offset {}. Esc returns LIVE.",
+                    self.search_mode_label,
+                    self.search_hits.len(),
+                    self.search_total,
+                    self.search_page_offset
                 );
             } else {
-                self.active_match = None;
-                self.conversation_view = None;
-                self.status = format!("No PostgreSQL matches for {:?}.", query);
+                self.status = if self.search_total == 0 {
+                    format!("No PostgreSQL matches for {:?}. Esc returns LIVE.", original_query)
+                } else {
+                    format!(
+                        "No results at offset {}; {} total matches. Change offset: or reduce filters.",
+                        self.search_page_offset, self.search_total
+                    )
+                };
             }
         }
     }
 
-    /// Return the text users can actually read in the journal and expanded
-    /// Hermes conversations. Stream fragments are indexed as one logical
-    /// assistant message, so a query may span adjacent delta events.
+    /// Return human-readable transcript text; stream fragments are collapsed
+    /// into their logical Hermes message before the local fallback searches.
     fn searchable_entry_texts(&self) -> Vec<(usize, String)> {
         let mut searchable = self
             .journal
@@ -1894,78 +1964,169 @@ impl App {
         let query = query.trim();
         if query.is_empty() {
             self.clear_search();
-            self.status = "Search cleared.".to_string();
+            self.jump_to_latest();
+            self.status = "Search cleared; LIVE transcript restored.".to_string();
             return;
         }
+
+        self.search_view = true;
+        self.search_scroll = 0;
+        self.search_error = None;
+        self.search_hits.clear();
+        self.search_hit_entry_indices.clear();
+        self.matches.clear();
+        self.active_match = None;
+        self.conversation_view = None;
+        self.conversation_focus_entry = None;
 
         match self.journal.search_postgres(query.to_string()) {
             Ok(Some(request_id)) => {
                 self.pending_postgres_search = Some((request_id, query.to_string()));
                 self.search_query = Some(query.to_string());
-                self.matches.clear();
-                self.active_match = None;
-                self.conversation_focus_entry = None;
-                self.status = format!("Searching PostgreSQL index for {:?}…", query);
+                self.search_mode_label = "POSTGRESQL".to_string();
+                self.search_total = 0;
+                self.search_page_offset = 0;
+                self.status = format!("Searching PostgreSQL for {:?}… Esc returns LIVE.", query);
                 return;
             }
-            Ok(None) => {}
+            Ok(None) => { self.search_view = false; }
             Err(error) => {
+                self.search_error = Some(error.to_string());
                 self.status = format!("PostgreSQL search failed: {error}");
                 return;
             }
         }
 
-        let needle = query.to_lowercase();
+        let local_query = query.split_whitespace()
+            .filter(|token| !token.starts_with("--") && !token.contains(':'))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_string();
+        let needle = if local_query.is_empty() { query } else { local_query.as_str() };
+        let needle_lower = needle.to_lowercase();
         let found = self
             .searchable_entry_texts()
             .into_iter()
             .filter_map(|(index, text)| {
                 text.to_lowercase()
-                    .contains(needle.as_str())
-                    .then_some(index)
+                    .contains(needle_lower.as_str())
+                    .then_some((index, text))
             })
             .collect::<Vec<_>>();
 
-        self.search_query = Some(query.to_string());
-        self.matches = found;
-        self.conversation_focus_entry = None;
+        self.search_query = Some(needle.to_string());
+        self.search_mode_label = "LOCAL JSONL SUBSTRING".to_string();
+        self.search_total = found.len();
+        self.search_page_offset = 0;
+        self.search_page_limit = found.len().max(1);
+        self.matches = found.iter().map(|(index, _)| *index).collect();
+        self.matches = found.into_iter().map(|(index, _)| index).collect();
+
         if !self.matches.is_empty() {
-            let latest_position = self.matches.len() - 1;
-            self.activate_match(latest_position);
+            let latest = self.matches.len() - 1;
+            self.activate_match(latest);
             self.status = format!(
-                "Found {} hit(s) for {:?} across the journal and full Hermes conversation text. n/N navigate.",
-                self.matches.len(),
-                query
+                "Found {} local substring hit(s). Configure PostgreSQL for ranked full-text search.",
+                self.matches.len()
             );
         } else {
-            self.active_match = None;
-            self.conversation_view = None;
             self.status = format!(
-                "No matches for {:?} in {} journal entries or Hermes conversation messages.",
-                query,
+                "No local matches for {:?} in {} journal entries or Hermes conversation messages. Esc returns LIVE.",
+                needle,
                 self.journal.entries.len()
             );
         }
     }
 
-    pub fn next_match(&mut self) {
-        if self.matches.is_empty() {
+    /// Select a result without opening a Hermes conversation overlay.
+    /// Select a result using PostgreSQL ranking order, including records
+    /// owned by another terminal and not mirrored into this local cache.
+    pub fn select_search_result(&mut self, position: usize) {
+        if self.search_hits.is_empty() {
+            self.active_match = None;
+            self.selected_row = None;
             return;
         }
+        let position = position.min(self.search_hits.len() - 1);
+        self.active_match = Some(position);
+        self.selected_row = self.search_hit_entry_indices.get(position).copied().flatten();
+        self.follow_tail = false;
+        let visible_results = (self.feed_viewport_height / 2).max(1);
+        if position < self.search_scroll {
+            self.search_scroll = position;
+        } else if position >= self.search_scroll.saturating_add(visible_results) {
+            self.search_scroll = position.saturating_add(1).saturating_sub(visible_results);
+        }
+        let hit = &self.search_hits[position];
+        self.status = format!(
+            "Search result {}/{} · {} · Esc returns LIVE.",
+            self.search_page_offset + position + 1,
+            self.search_total.max(self.search_hits.len()),
+            hit.kind
+        );
+    }
+
+    pub fn scroll_search_results(&mut self, amount: usize) {
+        let visible_results = (self.feed_viewport_height / 2).max(1);
+        let max_top = self.search_hits.len().saturating_sub(visible_results);
+        self.search_scroll = self.search_scroll.saturating_add(amount).min(max_top);
+    }
+
+    pub fn open_active_search_result(&mut self) {
+        let Some(position) = self.active_match else { return; };
+        let Some(index) = self.search_hit_entry_indices.get(position).copied().flatten() else {
+            self.status = "This PostgreSQL record belongs to another live terminal. Its indexed snippet is shown here; its full context is not mirrored into this session.".to_string();
+            return;
+        };
+        let is_hermes_hit = self.journal.entries.get(index)
+            .is_some_and(|entry| is_hermes_event(entry.kind));
+        if is_hermes_hit && self.open_conversation_for_entry(index) {
+            self.conversation_focus_entry = Some(index);
+            self.conversation_follow_tail = false;
+            self.conversation_scroll = 0;
+        } else {
+            self.message_view_index = Some(index);
+            self.message_view_scroll = 0;
+        }
+    }
+
+    pub fn pending_postgres_search_is_pending(&self) -> bool {
+        self.pending_postgres_search.is_some()
+    }
+
+    pub fn next_match(&mut self) {
+        if self.search_view {
+            if self.search_hits.is_empty() { return; }
+            let next = self.active_match.unwrap_or(0).saturating_add(1) % self.search_hits.len();
+            let reopen_detail = self.conversation_view.is_some() || self.message_view_index.is_some();
+            self.conversation_view = None;
+            self.message_view_index = None;
+            self.select_search_result(next);
+            if reopen_detail { self.open_active_search_result(); }
+            return;
+        }
+        if self.matches.is_empty() { return; }
         let next = self.active_match.unwrap_or(0).saturating_add(1) % self.matches.len();
         self.activate_match(next);
     }
 
     pub fn previous_match(&mut self) {
-        if self.matches.is_empty() {
+        if self.search_view {
+            if self.search_hits.is_empty() { return; }
+            let current = self.active_match.unwrap_or(0);
+            let previous = if current == 0 { self.search_hits.len() - 1 } else { current - 1 };
+            let reopen_detail = self.conversation_view.is_some() || self.message_view_index.is_some();
+            self.conversation_view = None;
+            self.message_view_index = None;
+            self.select_search_result(previous);
+            if reopen_detail { self.open_active_search_result(); }
             return;
         }
+        if self.matches.is_empty() { return; }
         let current = self.active_match.unwrap_or(0);
-        let previous = if current == 0 {
-            self.matches.len() - 1
-        } else {
-            current - 1
-        };
+        let previous = if current == 0 { self.matches.len() - 1 } else { current - 1 };
         self.activate_match(previous);
     }
 
@@ -2014,7 +2175,7 @@ impl App {
     }
 
     pub fn is_match(&self, entry_index: usize) -> bool {
-        self.matches.binary_search(&entry_index).is_ok()
+        self.matches.contains(&entry_index)
     }
 
     pub fn is_active_match(&self, entry_index: usize) -> bool {
@@ -3286,6 +3447,108 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+
+    #[test]
+    fn postgres_search_workspace_retains_remote_hits_without_local_rows() {
+        let (mut app, path) = test_app();
+        app.search_view = true;
+        app.search_total = 1;
+        app.search_hits = vec![crate::postgres::SearchHit {
+            record_id: "record-on-another-terminal".to_string(),
+            kind: "terminal_output".to_string(),
+            occurred_at: "2026-11-11T12:00:00Z".to_string(),
+            snippet: "remote journal result".to_string(),
+            rank: 0.4,
+        }];
+        app.search_hit_entry_indices = vec![None];
+
+        app.select_search_result(0);
+
+        assert_eq!(app.active_match, Some(0));
+        assert!(app.selected_row.is_none());
+        assert_eq!(app.search_hits[0].snippet, "remote journal result");
+        app.open_active_search_result();
+        assert!(app.status.contains("another live terminal"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn postgres_search_results_workspace_returns_to_live_tail_on_escape() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        app.journal.append(Entry::with_kind(EntryKind::Note, "older result".to_string())).expect("append older");
+        app.journal.append(Entry::with_kind(EntryKind::Note, "newest live row".to_string())).expect("append newest");
+        app.feed_viewport_height = 1;
+        app.search_view = true;
+        app.search_query = Some("result".to_string());
+        app.matches = vec![0];
+        app.active_match = Some(0);
+        app.follow_tail = false;
+        app.scroll_top = 0;
+
+        app.exit_search_view();
+
+        assert!(!app.search_view);
+        assert!(app.search_query.is_none());
+        assert!(app.matches.is_empty());
+        assert!(app.follow_tail);
+        assert_eq!(app.current_top(), 1);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn ranked_search_results_keep_database_order_without_sorted_transcript_indices() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        for text in ["result zero", "result one", "result two"] {
+            app.journal.append(Entry::with_kind(EntryKind::Note, text.to_string())).expect("append result");
+        }
+        app.search_view = true;
+        app.search_hits = vec![
+            crate::postgres::SearchHit {
+                record_id: app.journal.entries[2].record_id.clone().unwrap(),
+                kind: "note".to_string(),
+                occurred_at: app.journal.entries[2].timestamp.clone(),
+                snippet: "result two".to_string(),
+                rank: 0.9,
+            },
+            crate::postgres::SearchHit {
+                record_id: app.journal.entries[0].record_id.clone().unwrap(),
+                kind: "note".to_string(),
+                occurred_at: app.journal.entries[0].timestamp.clone(),
+                snippet: "result zero".to_string(),
+                rank: 0.8,
+            },
+            crate::postgres::SearchHit {
+                record_id: app.journal.entries[1].record_id.clone().unwrap(),
+                kind: "note".to_string(),
+                occurred_at: app.journal.entries[1].timestamp.clone(),
+                snippet: "result one".to_string(),
+                rank: 0.7,
+            },
+        ];
+        app.search_hit_entry_indices = vec![Some(2), Some(0), Some(1)];
+        app.matches = vec![2, 0, 1];
+        app.search_total = 3;
+        app.feed_viewport_height = 4;
+        app.select_search_result(1);
+
+        assert_eq!(app.active_match, Some(1));
+        assert_eq!(app.selected_row, Some(0));
+        assert!(app.is_match(0));
+        assert!(app.is_match(1));
+        assert!(app.is_match(2));
+
+        app.next_match();
+        assert_eq!(app.active_match, Some(2));
+        assert_eq!(app.selected_row, Some(1));
+        app.previous_match();
+        assert_eq!(app.active_match, Some(1));
+        assert_eq!(app.selected_row, Some(0));
+        let _ = fs::remove_file(path);
+    }
 }
 
 

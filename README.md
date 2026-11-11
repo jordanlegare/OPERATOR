@@ -80,8 +80,10 @@ The default input mode is **TERMINAL**.
 - `Alt+Left` / `Alt+Right` horizontally pan the feed.
 - Unbounded in-memory `Vec<Entry>` with no application-level cache eviction.
 - Append-only persistence: local JSONL by default, or PostgreSQL as the authoritative journal when `OPERATOR_DATABASE_URL` is configured. Non-secret commands, notes, useful terminal output records, and system events are retained. Empty terminal-output rows and standard shell-prompt rows are filtered both when loading older journals and when appending new output; existing journal files are not rewritten.
-- `/search <terms>` searches the complete text of journal entries and every Hermes conversation event, including assistant responses, tool arguments/results, prior context, and coalesced live-stream text. A hit in a hidden Hermes event opens its conversation at the matching message.
-- `n` / `N` navigate search hits.
+- `/search <terms>` searches journal entries and Hermes conversation events. With PostgreSQL enabled, it opens a separate results workspace while live capture and persistence continue; press `Esc` to return to the newest live transcript row.
+- `n` / `N` navigate ranked search results; Enter opens the matching Hermes conversation when applicable.
+- PostgreSQL search modes include web full-text, literal substring, exact phrase, advanced `tsquery`, and trigram fuzzy matching, with kind/session/conversation/date filters and paged results.
+- PostgreSQL search results are rendered from the database result itself, so records originating in other terminals are still discoverable even when their full bodies are not mirrored into the current terminal's cache; remote records display indexed snippets and metadata, while full-record opening requires the row to be locally available.
 - Command/input history, Bash-powered Tab completion for commands and filesystem paths, nine high-contrast color palettes, export, stats, path display, and save/retry.
 - Older journal entries without a `kind` field remain compatible and load as `note` entries.
 
@@ -322,10 +324,15 @@ The palettes are built into OPERATOR and require no external theme package or co
 | `Ctrl+W` | Toggle transcript word wrap on/off |
 | `/note text` | Save a note without switching mode |
 | `!command` | Run a shell command from NOTES mode |
-| `/search phrase` | Search the entire journal and jump to the latest match |
+| `/search phrase` | Search; PostgreSQL mode opens a ranked results workspace |
+| `/search --literal TEXT` | Literal case-insensitive substring search |
+| `/search --phrase TEXT` | PostgreSQL phrase search |
+| `/search --tsquery QUERY` | Advanced PostgreSQL `tsquery` syntax |
+| `/search --fuzzy TEXT` | Trigram similarity search |
+| Search filters | `kind:`, `session:`, `conversation:`, `after:`, `before:`, `limit:`, `offset:` |
 | `/view` | Open the full body of the selected Hermes event |
 | `/threads` | Browse expandable Hermes conversations and their complete tool/assistant timeline |
-| `n` / `N` | Next / previous search result when the input is empty |
+| `n` / `N` | Next / previous search result |
 | `/clear` | Clear search and return to the live tail; does not delete data |
 | `/save` | Retry pending writes and sync the journal |
 | `/export [path]` | Export the complete journal as readable text |
@@ -365,7 +372,7 @@ The palettes are built into OPERATOR and require no external theme package or co
 | `Ctrl+A` / `Ctrl+E` | Move input cursor to start / end |
 | `Ctrl+S` | Save / retry pending writes |
 | `Ctrl+D` | Send end-of-input to the shell when the terminal input is empty |
-| `Esc` | Clear the current input line; with an empty line, clear an active search |
+| `Esc` | Clear input; in PostgreSQL search results return to the live transcript |
 | `Ctrl+Q` | Quit OPERATOR |
 | `F12` | Show or hide the animated full-screen credits splash |
 
@@ -431,7 +438,7 @@ When PostgreSQL is configured:
 
 - PostgreSQL is the authoritative store. New notes, commands, terminal output, system records, and Hermes events are written to the database by a dedicated background worker so database operations do not block the TUI event loop.
 - On the first connection only, if the database contains no journal records, OPERATOR imports valid records from the legacy JSONL file selected by `--file` (or the default `~/.local/share/operator/journal.jsonl`). Import preserves record IDs, event IDs, original timestamps, and Hermes metadata. An already populated database is not silently merged with a local JSONL file.
-- Search uses PostgreSQL GIN full-text and `pg_trgm` substring indexes. Streamed Hermes deltas are indexed as a reconstructed logical message so searches can span delta boundaries. Searches are submitted asynchronously.
+- Search uses PostgreSQL GIN full-text and `pg_trgm` indexes. Modes include `websearch_to_tsquery`, `phraseto_tsquery`, `to_tsquery`, literal `LIKE`, and trigram similarity ranking. Results include snippets and relevance scores where applicable, and support kind/session/conversation/date filters plus `limit:`/`offset:` pagination. Streamed Hermes deltas are indexed as a reconstructed logical message so searches can span delta boundaries. Searches are submitted asynchronously and replace the transcript window until Escape returns to LIVE.
 - `LISTEN/NOTIFY` wakes connected OPERATOR instances after commits. Each instance also polls the monotonically increasing database ID as a recovery path if a notification is missed or its listener disconnects.
 - Notes and Hermes events synchronize live between connected OPERATOR instances, matching the existing JSONL behavior. Shell commands, raw PTY output, and system notices remain local to their originating TUI during live sessions; all records are still persisted centrally and loaded from PostgreSQL at startup. Treat database access as access to the complete shared journal; do not share one database between users who should not see one another's commands, output, notes, or Hermes activity.
 - `/save` waits for queued database writes to commit. `/export-jsonl [FILE]` exports the original, uncoalesced event stream. `/export [FILE]` continues to produce readable plain text.
