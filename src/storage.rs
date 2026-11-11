@@ -1282,7 +1282,7 @@ pub fn sanitize_multiline(input: &str) -> String {
         .collect()
 }
 
-fn sanitize_entry_text(kind: EntryKind, input: &str) -> String {
+pub(crate) fn sanitize_entry_text(kind: EntryKind, input: &str) -> String {
     match kind {
         EntryKind::HermesUser
         | EntryKind::HermesAssistant
