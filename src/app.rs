@@ -3642,6 +3642,44 @@ mod tests {
     }
 
     #[test]
+    fn hot_cache_expiry_preserves_full_archive_search_and_open_historical_detail() {
+        use crate::storage::{Entry, EntryKind, HOT_WINDOW_DAYS};
+        use chrono::{Duration, Utc};
+
+        let (mut app, path) = test_app();
+        let entry = Entry::with_kind(
+            EntryKind::Note,
+            "historical needle preserved after cache expiry".to_string(),
+        );
+        let record_id = entry.record_id.clone().expect("record ID");
+        app.journal.append(entry).expect("append searchable entry");
+
+        app.search("historical needle");
+        wait_for_archive_search(&mut app);
+        assert!(app.search_view);
+        assert_eq!(app.search_hits.len(), 1);
+        app.open_active_search_result();
+        assert!(app.archive_detail_entry.is_some());
+
+        let expired = Utc::now() - Duration::days(HOT_WINDOW_DAYS + 1);
+        app.journal.entries[0].timestamp = expired.to_rfc3339();
+        app.journal.hot_record_timestamps.insert(record_id, expired);
+
+        assert_eq!(app.prune_hot_cache(), 1);
+        assert!(app.journal.entries.is_empty());
+        assert!(app.search_view, "archive search must remain open");
+        assert_eq!(app.search_hits.len(), 1, "archive search results must survive pruning");
+        assert_eq!(app.search_hit_entry_indices, vec![None]);
+        assert!(
+            app.archive_detail_entry.as_ref()
+                .is_some_and(|entry| entry.text.contains("historical needle")),
+            "the selected historical record must stay open after hot-cache expiry"
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn ranked_search_results_keep_database_order_without_sorted_transcript_indices() {
         use crate::storage::{Entry, EntryKind};
 
