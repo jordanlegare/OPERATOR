@@ -1890,6 +1890,13 @@ fn handle_key(
     app: &mut App,
     shell: &mut Option<ShellSession>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    // Keep the splash toggle global, even while help, review, or conversation
+    // views own keyboard focus.
+    if code == KeyCode::F(12) {
+        app.toggle_banner();
+        return Ok(false);
+    }
+
     // Conversation list and thread viewer own keyboard focus. The thread
     // is rendered from the current journal on every frame, so stream deltas
     // imported by the main loop appear without closing or reopening the modal.
@@ -2075,7 +2082,6 @@ fn handle_key(
                 app.show_help = false;
             }
         }
-        KeyCode::F(12) => app.toggle_banner(),
         KeyCode::Enter => {
             if !app.open_selected_hermes_message() {
                 app.submit(shell.as_mut());
