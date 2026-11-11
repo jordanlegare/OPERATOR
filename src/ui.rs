@@ -552,163 +552,273 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
         r" \____/|_|   |_____|_| \_/_/   \_\_| \___/|_| \_\",
     ];
 
+    // The supplied poppy is kept as text (rather than an image) so it stays
+    // crisp in terminal fonts. It is fitted to the available bottom-left area.
+    const POPPY: [&str; 33] = [
+        r"⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⡠⠖⠛⠢⠤⠤⢤⣀⡀⢀⣠⣶⣲⠀⠈⠉⠉⠑⠒⣦⠤⢄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠀⣀⣤⠔⠚⠻⠤⠤⣀⡀⠀⠀⠀⠀⢫⢿⠿⣌⡇⠀⠀⠀⠀⠀⠀⡏⠀⠀⠉⠢⣄⠀⠀⢀⣀⣀⣀⣀⡀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⣴⣾⠟⠁⠀⣄⠀⠀⠀⡀⠀⠉⠳⣄⠀⠀⠀⢿⠀⠘⢳⠀⡀⠀⠀⠀⢸⡇⢀⢠⠃⠀⡨⠗⢉⣟⡁⠀⠀⠀⠉⠉⢲⢤⡀⠀⠀⠀",
+        r"⠀⢰⠀⠈⠳⣄⢄⠈⢦⡀⠀⠘⣦⠀⠀⢫⣣⠀⠀⢸⠀⡆⠀⣟⡇⠀⠀⢀⡿⠀⣜⢇⡴⠋⠀⠀⣎⠞⠀⠀⠀⠀⠀⣰⣤⠾⠛⠻⢶⡄",
+        r"⠀⢸⠀⠀⠀⠘⢿⣷⢄⠘⣶⢄⠘⢷⡀⠀⢳⣧⡀⢸⡈⠇⠀⢸⡇⠀⢰⢸⡁⢰⣹⠎⠀⠀⠀⣸⡎⢀⠞⠀⣠⢶⡟⠋⠀⠀⠀⠀⡌⠋",
+        r"⠀⢸⠀⠀⠀⢀⠈⠻⣷⣝⠮⣳⣄⠀⠻⣆⠘⠸⣧⢀⢿⠀⠀⠈⡄⠀⡞⢸⡇⠀⡟⠀⠀⠀⢰⡟⣴⠃⢠⠞⠀⣼⠀⠀⠰⠀⠀⢀⠂⠀",
+        r"⠀⠈⢧⠀⠀⠈⠳⣄⠈⠻⣧⣌⠻⣷⡀⠹⣻⡆⠘⡷⠱⣧⠀⣠⣷⣀⣧⣤⣧⣸⠁⠀⠀⢀⣿⡿⢁⣴⠏⠀⢰⠃⠀⢀⠀⠀⢀⠿⢒⠏",
+        r"⠀⢀⣈⡆⠀⠀⠀⠈⠓⢤⡈⠛⢷⣄⠻⡄⢹⣷⡀⣸⣾⣿⣿⣿⣾⣿⣿⣿⣿⣥⣧⣗⣀⣾⢿⣾⢿⠋⠀⣠⠇⠀⠀⠈⣼⣸⠫⣠⡾⠀",
+        r"⠞⢁⠀⠹⡀⠀⠀⠀⠀⠀⠙⢦⣀⠙⠢⡹⣄⠹⣷⣟⣿⢿⣼⣿⠿⠙⢛⣛⠷⣾⣧⣿⣿⣷⠋⡡⠋⣠⣪⣿⠀⠀⠀⢰⣿⠃⣦⡞⠁⠀",
+        r"⣇⠀⠱⣄⢙⡦⡀⠀⠀⠀⠀⠄⣙⠷⣢⣌⣮⡢⣬⣽⣷⣿⣿⣿⡀⠸⢷⡤⢀⣿⣿⣿⣭⣿⠏⠀⢀⣿⡿⣝⣀⢤⣶⣞⣣⡼⠟⠀⠀⠀",
+        r"⡇⠀⠙⠚⠵⣍⣛⠳⢤⣀⣤⣤⣌⣉⣒⣯⣝⣛⣻⣿⢿⣿⣿⣟⣿⣷⣶⣾⣿⣿⣟⡿⣯⣸⣀⣴⣿⠵⢺⡷⠋⠉⠀⣠⠎⠀⠀⠀⠀⠀",
+        r"⠹⣄⠀⠀⢠⠀⢉⡳⢆⣨⠽⠖⣦⣤⣬⣭⣭⣿⣿⣿⣿⣟⣛⣿⣿⣿⣿⣿⣿⣿⣤⣤⣿⣿⣿⡿⠗⠀⢸⠀⠀⢀⡔⠁⠀⠀⠀⠀⠀⠀",
+        r"⠀⠈⠓⠦⣼⣄⠀⠀⠀⠀⠉⠻⠥⠤⣴⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣽⣿⣿⣟⣿⣿⣿⡿⠟⠉⠀⠀⣼⠁⠀⣠⠊⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⣶⣾⡷⣄⠀⠀⠀⠀⠀⠀⠀⠀⠘⢛⣿⣿⣟⣿⣿⣿⣿⡏⠙⡟⣿⢿⣿⠏⠀⠀⠀⠀⣶⠏⢀⠔⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠙⠷⣤⣽⢶⣄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠰⠟⢻⡿⠋⡟⠃⣀⡧⠽⠿⠧⠖⢊⣵⣶⡶⠿⠖⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠀⠀⠀⠈⠉⠛⠛⠓⠲⠶⣶⣦⢦⡤⣀⡠⠤⠯⠤⠤⠛⠉⠀⠀⠀⣠⣶⢞⠿⠃⣲⣤⢤⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠀⣀⡴⠒⠲⣶⠾⡏⡟⠙⣦⠈⠿⡛⢾⢷⣄⣠⣴⣦⣀⣠⣶⠶⠛⡽⢳⠏⣴⣟⡵⠷⢶⡾⠂⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠾⣢⡝⢁⣴⣷⠞⣧⣠⢤⡇⠓⠤⠼⣆⠃⠰⡄⠉⠉⢹⣯⣿⣠⠘⢠⢯⢞⣛⡶⢾⣗⣮⣿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠈⠩⢶⣿⣾⣵⡂⠸⣅⣾⣤⣴⣚⣛⠾⢷⣄⢙⠦⣀⣸⣿⣿⠤⠤⢶⣭⣄⡀⠒⠲⢶⣮⣝⣣⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠀⠀⠘⠋⡾⢻⣄⣤⣿⠟⠁⠀⠙⢦⣀⠀⠈⢋⣱⣾⠋⣡⠆⠀⠀⡄⢳⢹⡿⠲⢄⠹⡮⠑⢯⡣⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠒⠯⢅⣿⢞⣼⡷⢳⡀⢸⠀⣷⡷⡄⠀⠘⣇⠈⠠⣝⣿⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⣿⣿⡇⠀⡷⠃⠀⢹⠹⣽⣆⠀⠙⠀⠀⠈⠻⠦⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣿⣟⡇⡼⠷⡾⠃⡏⢧⣿⠛⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣿⣿⡇⠀⢺⡏⣼⡇⠈⠻⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣿⣿⡇⠀⠘⠊⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣿⡏⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣿⣿⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢻⣧⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⣿⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠸⣿⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢹⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+    ];
+
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
+    // Only colour changes over time: every element keeps a fixed coordinate.
+    // This gives the splash a slow spectral pulse without scrolling or drifting.
+    let phase = ((now_ms / 140) % 360) as f32;
     let popup = centered_rect(96, 96, area);
     frame.render_widget(Clear, popup);
 
+    let border = spectrum_color(phase + 180.0);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.primary).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(border).add_modifier(Modifier::BOLD))
         .title(Span::styled(
-            " OPERATOR // SYSTEM CREDITS ",
-            Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
+            " ✧ O P E R A T O R  //  SYSTEM CREDITS ✧ ",
+            Style::default().fg(spectrum_color(phase + 35.0)).add_modifier(Modifier::BOLD),
         ))
         .style(Style::default().bg(theme.panel));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    if inner.height < 3 || inner.width < 12 {
+    if inner.height < 8 || inner.width < 24 {
         frame.render_widget(
-            Paragraph::new("OPERATOR · F12 RESUME")
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(theme.primary).bg(theme.panel)),
+            Paragraph::new("✦ OPERATOR · F12 HIDE ✦")
+                .alignment(Alignment::Left)
+                .style(Style::default().fg(spectrum_color(phase)).bg(theme.panel)),
             inner,
         );
         return;
     }
 
-    let footer_height = 1;
-    let header_height = inner.height.saturating_sub(footer_height + 1).min(7);
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(header_height),
-            Constraint::Min(1),
-            Constraint::Length(footer_height),
-        ])
-        .split(inner);
-    let body_height = sections[1].height.max(1) as usize;
-
-    let widest_logo = LOGO.iter().map(|line| line.chars().count()).max().unwrap_or(0);
-    let scan_position = ((now_ms / 75) % (widest_logo + 12) as u128) as usize;
-    let mut header = Vec::new();
-    if inner.width as usize >= widest_logo + 2 && header_height >= 5 {
-        for line in LOGO {
-            header.push(animated_logo_line(line, scan_position, theme));
-        }
-        if header_height >= 6 {
-            header.push(Line::from(vec![
-                Span::styled("◆  ", Style::default().fg(theme.success).add_modifier(Modifier::BOLD)),
-                Span::styled(
-                    "SHELL  ·  NOTES  ·  JOURNAL  ·  HERMES",
-                    Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("  ◆", Style::default().fg(theme.success).add_modifier(Modifier::BOLD)),
-            ]));
-        }
+    let quote = "- NEVER AGAIN";
+    let credit = "Released with love by Jordan Légaré - 11/11/2026";
+    let quote_width = UnicodeWidthStr::width(quote);
+    let credit_width = UnicodeWidthStr::width(credit);
+    let footer_height = if inner.width as usize >= quote_width + credit_width + 1 {
+        1usize
     } else {
-        header.push(Line::from(Span::styled(
-            "◆  O P E R A T O R  ◆",
-            Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
-        )));
-        if header_height >= 2 {
-            header.push(Line::from(Span::styled(
-                "SHELL  ·  NOTES  ·  JOURNAL  ·  HERMES",
-                Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
-            )));
-        }
-    }
-    frame.render_widget(
-        Paragraph::new(header)
-            .alignment(Alignment::Center)
-            .style(Style::default().bg(theme.panel)),
-        sections[0],
-    );
+        2usize
+    };
+    let total_height = inner.height as usize;
+    let art_height = (total_height / 3)
+        .max(4)
+        .min(POPPY.len())
+        .min(total_height.saturating_sub(footer_height + 4));
+    let main_height = total_height.saturating_sub(art_height + footer_height);
 
-    // Roll the exact /help guide through the available viewport like credits.
-    // Leading/trailing blank rows let the text enter and leave gracefully;
-    // the pauses at either end make the first and last sections readable.
-    let guide = help_lines(theme);
-    let lead_in = body_height / 2;
-    let trail_out = body_height.saturating_sub(lead_in);
-    let mut rolling_lines = Vec::with_capacity(lead_in + guide.len() + trail_out);
-    for _ in 0..lead_in {
-        rolling_lines.push(Line::from(""));
-    }
-    rolling_lines.extend(guide);
-    for _ in 0..trail_out {
-        rolling_lines.push(Line::from(""));
-    }
-
-    let scroll_range = rolling_lines.len().saturating_sub(body_height);
-    let row_period_ms = 720u128;
-    let pause_ms = 2_000u128;
-    let travel_ms = (scroll_range as u128).saturating_mul(row_period_ms);
-    let cycle_ms = pause_ms
-        .saturating_add(travel_ms)
-        .saturating_add(pause_ms)
-        .max(1);
-    let cycle_position = now_ms % cycle_ms;
-    let scroll = if cycle_position < pause_ms {
-        0
-    } else if cycle_position < pause_ms.saturating_add(travel_ms) {
-        ((cycle_position - pause_ms) / row_period_ms) as u16
-    } else {
-        scroll_range.min(u16::MAX as usize) as u16
+    let main_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: main_height as u16,
+    };
+    let art_area = Rect {
+        x: inner.x,
+        y: inner.y.saturating_add(main_height as u16),
+        width: inner.width,
+        height: art_height as u16,
+    };
+    let footer_area = Rect {
+        x: inner.x,
+        y: inner.y.saturating_add((main_height + art_height) as u16),
+        width: inner.width,
+        height: footer_height as u16,
     };
 
+    // A compact, stationary field guide keeps the splash legible on ordinary
+    // terminal heights. The full, unabridged guide remains available through /help.
+    const GUIDE: [&str; 13] = [
+        "PTY SHELL    Interactive shell; submitted commands and captured output enter the journal.",
+        "NOTES        Ctrl+T switches Terminal / Notes; /note TEXT stores a note.",
+        "SEARCH       /search WORDS scans terminal records and Hermes conversation bodies.",
+        "HERMES       Captured prompts, streams, tool activity, threads, and final-response review.",
+        "THREADS      /threads opens the conversation browser; Enter expands a thread.",
+        "REVIEW       /review on|off|status holds final answers for operator approval.",
+        "COMMANDS     /view · /save · /export · /stats · /path · /scp · /canada",
+        "CONTROL      Tab completion · Ctrl+P/N history · Ctrl+W wrap · Ctrl+S save.",
+        "THEMES       F2–F10 switches palettes; F12 hides or restores this splash.",
+        "HELP         /help opens the complete command and keyboard reference.",
+        "SSH          F1 opens the terminal workspace; SCP/SFTP passthrough is configurable.",
+        "JOURNAL      Persistent, searchable JSONL event stream for shell and Hermes activity.",
+        "FIELD NOTE   The work continues. The record remains. Never again.",
+    ];
+
+    let mut content = Vec::new();
+    if main_area.height >= 7 && main_area.width >= 56 {
+        for (row, line) in LOGO.iter().enumerate() {
+            content.push(psychedelic_line(line, phase, row, true));
+        }
+        content.push(psychedelic_line(
+            "✦ SHELL  ·  NOTES  ·  JOURNAL  ·  HERMES  ·  OPERATOR ✦",
+            phase + 80.0,
+            6,
+            true,
+        ));
+    } else {
+        content.push(psychedelic_line(
+            "✦ O P E R A T O R ✦",
+            phase + 80.0,
+            0,
+            true,
+        ));
+        content.push(psychedelic_line(
+            "SHELL  ·  NOTES  ·  JOURNAL  ·  HERMES",
+            phase + 110.0,
+            1,
+            true,
+        ));
+    }
+    content.push(Line::from(""));
+    let guide_slots = (main_area.height as usize).saturating_sub(content.len());
+    for (row, line) in GUIDE.iter().take(guide_slots).enumerate() {
+        content.push(psychedelic_line(
+            line,
+            phase + 145.0,
+            row + 8,
+            row == 0,
+        ));
+    }
+
+    // Keep the block vertically centred and left aligned; there is no timed
+    // scroll offset, marquee, or position animation.
+    let content_height = content.len().min(main_area.height as usize);
+    let top_padding = (main_area.height as usize).saturating_sub(content_height) / 2;
+    let content_area = Rect {
+        x: main_area.x,
+        y: main_area.y.saturating_add(top_padding as u16),
+        width: main_area.width,
+        height: content_height as u16,
+    };
     frame.render_widget(
-        Paragraph::new(rolling_lines)
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(theme.text).bg(theme.panel))
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
-        sections[1],
+        Paragraph::new(content)
+            .alignment(Alignment::Left)
+            .style(Style::default().fg(theme.text).bg(theme.panel)),
+        content_area,
     );
 
-    let pulse = if (now_ms / 400) % 2 == 0 {
-        theme.success
-    } else {
-        theme.primary
-    };
-    let footer = Line::from(vec![
-        Span::styled(" F12 ", Style::default().fg(theme.bg).bg(pulse).add_modifier(Modifier::BOLD)),
-        Span::styled(" HIDE SPLASH  ·  ", Style::default().fg(theme.text)),
-        Span::styled("/help", Style::default().fg(theme.info).add_modifier(Modifier::BOLD)),
-        Span::styled(" OPENS THE SAME FIELD GUIDE  ·  ", Style::default().fg(theme.muted)),
-        Span::styled("OPERATOR", Style::default().fg(theme.primary).add_modifier(Modifier::BOLD)),
-    ]);
+    // Sample the supplied illustration evenly when the terminal is too short
+    // for all 33 source rows, then fit each row horizontally without wrapping.
+    let mut poppy = Vec::with_capacity(art_height);
+    for row in 0..art_height {
+        let source_row = if art_height == 1 {
+            0
+        } else {
+            row.saturating_mul(POPPY.len() - 1) / (art_height - 1)
+        };
+        let fitted = fit_poppy_row(POPPY[source_row], art_area.width as usize);
+        poppy.push(psychedelic_line(&fitted, phase + 205.0, row, row % 3 == 0));
+    }
     frame.render_widget(
-        Paragraph::new(footer)
-            .alignment(Alignment::Center)
+        Paragraph::new(poppy)
+            .alignment(Alignment::Left)
             .style(Style::default().bg(theme.panel)),
-        sections[2],
+        art_area,
+    );
+
+    let mut footer_lines = Vec::with_capacity(footer_height);
+    if footer_height == 1 {
+        let spacer_width = (inner.width as usize)
+            .saturating_sub(quote_width + credit_width);
+        let mut spans = psychedelic_line(quote, phase + 15.0, 0, true).spans;
+        spans.push(Span::raw(" ".repeat(spacer_width)));
+        spans.extend(psychedelic_line(credit, phase + 190.0, 1, true).spans);
+        footer_lines.push(Line::from(spans));
+    } else {
+        footer_lines.push(psychedelic_line(quote, phase + 15.0, 0, true));
+        let left_padding = (inner.width as usize).saturating_sub(credit_width);
+        let mut spans = vec![Span::raw(" ".repeat(left_padding))];
+        spans.extend(psychedelic_line(credit, phase + 190.0, 1, true).spans);
+        footer_lines.push(Line::from(spans));
+    }
+    frame.render_widget(
+        Paragraph::new(footer_lines)
+            .alignment(Alignment::Left)
+            .style(Style::default().bg(theme.panel)),
+        footer_area,
     );
 }
 
-fn animated_logo_line(source: &str, scan_position: usize, theme: Theme) -> Line<'static> {
+fn fit_poppy_row(source: &str, target_width: usize) -> String {
+    let characters = source.chars().collect::<Vec<_>>();
+    if characters.len() <= target_width {
+        return source.to_string();
+    }
+    if target_width == 0 {
+        return String::new();
+    }
+    (0..target_width)
+        .map(|column| characters[column.saturating_mul(characters.len()) / target_width])
+        .collect()
+}
+
+fn psychedelic_line(
+    source: &str,
+    phase: f32,
+    row: usize,
+    bold: bool,
+) -> Line<'static> {
     let spans = source
         .chars()
         .enumerate()
         .map(|(column, character)| {
-            let distance = column.abs_diff(scan_position);
-            let color = if distance <= 1 {
-                Color::White
-            } else if distance <= 5 {
-                theme.success
-            } else {
-                theme.primary
-            };
-            Span::styled(
-                character.to_string(),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            )
+            let hue = phase + column as f32 * 8.5 + row as f32 * 19.0;
+            let mut style = Style::default().fg(spectrum_color(hue));
+            if bold {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            Span::styled(character.to_string(), style)
         })
         .collect::<Vec<_>>();
     Line::from(spans)
+}
+
+fn spectrum_color(hue: f32) -> Color {
+    let hue = hue.rem_euclid(360.0);
+    let sector = (hue / 60.0).floor() as u8;
+    let fraction = (hue / 60.0) - sector as f32;
+    let rising = fraction * 255.0;
+    let falling = (1.0 - fraction) * 255.0;
+    let (red, green, blue) = match sector % 6 {
+        0 => (255.0, rising, 0.0),
+        1 => (falling, 255.0, 0.0),
+        2 => (0.0, 255.0, rising),
+        3 => (0.0, falling, 255.0),
+        4 => (rising, 0.0, 255.0),
+        _ => (255.0, 0.0, falling),
+    };
+    Color::Rgb(red as u8, green as u8, blue as u8)
 }
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
