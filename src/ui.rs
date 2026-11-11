@@ -567,7 +567,7 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
         r"⠹⣄⠀⠀⢠⠀⢉⡳⢆⣨⠽⠖⣦⣤⣬⣭⣭⣿⣿⣿⣿⣟⣛⣿⣿⣿⣿⣿⣿⣿⣤⣤⣿⣿⣿⡿⠗⠀⢸⠀⠀⢀⡔⠁⠀⠀⠀⠀⠀⠀",
         r"⠀⠈⠓⠦⣼⣄⠀⠀⠀⠀⠉⠻⠥⠤⣴⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣽⣿⣿⣟⣿⣿⣿⡿⠟⠉⠀⠀⣼⠁⠀⣠⠊⠀⠀⠀⠀⠀⠀⠀⠀",
         r"⠀⠀⠀⠀⣶⣾⡷⣄⠀⠀⠀⠀⠀⠀⠀⠀⠘⢛⣿⣿⣟⣿⣿⣿⣿⡏⠙⡟⣿⢿⣿⠏⠀⠀⠀⠀⣶⠏⢀⠔⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀",
-        r"⠀⠀⠀⠀⠙⢷⣤⣽⢶⣄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠰⠟⢻⡿⠋⡟⠃⣀⡧⠽⠿⠧⠖⢊⣵⣶⡶⠿⠖⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠙⠷⣤⣽⢶⣄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠰⠟⢻⡿⠋⡟⠃⣀⡧⠽⠿⠧⠖⢊⣵⣶⡶⠿⠖⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
         r"⠀⠀⠀⠀⠀⠀⠀⠈⠉⠛⠛⠓⠲⠶⣶⣦⢦⡤⣀⡠⠤⠯⠤⠤⠛⠉⠀⠀⠀⣠⣶⢞⠿⠃⣲⣤⢤⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
         r"⠀⠀⠀⠀⠀⣀⡴⠒⠲⣶⠾⡏⡟⠙⣦⠈⠿⡛⢾⢷⣄⣠⣴⣦⣀⣠⣶⠶⠛⡽⢳⠏⣴⣟⡵⠷⢶⡾⠂⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
         r"⠀⠀⠀⠀⠾⣢⡝⢁⣴⣷⠞⣧⣠⢤⡇⠓⠤⠼⣆⠃⠰⡄⠉⠉⢹⣯⣿⣠⠘⢠⢯⢞⣛⡶⢾⣗⣮⣿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
@@ -634,7 +634,7 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
     // Reserve enough vertical space for the complete poem before assigning
     // remaining rows to the poppy. On compact terminals the artwork contracts,
     // never the poem or its line breaks.
-    const POEM_HEIGHT: usize = 17;
+    const POEM_HEIGHT: usize = 26;
     let total_height = inner.height as usize;
     let art_height = (total_height / 3)
         .min(total_height.saturating_sub(footer_height + POEM_HEIGHT))
@@ -735,60 +735,76 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
     let poem_inner = poem_block.inner(right_area);
     frame.render_widget(poem_block, right_area);
 
-    let poem_source: [Option<&str>; POEM_HEIGHT] = [
-        Some("-=- Snowflakes and Ashes -=-"),
-        None,
-        Some("All that's left are minerals"),
-        Some("the frost succession"),
-        None,
-        Some("All that's left are the funerals"),
-        Some("the body processions"),
-        None,
-        Some("One by one they fall"),
-        Some("as white and grey they were"),
-        None,
-        Some("One by one they crawl"),
-        Some("as white and grey matter"),
-        None,
-        Some("For winter has brought a dream"),
-        Some("many awake, few sleeping"),
-        None,
+    const POEM: [&str; POEM_HEIGHT] = [
+        "-=- Snowflakes and Ashes -=-",
+        "",
+        "All that's left are minerals",
+        "the frost succession",
+        "All that's left are the funerals",
+        "the body processions",
+        "",
+        "One by one they fall",
+        "as white and grey they were",
+        "One by one they crawl",
+        "as white and grey matter",
+        "",
+        "For winter has brought a dream",
+        "many awake, few sleeping",
+        "For their dreams turned to ashes",
+        "a restless, relentless; struggling",
+        "",
+        "I closed my eyes to a headache",
+        "blinded by the light, Awake",
+        "They carry out burden and ache",
+        "blinded by the snowflake, awake",
+        "",
+        "I release you in heaven",
+        "White, grey a raven",
+        "on a windy day",
+        "I got carried away.",
     ];
-    // The remaining stanzas continue below in the same panel, after the
-    // first three stanzas, so compact layouts can still render them faithfully.
-    let mut poem_source = poem_source.to_vec();
-    poem_source.extend([
-        Some("For their dreams turned to ashes"),
-        Some("a restless, relentless; struggling"),
-        None,
-        Some("I closed my eyes to a headache"),
-        Some("blinded by the light, Awake"),
-        None,
-        Some("They carry out burden and ache"),
-        Some("blinded by the snowflake, awake"),
-        None,
-        Some("I release you in heaven"),
-        Some("White, grey a raven"),
-        Some("on a windy day"),
-        Some("I got carried away."),
-    ]);
 
-    let mut poem_lines = Vec::with_capacity(poem_source.len());
-    for (row, stanza_line) in poem_source.iter().enumerate() {
-        match stanza_line {
-            Some(text) if row == 0 => {
-                poem_lines.push(psychedelic_line(text, phase + 230.0, row, true));
+    let compact_poem = poem_inner.height < POEM_HEIGHT as u16;
+    let mut poem_lines = Vec::with_capacity(POEM_HEIGHT);
+    for (row, text) in POEM.iter().enumerate() {
+        if text.is_empty() {
+            if !compact_poem {
+                poem_lines.push(Line::from(""));
             }
-            Some(text) => {
-                let mut line = psychedelic_line(text, phase + 210.0, row, false);
-                for span in &mut line.spans {
-                    span.style = span.style.add_modifier(Modifier::ITALIC);
-                }
-                poem_lines.push(line);
+            continue;
+        }
+
+        if row == 0 {
+            poem_lines.push(psychedelic_line(
+                "❄  -= Snowflakes and Ashes =-  ❄",
+                phase + 230.0,
+                row,
+                true,
+            ));
+        } else {
+            let mut line = psychedelic_line(text, phase + 210.0, row, false);
+            for span in &mut line.spans {
+                span.style = span.style.add_modifier(Modifier::ITALIC);
             }
-            None => poem_lines.push(Line::from("")),
+            poem_lines.push(line);
         }
     }
+
+    let poem_height = poem_lines.len().min(poem_inner.height as usize);
+    let poem_top = (poem_inner.height as usize).saturating_sub(poem_height) / 2;
+    let poem_area = Rect {
+        x: poem_inner.x,
+        y: poem_inner.y.saturating_add(poem_top as u16),
+        width: poem_inner.width,
+        height: poem_height as u16,
+    };
+    frame.render_widget(
+        Paragraph::new(poem_lines)
+            .alignment(Alignment::Left)
+            .style(Style::default().fg(theme.text).bg(theme.panel))
+            .wrap(Wrap { trim: false }),
+        poem_area,
+    );
 
     let poem_height = poem_lines.len().min(poem_inner.height as usize);
     let poem_top = (poem_inner.height as usize).saturating_sub(poem_height) / 2;
