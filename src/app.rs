@@ -2165,6 +2165,10 @@ impl App {
         }
 
         let Some(index) = self.search_hit_entry_indices.get(position).copied().flatten() else {
+            if self.journal.backend_label() != "PostgreSQL" {
+                self.status = "This PostgreSQL record belongs to another live terminal. Its indexed snippet is shown here; full-record loading requires the PostgreSQL backend.".to_string();
+                return;
+            }
             if let Some(hit) = self.search_hits.get(position) {
                 match self.journal.fetch_postgres_archive_record(hit.record_id.clone()) {
                     Ok(request_id) => {
