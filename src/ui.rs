@@ -806,22 +806,6 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
         poem_area,
     );
 
-    let poem_height = poem_lines.len().min(poem_inner.height as usize);
-    let poem_top = (poem_inner.height as usize).saturating_sub(poem_height) / 2;
-    let poem_area = Rect {
-        x: poem_inner.x,
-        y: poem_inner.y.saturating_add(poem_top as u16),
-        width: poem_inner.width,
-        height: poem_height as u16,
-    };
-    frame.render_widget(
-        Paragraph::new(poem_lines)
-            .alignment(Alignment::Left)
-            .style(Style::default().fg(theme.text).bg(theme.panel))
-            .wrap(Wrap { trim: false }),
-        poem_area,
-    );
-
     // Keep the poppy at bottom-left, separate from the right-hand poem.
     let poppy_width = columns[0].width;
     let art_area = Rect {
