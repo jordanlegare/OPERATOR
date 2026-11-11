@@ -85,7 +85,7 @@ The default input mode is **TERMINAL**.
 - Local JSONL archive results are newest-first. Use `limit:` and `offset:` to page results; press Enter to load the selected historical record on demand. Adjacent Hermes stream deltas are reassembled for phrase matching.
 - `n` / `N` navigate ranked search results; Enter opens the matching Hermes conversation when applicable.
 - PostgreSQL search modes include web full-text, literal substring, exact phrase, advanced `tsquery`, and trigram fuzzy matching, with kind/session/conversation/date filters and paged results.
-- PostgreSQL search results are rendered from indexed archive records, so records originating in other terminals and records older than the hot window remain discoverable. Search results show indexed snippets and metadata; the local JSONL archive viewer loads an old full record by byte range only when opened.
+- PostgreSQL search results are rendered from indexed archive records, so records originating in other terminals and records older than the hot window remain discoverable. Search results show indexed snippets and metadata; Enter loads the selected full record on demand (by byte range in JSONL mode or by `record_id` in PostgreSQL mode), rather than mirroring historical bodies into the live cache.
 - Command/input history, Bash-powered Tab completion for commands and filesystem paths, nine high-contrast color palettes, export, stats, path display, and save/retry.
 - Older journal entries without a `kind` field remain compatible and load as `note` entries.
 
