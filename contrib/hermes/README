@@ -1,3 +1,48 @@
-operator-review directory and it's content go in ~/.hermes/plugins
+# Hermes integration installation
 
-the ~/.hermes/hooks directory should contains the files within this hook folder.
+Run these commands from the root of the OPERATOR repository on the machine that runs the Hermes gateway:
+
+```sh
+mkdir -p "$HOME/.hermes/hooks" "$HOME/.hermes/plugins/operator-review"
+
+install -m 700 contrib/hermes/hooks/operator-capture \
+  "$HOME/.hermes/hooks/operator-capture"
+install -m 600 contrib/hermes/hooks/operator-capture.py \
+  "$HOME/.hermes/hooks/operator-capture.py"
+
+install -m 600 contrib/hermes/operator-review/plugin.yaml \
+  "$HOME/.hermes/plugins/operator-review/plugin.yaml"
+install -m 600 contrib/hermes/operator-review/__init__.py \
+  "$HOME/.hermes/plugins/operator-review/__init__.py"
+```
+
+The wrapper is executable; the Python capture file is intentionally installed as mode `0600`. The wrapper runs it with `python3` and must be used as the configured shell-hook command.
+
+## Enable and validate response review
+
+The review plugin is separate from the shell capture hook. Installing `operator-capture` does not install or enable `operator-review`.
+
+Check `hermes plugins list`. If the old `streenote-review` plugin is still present and enabled, disable it, then enable the renamed plugin:
+
+```sh
+hermes plugins disable streenote-review
+hermes plugins enable operator-review
+hermes plugins doctor operator-review --ci
+hermes plugins list
+```
+
+Restart the Hermes gateway after changing its plugin installation or enabled-plugin list so the gateway reloads the plugin. `hermes hooks doctor` checks configured shell hooks only; it does not validate the response-review plugin.
+
+## Runtime diagnostics
+
+In an OPERATOR terminal, run `/review status`. The plugin's private diagnostic log is normally:
+
+```sh
+tail -f "/run/user/$(id -u)/operator/hermes-review.log"
+```
+
+A working path records `PLUGIN_REGISTERED`, then `CALLBACK_INVOKED` for a final answer, `SOCKET_ROUTES_RESOLVED` with at least one enabled reviewer, and `SESSION_REVIEW_ASSIGNED` when a terminal receives the review. If the plugin registration event is absent, check the plugin list/doctor and gateway logs. If the callback runs but resolves zero routes, compare its logged registry path with the OPERATOR terminal's registered review-session directory.
+
+## Shell hook configuration
+
+Merge `contrib/hermes/hooks/hooks.yaml.example` into the existing `hooks:` block in `~/.hermes/config.yaml`; do not add a second top-level `hooks:` key. Replace the example home path with the account's actual home directory.
