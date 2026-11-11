@@ -68,7 +68,7 @@ The default input mode is **TERMINAL**.
 
 ## Other features
 
-- ASCII-art banner that can be shown or hidden with F12, plus a live one-line input footer; banner visibility is restored at startup.
+- Animated, full-screen ASCII credits splash centered to the terminal, with a rolling view of the complete `/help` guide; F12 shows or hides it globally, and visibility is restored at startup.
 - Transcript display can toggle between unwrapped, horizontally clipped rows and word-wrapped rows with Ctrl+W; the selected mode is restored at startup.
 - The selected F2–F10 color theme is restored at startup; theme, word-wrap, banner visibility, and SCP/SFTP passthrough preferences are saved together in the same config file.
 - A subdued Canadian maple-leaf watermark is centered behind the transcript, scaled to an 80% viewport region, and drawn only into unused cells so transcript text and selection remain readable; toggle it with `/canada`, or use `/canada on|off|status`.
