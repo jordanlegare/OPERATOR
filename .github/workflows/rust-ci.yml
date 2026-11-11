@@ -38,6 +38,20 @@ jobs:
         run: |
           sh -n contrib/hermes/hooks/operator-capture
           python3 -m py_compile contrib/hermes/hooks/operator-capture.py
+          # Exercise the exact installed wrapper. The Python file remains mode 0644,
+          # matching the documented installation; the wrapper must invoke python3.
+          hook_home="$(mktemp -d)"
+          trap 'rm -rf "$hook_home"' EXIT
+          mkdir -p "$hook_home/.hermes/hooks"
+          cp contrib/hermes/hooks/operator-capture "$hook_home/.hermes/hooks/operator-capture"
+          cp contrib/hermes/hooks/operator-capture.py "$hook_home/.hermes/hooks/operator-capture.py"
+          chmod 700 "$hook_home/.hermes/hooks/operator-capture"
+          chmod 644 "$hook_home/.hermes/hooks/operator-capture.py"
+          wrapper_inbox="$hook_home/wrapper-inbox"
+          printf '%s' '{"hook_event_name":"pre_llm_call","session_id":"wrapper-smoke","extra":{"turn_id":"wrapper-turn","user_message":"wrapper execution smoke test"}}' \
+            | HOME="$hook_home" OPERATOR_HERMES_INBOX="$wrapper_inbox" "$hook_home/.hermes/hooks/operator-capture"
+          test "$(find "$wrapper_inbox/ready" -maxdepth 1 -type f -name '*.json' | wc -l)" -eq 1
+
           inbox="$(mktemp -d)"
           printf '%s' '{"hook_event_name":"pre_llm_call","session_id":"ci-session","extra":{"turn_id":"ci-turn","user_message":"capture smoke test","conversation_history":[{"role":"system","content":"SYSTEM MUST NOT BE RECORDED"},{"role":"user","content":"earlier prompt"},{"role":"assistant","content":"earlier answer"},{"role":"tool","name":"terminal","content":"api_key=topsecret"}]}}' \
             | OPERATOR_HERMES_INBOX="$inbox" python3 contrib/hermes/hooks/operator-capture.py
