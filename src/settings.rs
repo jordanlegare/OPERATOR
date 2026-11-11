@@ -104,7 +104,7 @@ fn config_path() -> PathBuf {
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
         .unwrap_or_else(|| PathBuf::from(".config"));
 
-    config_root.join("streenote").join("config.json")
+    config_root.join("operator").join("config.json")
 }
 
 #[cfg(test)]
