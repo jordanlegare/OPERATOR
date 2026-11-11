@@ -84,6 +84,17 @@ class CapturePromptFanoutTests(unittest.TestCase):
             for path in sorted(ready.glob("*.json"))
         ]
 
+    def test_legacy_environment_alias_is_still_accepted(self):
+        with patch.dict(os.environ, {"STREENOTE_HERMES_INBOX": "/tmp/legacy-inbox"}, clear=True):
+            self.assertEqual(CAPTURE.env_value("OPERATOR_HERMES_INBOX"), "/tmp/legacy-inbox")
+
+    def test_new_environment_name_takes_precedence(self):
+        with patch.dict(os.environ, {
+            "STREENOTE_HERMES_INBOX": "/tmp/legacy-inbox",
+            "OPERATOR_HERMES_INBOX": "/tmp/operator-inbox",
+        }, clear=True):
+            self.assertEqual(CAPTURE.env_value("OPERATOR_HERMES_INBOX"), "/tmp/operator-inbox")
+
     def test_original_prompt_and_initial_history_reach_every_terminal(self):
         # Simulate a systemd gateway that did not inherit the
         # OPERATOR_HERMES_REVIEW_SESSION_DIR from an SSH PTY.
