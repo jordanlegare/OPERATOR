@@ -2002,10 +2002,13 @@ fn handle_key(
 
     // Historical archive records are loaded on demand and remain above the
     // search results workspace until the operator closes the record viewer.
-    if let Some(entry) = app.archive_detail_entry.clone() {
+    if app.archive_detail_entry.is_some() {
         match code {
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                let text = entry.text.clone();
+                let text = app.archive_detail_entry
+                    .as_ref()
+                    .map(|entry| entry.text.clone())
+                    .unwrap_or_default();
                 if text.len() > 60_000 {
                     app.status = "Archive record exceeds the 60 KB terminal clipboard limit.".to_string();
                 } else {
