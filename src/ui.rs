@@ -544,23 +544,23 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
 fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
     let art = vec![
         Line::from(Span::styled(
-            "  ###   ####  #####  ####   ###  #####   ###  #### ",
+            "### ##  ### ##   #  ### ### ## ",
             Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            " #   #  #   # #      #   # #   #   #    #   # #   #",
+            "# # # # #   # # # #  #  # # # #",
             Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            " #   #  ####  ####   ####  #####   #    #   # #### ",
+            "# # ##  ##  ##  ###  #  # # ## ",
             Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            " #   #  #  #  #      #  #  #   #   #    #   # #  # ",
+            "# # #   #   # # # #  #  # # # #",
             Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            "  ###   #   # #####  #   # #   #   #     ###  #   #  // SHELL · NOTES · JOURNAL",
+            "### #   ### # # # #  #  ### # #  // SHELL · NOTES · JOURNAL",
             Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
         )),
     ];
