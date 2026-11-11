@@ -19,6 +19,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use crate::paths::{env_var, migrate_legacy_dir};
 
 pub const MAX_REVIEW_BYTES: usize = 8 * 1024 * 1024;
 const DECISION_TIMEOUT: Duration = Duration::from_secs(540);
@@ -26,20 +27,20 @@ const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn diagnostic_log_path() -> PathBuf {
-    if let Some(path) = env::var_os("OPERATOR_HERMES_REVIEW_LOG").map(PathBuf::from).filter(|p| p.is_absolute()) { return path; }
+    if let Some(path) = env_var("OPERATOR_HERMES_REVIEW_LOG").map(PathBuf::from).filter(|p| p.is_absolute()) { return path; }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         let uid = unsafe { libc::geteuid() };
         let runtime_dir = PathBuf::from(format!("/run/user/{uid}"));
         if fs::metadata(&runtime_dir).ok().is_some_and(|m| m.is_dir() && m.uid() == uid) {
-            return runtime_dir.join("operator").join("hermes-review.log");
+            return migrate_legacy_dir(runtime_dir.join("operator")).join("hermes-review.log");
         }
     }
     let state_root = env::var_os("XDG_STATE_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
         .or_else(|| env::var_os("HOME").map(PathBuf::from).map(|p| p.join(".local/state")))
         .unwrap_or_else(|| PathBuf::from(".local/state"));
-    state_root.join("operator").join("hermes-review.log")
+    migrate_legacy_dir(state_root.join("operator")).join("hermes-review.log")
 }
 
 fn append_diagnostic_event(event: &str, details: serde_json::Value) {
@@ -437,7 +438,7 @@ impl Drop for HermesReviewServer {
 /// OPERATOR TUI instances. The Hermes gateway uses the same environment and
 /// UID-based default.
 pub fn default_review_session_dir() -> PathBuf {
-    let explicit = env::var_os("OPERATOR_HERMES_REVIEW_SESSION_DIR").map(PathBuf::from);
+    let explicit = env_var("OPERATOR_HERMES_REVIEW_SESSION_DIR").map(PathBuf::from);
     resolve_review_session_dir(explicit, default_review_socket_path())
 }
 
@@ -578,7 +579,7 @@ pub fn default_review_socket_path() -> PathBuf {
     let runtime_dir: Option<PathBuf> = None;
 
     resolve_review_socket_path(
-        env::var_os("OPERATOR_HERMES_REVIEW_SOCKET").map(PathBuf::from),
+        env_var("OPERATOR_HERMES_REVIEW_SOCKET").map(PathBuf::from),
         runtime_dir,
         env::var_os("XDG_DATA_HOME").map(PathBuf::from),
         env::var_os("HOME").map(PathBuf::from),
@@ -596,7 +597,7 @@ fn resolve_review_socket_path(
     }
 
     if let Some(runtime_dir) = runtime_dir.filter(|path| path.is_absolute()) {
-        return runtime_dir.join("operator").join("review.sock");
+        return migrate_legacy_dir(runtime_dir.join("operator")).join("review.sock");
     }
 
     let data_root = xdg_data_home
@@ -611,7 +612,7 @@ fn resolve_review_socket_path(
                 .join(".local/share")
         });
 
-    data_root.join("operator").join("review.sock")
+    migrate_legacy_dir(data_root.join("operator")).join("review.sock")
 }
 
 #[cfg(unix)]
