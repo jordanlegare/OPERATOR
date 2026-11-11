@@ -1,5 +1,6 @@
 mod app;
 mod paths;
+mod postgres;
 mod conversations;
 mod hermes_bridge;
 mod hermes_review;
@@ -48,9 +49,12 @@ use storage::Journal;
 #[derive(Debug, Parser)]
 #[command(name = "operator", version, about = "A live Debian shell transcript and unwrapped note stream")]
 struct Args {
-    /// Journal file. Defaults to ~/.local/share/operator/journal.jsonl
+    /// Legacy JSONL import/export path. Defaults to ~/.local/share/operator/journal.jsonl
     #[arg(short, long)]
     file: Option<PathBuf>,
+    /// PostgreSQL connection URL. Also read from OPERATOR_DATABASE_URL.
+    #[arg(long)]
+    database_url: Option<String>,
 }
 
 struct TerminalGuard;
@@ -99,14 +103,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     dispatch_ssh_invocation();
     let args = Args::parse();
     let journal_path = args.file.unwrap_or_else(default_journal_path);
-    let journal = Journal::open(journal_path)?;
-    let startup_message = if journal.skipped_corrupt_lines > 0 {
-        format!(
-            "Loaded {} entries. Skipped {} malformed journal line(s); original file was left untouched.",
-            journal.entries.len(), journal.skipped_corrupt_lines
-        )
+    let database_url = args.database_url.or_else(|| std::env::var("OPERATOR_DATABASE_URL").ok());
+    let (journal, startup_message) = if let Some(database_url) = database_url {
+        let (journal, imported_count) = Journal::open_postgres(journal_path, database_url)?;
+        let message = if imported_count > 0 {
+            format!(
+                "PostgreSQL journal connected · loaded {} entries · imported {} legacy JSONL records.",
+                journal.entries.len(),
+                imported_count
+            )
+        } else {
+            format!(
+                "PostgreSQL journal connected · loaded {} entries · PostgreSQL is authoritative.",
+                journal.entries.len()
+            )
+        };
+        (journal, message)
     } else {
-        format!("Loaded {} entries from journal.", journal.entries.len())
+        let journal = Journal::open(journal_path)?;
+        let message = if journal.skipped_corrupt_lines > 0 {
+            format!(
+                "Loaded {} entries. Skipped {} malformed journal line(s); original file was left untouched.",
+                journal.entries.len(), journal.skipped_corrupt_lines
+            )
+        } else {
+            format!("Loaded {} entries from JSONL journal.", journal.entries.len())
+        };
+        (journal, message)
     };
 
     let _guard = TerminalGuard::enter()?;
@@ -1190,6 +1213,7 @@ fn drain_shared_journal_updates(
     // Private inboxes provide reliable per-instance Hermes delivery. The
     // shared journal tail also mirrors notes written by any peer terminal.
     let shared_journal_imported = app.journal.refresh_external_entries()?;
+    app.apply_postgres_search_results();
     if app.journal.entries.len() > previous_len {
         app.update_selected_tail_after_append(was_tracking_tail);
     }

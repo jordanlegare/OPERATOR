@@ -1,5 +1,6 @@
 use std::{
     cell::{Ref, RefCell},
+    collections::HashMap,
     io,
     path::PathBuf,
     time::{Duration, Instant},
@@ -99,6 +100,7 @@ pub struct App {
     pub follow_tail: bool,
     pub search_query: Option<String>,
     pub matches: Vec<usize>,
+    pending_postgres_search: Option<(u64, String)>,
     pub active_match: Option<usize>,
     pub history: Vec<String>,
     history_position: Option<usize>,
@@ -196,6 +198,7 @@ impl App {
             follow_tail: true,
             search_query: None,
             matches: Vec::new(),
+            pending_postgres_search: None,
             active_match: None,
             history,
             history_position: None,
@@ -1705,14 +1708,14 @@ impl App {
             "/save" => self.save(),
             "/stats" => {
                 self.status = format!(
-                    "{} entries · {} text bytes · {} pending disk write(s) · {} search hit(s)",
+                    "{} entries · {} text bytes · {} pending write(s) · {} search hit(s)",
                     self.journal.entries.len(),
                     self.journal.total_text_bytes,
                     self.journal.pending_count(),
                     self.matches.len()
                 );
             }
-            "/path" => self.status = format!("Journal: {}", self.journal.path.display()),
+            "/path" => self.status = format!("Journal backend: {} · JSONL import/export: {}", self.journal.backend_label(), self.journal.path.display()),
             "/scp" => match argument.to_ascii_lowercase().as_str() {
                 "" | "status" => {
                     self.status = format!(
@@ -1769,6 +1772,20 @@ impl App {
                     Err(error) => self.status = format!("Export failed: {error}"),
                 }
             }
+            "/export-jsonl" => {
+                let destination = if argument.is_empty() {
+                    self.journal.path.clone()
+                } else {
+                    PathBuf::from(argument)
+                };
+                match self.journal.export_jsonl(&destination) {
+                    Ok(()) => self.status = format!(
+                        "Exported original journal events as JSONL to {}",
+                        destination.display()
+                    ),
+                    Err(error) => self.status = format!("JSONL export failed: {error}"),
+                }
+            }
             "/quit" | "/q" => self.should_quit = true,
             _ => self.status = format!("Unknown command: {command}. Type /help for command help."),
         }
@@ -1776,7 +1793,7 @@ impl App {
 
     pub fn save(&mut self) {
         match self.journal.save_pending() {
-            Ok(()) => self.status = format!("Saved. Journal: {}", self.journal.path.display()),
+            Ok(()) => self.status = format!("Saved to {}. JSONL import/export path: {}", self.journal.backend_label(), self.journal.path.display()),
             Err(error) => self.status = format!("Save failed: {error}"),
         }
     }
@@ -1786,6 +1803,49 @@ impl App {
         self.matches.clear();
         self.active_match = None;
         self.conversation_focus_entry = None;
+        self.pending_postgres_search = None;
+    }
+
+    /// Apply completed asynchronous PostgreSQL search requests on the UI thread.
+    /// Record IDs are translated into this process's in-memory transcript indices.
+    pub fn apply_postgres_search_results(&mut self) {
+        for result in self.journal.drain_postgres_search_results() {
+            let Some((pending_id, query)) = self.pending_postgres_search.clone() else {
+                continue;
+            };
+            if pending_id != result.request_id {
+                continue;
+            }
+
+            let index_by_record_id: HashMap<&str, usize> = self.journal.entries
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entry)| {
+                    entry.record_id.as_deref().map(|record_id| (record_id, index))
+                })
+                .collect();
+            self.matches = result.record_ids
+                .iter()
+                .filter_map(|record_id| index_by_record_id.get(record_id.as_str()).copied())
+                .collect();
+            self.search_query = Some(query.clone());
+            self.pending_postgres_search = None;
+            self.conversation_focus_entry = None;
+
+            if !self.matches.is_empty() {
+                let latest_position = self.matches.len() - 1;
+                self.activate_match(latest_position);
+                self.status = format!(
+                    "Found {} indexed hit(s) for {:?} in PostgreSQL. n/N navigate.",
+                    self.matches.len(),
+                    query
+                );
+            } else {
+                self.active_match = None;
+                self.conversation_view = None;
+                self.status = format!("No PostgreSQL matches for {:?}.", query);
+            }
+        }
     }
 
     /// Return the text users can actually read in the journal and expanded
@@ -1838,12 +1898,29 @@ impl App {
             return;
         }
 
-        let needle = query.to_ascii_lowercase();
+        match self.journal.search_postgres(query.to_string()) {
+            Ok(Some(request_id)) => {
+                self.pending_postgres_search = Some((request_id, query.to_string()));
+                self.search_query = Some(query.to_string());
+                self.matches.clear();
+                self.active_match = None;
+                self.conversation_focus_entry = None;
+                self.status = format!("Searching PostgreSQL index for {:?}…", query);
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.status = format!("PostgreSQL search failed: {error}");
+                return;
+            }
+        }
+
+        let needle = query.to_lowercase();
         let found = self
             .searchable_entry_texts()
             .into_iter()
             .filter_map(|(index, text)| {
-                text.to_ascii_lowercase()
+                text.to_lowercase()
                     .contains(needle.as_str())
                     .then_some(index)
             })

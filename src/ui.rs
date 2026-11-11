@@ -681,7 +681,7 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
         "THEMES       F2–F10 changes palettes; F12 hides or restores this splash.",
         "HELP         /help opens the complete command and keyboard reference.",
         "SSH          F1 opens the terminal workspace; SCP/SFTP is configurable.",
-        "JOURNAL      Searchable JSONL record of shell and Hermes activity.",
+        "JOURNAL      Shared indexed journal; JSONL import/export remains available.",
         "FIELD NOTE   The work continues. The record remains. Never again.",
     ];
 
@@ -1397,7 +1397,7 @@ fn help_lines(theme: Theme) -> Vec<Line<'static>> {
         ]),
         Line::from(vec![
             Span::styled("TRANSCRIPT", Style::default().fg(theme.success).add_modifier(Modifier::BOLD)),
-            Span::raw("  Every submitted command and captured stdout/stderr line is added to the JSONL journal."),
+            Span::raw("  Every submitted command and captured stdout/stderr line is persisted to the configured journal backend."),
         ]),
         Line::from(vec![
             Span::styled("NOTES     ", Style::default().fg(theme.success).add_modifier(Modifier::BOLD)),
@@ -1405,7 +1405,7 @@ fn help_lines(theme: Theme) -> Vec<Line<'static>> {
         ]),
         Line::from(vec![
             Span::styled("SEARCH    ", Style::default().fg(theme.success).add_modifier(Modifier::BOLD)),
-            Span::raw("/search words searches all journal text and full Hermes conversation bodies."),
+            Span::raw("/search words uses PostgreSQL indexes when OPERATOR_DATABASE_URL is configured; otherwise it searches the local JSONL cache."),
         ]),
         Line::from(""),
         Line::from(vec![Span::styled("LOCAL COMMANDS", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD))]),
@@ -1418,7 +1418,8 @@ fn help_lines(theme: Theme) -> Vec<Line<'static>> {
         Line::from(vec![Span::styled("/note TEXT", Style::default().fg(theme.warning)), Span::raw("      Save a note without leaving terminal mode; /note alone switches to Notes mode.")]),
         Line::from(vec![Span::styled("/save", Style::default().fg(theme.warning)), Span::raw("          Retry pending writes and sync the journal.")]),
         Line::from(vec![Span::styled("/export [FILE]", Style::default().fg(theme.warning)), Span::raw(" Export every journal record as readable text.")]),
-        Line::from(vec![Span::styled("/stats · /path", Style::default().fg(theme.warning)), Span::raw("  Show journal statistics or path.")]),
+        Line::from(vec![Span::styled("/export-jsonl [FILE]", Style::default().fg(theme.warning)), Span::raw(" Export the original uncoalesced journal events as JSONL.")]),
+        Line::from(vec![Span::styled("/stats · /path", Style::default().fg(theme.warning)), Span::raw("  Show journal statistics, backend and import/export path.")]),
         Line::from(vec![Span::styled("/scp on|off|status", Style::default().fg(theme.warning)), Span::raw("  Toggle persistent SSH SCP/SFTP file-transfer passthrough.")]),
         Line::from(vec![Span::styled("/canada [on|off|status]", Style::default().fg(theme.warning)), Span::raw("  Toggle the persistent Canadian maple-leaf transcript watermark.")]),
         Line::from(vec![Span::styled("/quit", Style::default().fg(theme.warning)), Span::raw("          Save pending records and exit.")]),

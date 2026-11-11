@@ -8,6 +8,22 @@ on:
 jobs:
   hermes-journal:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: operator
+          POSTGRES_PASSWORD: operator
+          POSTGRES_DB: operator
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U operator -d operator"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      OPERATOR_TEST_DATABASE_URL: postgres://operator:operator@localhost:5432/operator?sslmode=disable
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -107,3 +123,7 @@ jobs:
         run: "cargo test storage::"
       - name: Test Restricted Access splash layouts
         run: cargo test access_splash_tests
+      - name: Test PostgreSQL journal, indexed search, and live notifications
+        run: cargo test postgres::tests::postgres_index_and_live_notifications -- --nocapture
+      - name: Test all Rust targets
+        run: cargo test --all-targets

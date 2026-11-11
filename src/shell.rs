@@ -60,6 +60,9 @@ impl ShellSession {
         // when it does not resolve to this executable.
         let shell = resolve_shell_program();
         let mut command = CommandBuilder::new(&shell);
+        // Keep PostgreSQL credentials in the OPERATOR process only; do not
+        // leak the connection URL into the interactive shell's environment.
+        command.env_remove("OPERATOR_DATABASE_URL");
         // Standard Hermes integration contract: every OPERATOR-managed PTY
         // receives the canonical inbox path from the Rust bridge. Child tools
         // inherit it; independent gateway services need their own hook adapter.

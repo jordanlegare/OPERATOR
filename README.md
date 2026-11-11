@@ -79,7 +79,7 @@ The default input mode is **TERMINAL**.
 - Up/Down moves a highlighted row through the transcript and keeps it visible; highlighting a `CMD` row automatically loads that command into the editable input line. Holding either key repeats row navigation.
 - `Alt+Left` / `Alt+Right` horizontally pan the feed.
 - Unbounded in-memory `Vec<Entry>` with no application-level cache eviction.
-- JSON Lines persistence; non-secret commands, notes, useful terminal output records, and system events are appended to the journal. Empty terminal-output rows and standard shell-prompt rows are filtered both when loading older journals and when appending new output; existing journal files are not rewritten.
+- Append-only persistence: local JSONL by default, or PostgreSQL as the authoritative journal when `OPERATOR_DATABASE_URL` is configured. Non-secret commands, notes, useful terminal output records, and system events are retained. Empty terminal-output rows and standard shell-prompt rows are filtered both when loading older journals and when appending new output; existing journal files are not rewritten.
 - `/search <terms>` searches the complete text of journal entries and every Hermes conversation event, including assistant responses, tool arguments/results, prior context, and coalesced live-stream text. A hit in a hidden Hermes event opens its conversation at the matching message.
 - `n` / `N` navigate search hits.
 - Command/input history, Bash-powered Tab completion for commands and filesystem paths, nine high-contrast color palettes, export, stats, path display, and save/retry.
@@ -401,3 +401,40 @@ Commands run with the permissions of the user who launched OPERATOR. Terminal ou
 - PTY data can be emitted in partial chunks. An unfinished visible prompt/line is flushed after a brief idle interval and again when the shell exits.
 - UTF-8 characters split across PTY reads are reassembled; invalid byte sequences are represented with U+FFFD.
 - Full-screen applications are displayed directly by the host terminal while the independent workspace PTY is active. Their alternate-screen redraws are intentionally excluded from the readable transcript; ordinary output is journaled.
+
+
+## PostgreSQL journal backend
+
+OPERATOR can use PostgreSQL as its authoritative journal and indexed search backend. The original JSONL format remains supported as a migration/import and export format.
+
+### Enable PostgreSQL
+
+Install PostgreSQL 15 or newer (on Debian, for example, install `postgresql` and `postgresql-contrib`) and create a dedicated, non-superuser database login role. For example, using a local PostgreSQL administrator:
+
+```sql
+CREATE ROLE operator LOGIN PASSWORD 'replace-with-a-long-random-password';
+CREATE DATABASE operator OWNER operator;
+```
+
+The first OPERATOR connection applies the schema in `migrations/0001_postgres_journal.sql` and enables the `pg_trgm` extension. The database role therefore needs permission to create the application tables and the extension in the target database. If your administrator manages extensions centrally, create `pg_trgm` first and grant the role the required table/schema permissions.
+
+Set the connection URL in the process environment (do not commit credentials):
+
+```bash
+export OPERATOR_DATABASE_URL='postgresql://operator:password@127.0.0.1/operator?sslmode=disable'
+operator
+```
+
+Alternatively, pass `--database-url 'postgresql://...'` on startup. The command-line option takes precedence over `OPERATOR_DATABASE_URL`. Use PostgreSQL TLS (for example, `sslmode=require`) when connecting across hosts; the `sslmode=disable` example is for a trusted local connection only. OPERATOR removes `OPERATOR_DATABASE_URL` from the environment of its interactive shell so the database credential is not inherited by shell commands.
+
+When PostgreSQL is configured:
+
+- PostgreSQL is the authoritative store. New notes, commands, terminal output, system records, and Hermes events are written to the database by a dedicated background worker so database operations do not block the TUI event loop.
+- On the first connection only, if the database contains no journal records, OPERATOR imports valid records from the legacy JSONL file selected by `--file` (or the default `~/.local/share/operator/journal.jsonl`). Import preserves record IDs, event IDs, original timestamps, and Hermes metadata. An already populated database is not silently merged with a local JSONL file.
+- Search uses PostgreSQL GIN full-text and `pg_trgm` substring indexes. Streamed Hermes deltas are indexed as a reconstructed logical message so searches can span delta boundaries. Searches are submitted asynchronously.
+- `LISTEN/NOTIFY` wakes connected OPERATOR instances after commits. Each instance also polls the monotonically increasing database ID as a recovery path if a notification is missed or its listener disconnects.
+- Notes and Hermes events synchronize live between connected OPERATOR instances, matching the existing JSONL behavior. Shell commands, raw PTY output, and system notices remain local to their originating TUI during live sessions; all records are still persisted centrally and loaded from PostgreSQL at startup. Treat database access as access to the complete shared journal; do not share one database between users who should not see one another's commands, output, notes, or Hermes activity.
+- `/save` waits for queued database writes to commit. `/export-jsonl [FILE]` exports the original, uncoalesced event stream. `/export [FILE]` continues to produce readable plain text.
+- `/path` reports the selected backend and the legacy JSONL import/export path.
+
+Without `OPERATOR_DATABASE_URL` or `--database-url`, OPERATOR continues using its original local append-only JSONL journal. No data is deleted from the JSONL file by enabling PostgreSQL. Keep regular database backups and test restores; JSONL export is a portable additional recovery format, not a substitute for database backup/PITR.

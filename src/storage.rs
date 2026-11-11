@@ -8,6 +8,8 @@ use std::{
 };
 
 use chrono::{DateTime, Local, SecondsFormat};
+
+use crate::postgres::{PostgresJournal, SearchResult as PostgresSearchResult, Update as PostgresUpdate};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +101,12 @@ impl Entry {
 
     /// Build a timestamped external event while retaining a stable ID so
     /// retrying an unacknowledged inbox file cannot duplicate a journal entry.
+    pub fn ensure_record_id(&mut self) {
+        if self.record_id.is_none() {
+            self.record_id = Some(new_record_id());
+        }
+    }
+
     pub fn with_external_event(
         kind: EntryKind,
         text: String,
@@ -149,6 +157,9 @@ pub struct Journal {
     /// Byte offset through the shared JSONL file already checked for external
     /// rows. Each SSH process advances this while holding JournalFileLock.
     journal_scan_offset: u64,
+    /// PostgreSQL is authoritative when configured; path remains the JSONL import/export path.
+    postgres: Option<PostgresJournal>,
+    postgres_search_results: Vec<PostgresSearchResult>,
 }
 
 #[cfg(unix)]
@@ -287,15 +298,96 @@ impl Journal {
             pending_record_ids: HashSet::new(),
             pending_event_ids: HashSet::new(),
             journal_scan_offset,
+            postgres: None,
+            postgres_search_results: Vec::new(),
         })
     }
 
-    /// Adds to the in-memory cache first, then appends the record to disk.
+    /// Opens PostgreSQL as the authoritative journal, importing legacy JSONL
+    /// records only when the configured database is empty.
+    pub fn open_postgres(path: PathBuf, database_url: String) -> io::Result<(Self, usize)> {
+        let (legacy_entries, skipped_corrupt_lines) = read_jsonl_for_import(&path)?;
+        let (postgres, database_entries, imported_count) =
+            PostgresJournal::connect(database_url, legacy_entries)?;
+
+        let mut journal = Self {
+            path,
+            entries: Vec::new(),
+            total_text_bytes: 0,
+            skipped_corrupt_lines,
+            pending: Vec::new(),
+            persisted_event_ids: HashSet::new(),
+            persisted_record_ids: HashSet::new(),
+            cached_record_ids: HashSet::new(),
+            pending_record_ids: HashSet::new(),
+            cached_event_ids: HashSet::new(),
+            pending_event_ids: HashSet::new(),
+            journal_scan_offset: 0,
+            postgres: Some(postgres),
+            postgres_search_results: Vec::new(),
+        };
+
+        for mut entry in database_entries {
+            entry.text = sanitize_entry_text(entry.kind, &entry.text);
+            if let Some(event_id) = entry.event_id.as_ref() {
+                if !journal.persisted_event_ids.insert(event_id.clone()) { continue; }
+            }
+            if let Some(record_id) = entry.record_id.as_ref() {
+                if !journal.persisted_record_ids.insert(record_id.clone()) { continue; }
+            }
+            if entry.kind == EntryKind::TerminalOutput
+                && should_suppress_terminal_output(&entry.text) {
+                continue;
+            }
+            journal.push_entry_to_memory(entry);
+        }
+        journal.cached_event_ids = journal.persisted_event_ids.clone();
+        journal.cached_record_ids = journal.persisted_record_ids.clone();
+        Ok((journal, imported_count))
+    }
+
+    pub fn search_postgres(&mut self, query: String) -> io::Result<Option<u64>> {
+        self.postgres.as_mut()
+            .map(|postgres| postgres.search(query).map(Some))
+            .unwrap_or(Ok(None))
+    }
+
+    pub fn drain_postgres_search_results(&mut self) -> Vec<PostgresSearchResult> {
+        std::mem::take(&mut self.postgres_search_results)
+    }
+
+    pub fn backend_label(&self) -> &'static str {
+        if self.postgres.is_some() { "PostgreSQL" } else { "JSONL" }
+    }
+
+    /// Adds to the in-memory cache first, then persists the record.
     /// No cache limit or truncation is applied. A failed disk write stays queued for retry.
     pub fn append(&mut self, entry: Entry) -> io::Result<()> {
         if entry.kind == EntryKind::TerminalOutput
             && should_suppress_terminal_output(&entry.text)
         {
+            return Ok(());
+        }
+
+        if self.postgres.is_some() {
+            let _ = self.refresh_external_entries();
+            entry.ensure_record_id();
+            if entry.record_id.as_ref().is_some_and(|id| self.cached_record_ids.contains(id))
+                || entry.event_id.as_ref().is_some_and(|id| self.cached_event_ids.contains(id))
+            {
+                return Ok(());
+            }
+            self.push_entry_to_memory(entry.clone());
+            if let Some(record_id) = entry.record_id.as_ref() {
+                self.cached_record_ids.insert(record_id.clone());
+            }
+            if let Some(event_id) = entry.event_id.as_ref() {
+                self.cached_event_ids.insert(event_id.clone());
+            }
+            if let Err(error) = self.postgres.as_ref().expect("PostgreSQL backend configured").enqueue(entry.clone()) {
+                self.pending.push(entry);
+                return Err(error);
+            }
             return Ok(());
         }
 
@@ -407,6 +499,58 @@ impl Journal {
     /// mirrors newly appended note rows from any peer into every live view.
     /// Hermes events retain their stable event-ID deduplication as well.
     pub fn refresh_external_entries(&mut self) -> io::Result<usize> {
+        if self.postgres.is_some() {
+            let updates = self.postgres.as_ref().expect("PostgreSQL backend configured").drain_updates();
+            let mut mirrored = 0usize;
+            let mut first_error: Option<String> = None;
+            for update in updates {
+                match update {
+                    PostgresUpdate::ExternalEntries(entries) => {
+                        for mut entry in entries {
+                            let record_is_new = entry.record_id.as_ref()
+                                .map(|id| self.cached_record_ids.insert(id.clone()))
+                                .unwrap_or(true);
+                            let event_is_new = entry.event_id.as_ref()
+                                .map(|id| self.cached_event_ids.insert(id.clone()))
+                                .unwrap_or(true);
+                            if let Some(id) = entry.record_id.as_ref() {
+                                self.persisted_record_ids.insert(id.clone());
+                            }
+                            if let Some(id) = entry.event_id.as_ref() {
+                                self.persisted_event_ids.insert(id.clone());
+                            }
+                            // Preserve the established live-sharing contract:
+                            // notes and Hermes events fan out to peers; shell commands,
+                            // raw PTY output, and system notices stay in their origin TUI.
+                            let should_mirror = entry.kind == EntryKind::Note
+                                || is_hermes_journal_kind(entry.kind);
+                            if !record_is_new || !event_is_new || !should_mirror {
+                                continue;
+                            }
+                            entry.text = sanitize_entry_text(entry.kind, &entry.text);
+                            if entry.kind == EntryKind::TerminalOutput
+                                && should_suppress_terminal_output(&entry.text)
+                            {
+                                continue;
+                            }
+                            self.push_entry_to_memory(entry);
+                            mirrored += 1;
+                        }
+                    }
+                    PostgresUpdate::SearchResult(result) => self.postgres_search_results.push(result),
+                    PostgresUpdate::Error(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
+            }
+            if let Some(error) = first_error {
+                return Err(io::Error::other(error));
+            }
+            return Ok(mirrored);
+        }
+
         let _journal_lock = JournalFileLock::acquire(&self.path)?;
         self.refresh_external_entries_locked()
     }
@@ -493,6 +637,35 @@ impl Journal {
             return Ok(());
         }
 
+        if self.postgres.is_some() {
+            let _ = self.refresh_external_entries();
+            let mut accepted = Vec::with_capacity(entries.len());
+            for mut entry in entries {
+                entry.ensure_record_id();
+                if entry.record_id.as_ref().is_some_and(|id| self.cached_record_ids.contains(id))
+                    || entry.event_id.as_ref().is_some_and(|id| self.cached_event_ids.contains(id))
+                {
+                    continue;
+                }
+                if let Some(record_id) = entry.record_id.as_ref() {
+                    self.cached_record_ids.insert(record_id.clone());
+                }
+                if let Some(event_id) = entry.event_id.as_ref() {
+                    self.cached_event_ids.insert(event_id.clone());
+                }
+                self.push_entry_to_memory(entry.clone());
+                accepted.push(entry);
+            }
+            if accepted.is_empty() {
+                return Ok(());
+            }
+            if let Err(error) = self.postgres.as_ref().expect("PostgreSQL backend configured").enqueue_batch(accepted.clone()) {
+                self.pending.extend(accepted);
+                return Err(error);
+            }
+            return Ok(());
+        }
+
         let _journal_lock = JournalFileLock::acquire(&self.path)?;
         self.refresh_external_entries_locked()?;
 
@@ -564,6 +737,17 @@ impl Journal {
     }
 
     pub fn save_pending(&mut self) -> io::Result<()> {
+        if self.postgres.is_some() {
+            if !self.pending.is_empty() {
+                let pending = std::mem::take(&mut self.pending);
+                if let Err(error) = self.postgres.as_ref().expect("PostgreSQL backend configured").enqueue_batch(pending.clone()) {
+                    self.pending = pending;
+                    return Err(error);
+                }
+            }
+            return self.postgres.as_ref().expect("PostgreSQL backend configured").flush();
+        }
+
         let _journal_lock = JournalFileLock::acquire(&self.path)?;
         self.refresh_external_entries_locked()?;
         self.save_pending_locked()
@@ -606,6 +790,22 @@ impl Journal {
     }
     pub fn pending_count(&self) -> usize {
         self.pending.len()
+            + self.postgres.as_ref().map(PostgresJournal::pending_count).unwrap_or(0)
+    }
+
+    /// Export the original, uncoalesced journal events as JSON Lines.
+    pub fn export_jsonl(&self, destination: &Path) -> io::Result<()> {
+        if let Some(postgres) = self.postgres.as_ref() {
+            return postgres.export_jsonl(destination);
+        }
+        if destination == self.path.as_path() {
+            return Ok(());
+        }
+        if let Some(parent) = destination.parent().filter(|path| !path.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&self.path, destination)?;
+        Ok(())
     }
 
     pub fn export_plain_text(&self, destination: &Path) -> io::Result<()> {
@@ -767,6 +967,46 @@ fn is_hermes_journal_kind(kind: EntryKind) -> bool {
             | EntryKind::HermesInterim
             | EntryKind::HermesSession
     )
+}
+
+fn read_jsonl_for_import(path: &Path) -> io::Result<(Vec<Entry>, usize)> {
+    if !path.exists() {
+        return Ok((Vec::new(), 0));
+    }
+
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut entries = Vec::new();
+    let mut skipped_corrupt_lines = 0usize;
+    let mut record_ids = HashSet::new();
+    let mut event_ids = HashSet::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Entry>(&line) {
+            Ok(mut entry) => {
+                entry.text = sanitize_entry_text(entry.kind, &entry.text);
+                entry.ensure_record_id();
+                if let Some(event_id) = entry.event_id.as_ref() {
+                    if !event_ids.insert(event_id.clone()) {
+                        continue;
+                    }
+                }
+                if let Some(record_id) = entry.record_id.as_ref() {
+                    if !record_ids.insert(record_id.clone()) {
+                        continue;
+                    }
+                }
+                entries.push(entry);
+            }
+            Err(_) => skipped_corrupt_lines += 1,
+        }
+    }
+
+    Ok((entries, skipped_corrupt_lines))
 }
 
 fn can_merge_stream_delta(previous: &Entry, next: &Entry) -> bool {
