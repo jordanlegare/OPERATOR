@@ -25,6 +25,8 @@ jobs:
         run: |
           python3 -m py_compile contrib/hermes/operator-review/__init__.py
           python3 -m unittest discover -s contrib/hermes/operator-review -p 'test_*.py'
+      - name: Test OPERATOR path migration
+        run: cargo test paths::tests
       - name: Test Hermes inbox bridge
         run: cargo test hermes_bridge::tests
       - name: Test Hermes conversation grouping and stream persistence
