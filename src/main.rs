@@ -1,4 +1,5 @@
 mod app;
+mod paths;
 mod conversations;
 mod hermes_bridge;
 mod hermes_review;
@@ -119,11 +120,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut review_server = HermesReviewServer::start()?;
     if let Some(instance_id) = review_server.instance_id() {
         if let Some(registry_dir) = review_server.session_registry_dir() {
-            std::env::set_var("OPERATOR_HERMES_REVIEW_SESSION_DIR", &registry_dir);
+            paths::set_compatible_env("OPERATOR_HERMES_REVIEW_SESSION_DIR", &registry_dir);
             // Each SSH-launched TUI consumes its own inbox fan-out. The capture
             // hook writes every Hermes event to every live instance's inbox.
             let instance_inbox = registry_dir.join("inboxes").join(instance_id);
-            std::env::set_var(HERMES_INBOX_ENV, instance_inbox);
+            paths::set_compatible_env(HERMES_INBOX_ENV, instance_inbox);
         }
     }
 
@@ -2452,9 +2453,7 @@ fn default_journal_path() -> PathBuf {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    base.join(".local")
-        .join("share")
-        .join("operator")
+    paths::migrate_legacy_dir(base.join(".local").join("share").join("operator"))
         .join("journal.jsonl")
 }
 
