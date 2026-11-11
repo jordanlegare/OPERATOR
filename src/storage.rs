@@ -402,10 +402,15 @@ impl Journal {
         let removed = before.saturating_sub(self.entries.len());
         if removed > 0 {
             self.total_text_bytes = self.entries.iter().map(|entry| entry.text.len()).sum();
-            self.cached_event_ids = self.entries.iter().filter_map(|entry| entry.event_id.clone()).collect();
-            self.cached_record_ids = self.entries.iter().filter_map(|entry| entry.record_id.clone()).collect();
-            self.persisted_event_ids = self.cached_event_ids.clone();
-            self.persisted_record_ids = self.cached_record_ids.clone();
+            // Stream IDs are intentionally collapsed to one in-memory row, so
+            // rebuild deduplication sets from the durable hot window instead
+            // of deriving them from the coalesced transcript vector.
+            if let Ok((event_ids, record_ids)) = read_hot_record_ids(&self.path, cutoff) {
+                self.persisted_event_ids = event_ids;
+                self.persisted_record_ids = record_ids;
+                self.cached_event_ids = self.persisted_event_ids.clone();
+                self.cached_record_ids = self.persisted_record_ids.clone();
+            }
         }
         removed
     }
@@ -898,23 +903,25 @@ impl Journal {
     }
 
     pub fn export_plain_text(&self, destination: &Path) -> io::Result<()> {
-        if let Some(parent) = destination.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
+        let temporary_jsonl = if let Some(postgres) = self.postgres.as_ref() {
+            let temporary = destination.with_file_name(format!(
+                ".operator-export-{}-{}.jsonl",
+                std::process::id(),
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+            ));
+            postgres.export_jsonl(&temporary)?;
+            Some(temporary)
+        } else {
+            None
+        };
+        let source = temporary_jsonl.as_deref().unwrap_or(self.path.as_path());
+        let result = export_plain_text_from_jsonl(source, destination);
+        if let Some(temporary) = temporary_jsonl {
+            let _ = fs::remove_file(temporary);
         }
-        let mut output = File::create(destination)?;
-        for entry in &self.entries {
-            writeln!(
-                output,
-                "[{}] [{}] {}",
-                entry.timestamp,
-                entry_kind_label(entry.kind),
-                entry.text
-            )?;
-        }
-        output.sync_all()
+        result
     }
+}
 }
 
 /// Return true for PTY rows that are presentation noise rather than useful output:
@@ -1056,6 +1063,66 @@ fn is_hermes_journal_kind(kind: EntryKind) -> bool {
             | EntryKind::HermesInterim
             | EntryKind::HermesSession
     )
+}
+
+fn export_plain_text_from_jsonl(source: &Path, destination: &Path) -> io::Result<()> {
+    if let Some(parent) = destination.parent().filter(|path| !path.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        }
+    }
+
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut output = options.open(destination)?;
+    let reader = BufReader::new(File::open(source)?);
+    for line in reader.lines() {
+        let line = line?;
+        let Ok(entry) = serde_json::from_str::<Entry>(&line) else {
+            continue;
+        };
+        writeln!(
+            output,
+            "[{}] [{}] {}",
+            entry.timestamp,
+            entry_kind_label(entry.kind),
+            entry.text
+        )?;
+    }
+    output.sync_all()
+}
+
+fn read_hot_record_ids(
+    path: &Path,
+    cutoff: DateTime<Utc>,
+) -> io::Result<(HashSet<String>, HashSet<String>)> {
+    let reader = BufReader::new(File::open(path)?);
+    let mut event_ids = HashSet::new();
+    let mut record_ids = HashSet::new();
+    for line in reader.lines() {
+        let line = line?;
+        let Ok(entry) = serde_json::from_str::<Entry>(&line) else {
+            continue;
+        };
+        if !is_hot_entry_at(&entry, cutoff) {
+            continue;
+        }
+        if let Some(event_id) = entry.event_id {
+            event_ids.insert(event_id);
+        }
+        if let Some(record_id) = entry.record_id {
+            record_ids.insert(record_id);
+        }
+    }
+    Ok((event_ids, record_ids))
 }
 
 fn is_hot_entry(entry: &Entry) -> bool {
