@@ -789,9 +789,12 @@ async fn search_records(pool: &PgPool, raw_query: &str, request_id: u64) -> Sear
            WHERE ({predicate}) {common_filters}
            ORDER BY {order} LIMIT $8 OFFSET $9"#
     );
+    let count_sql = format!(
+        "SELECT COUNT(*)::bigint FROM operator_journal_search_documents d WHERE ({predicate}) {common_filters}"
+    );
     let rows = match sqlx::query(&sql)
         .bind(query)
-        .bind(pattern)
+        .bind(&pattern)
         .bind(spec.kind.as_deref())
         .bind(spec.session.as_deref())
         .bind(spec.conversation.as_deref())
@@ -810,9 +813,33 @@ async fn search_records(pool: &PgPool, raw_query: &str, request_id: u64) -> Sear
         },
     };
 
-    let total = rows.first()
-        .and_then(|row| row.try_get::<i64, _>("total_count").ok())
-        .unwrap_or(0).max(0) as usize;
+    // COUNT(*) OVER() has no row to carry the total when OFFSET is beyond
+    // the final result. Run a filtered count in that case so paging metadata
+    // remains correct even for an empty out-of-range page.
+    let total = if let Some(row) = rows.first() {
+        row.try_get::<i64, _>("total_count").unwrap_or(0).max(0) as usize
+    } else if spec.offset > 0 {
+        match sqlx::query_scalar::<_, i64>(&count_sql)
+            .bind(query)
+            .bind(&pattern)
+            .bind(spec.kind.as_deref())
+            .bind(spec.session.as_deref())
+            .bind(spec.conversation.as_deref())
+            .bind(spec.after.clone())
+            .bind(spec.before.clone())
+            .fetch_one(pool)
+            .await
+        {
+            Ok(count) => count.max(0) as usize,
+            Err(error) => return SearchResult {
+                request_id, hits: Vec::new(), total: 0, offset: spec.offset, limit: spec.limit,
+                query: spec.query, mode: spec.mode.label().to_string(),
+                error: Some(format!("count PostgreSQL search results: {error}")),
+            },
+        }
+    } else {
+        0
+    };
     let mut hits = Vec::with_capacity(rows.len());
     for row in rows {
         let decoded = (|| -> Result<SearchHit, sqlx::Error> {
@@ -1157,6 +1184,27 @@ mod tests {
         }
         assert!(found_record, "PostgreSQL trigram/full-text index did not return the record");
 
+
+        // An empty page beyond the end must still report the real total.
+        let request_id = reader
+            .search(format!("{searchable_text} kind:note limit:1 offset:999999"))
+            .expect("submit out-of-range page");
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        let mut verified_empty_page = false;
+        while std::time::Instant::now() < deadline && !verified_empty_page {
+            for update in reader.drain_updates() {
+                if let Update::SearchResult(result) = update {
+                    if result.request_id == request_id {
+                        assert!(result.error.is_none(), "out-of-range page count failed: {:?}", result.error);
+                        assert!(result.hits.is_empty());
+                        assert!(result.total >= 1);
+                        verified_empty_page = true;
+                    }
+                }
+            }
+            if !verified_empty_page { thread::sleep(Duration::from_millis(20)); }
+        }
+        assert!(verified_empty_page, "out-of-range page count timed out");
         for query in [
             format!("--literal {searchable_text}"),
             format!("--phrase \"{searchable_text}\""),
