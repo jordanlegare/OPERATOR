@@ -1416,6 +1416,44 @@ mod tests {
     }
 
     #[test]
+    fn postgres_fetches_full_archive_record_on_demand() {
+        let Ok(database_url) = std::env::var("OPERATOR_TEST_DATABASE_URL") else {
+            return;
+        };
+
+        let text = format!("historical full-record payload {}", std::process::id());
+        let entry = Entry::with_kind(EntryKind::Note, text.clone());
+        let record_id = entry.record_id.clone().expect("record ID");
+        let (writer, _, _) = PostgresJournal::connect(database_url.clone(), None)
+            .expect("connect PostgreSQL writer");
+        let (mut reader, _, _) = PostgresJournal::connect(database_url, None)
+            .expect("connect PostgreSQL reader");
+
+        writer.enqueue(entry).expect("queue historical record");
+        writer.flush().expect("commit historical record");
+        let request_id = reader.fetch_record(record_id.clone()).expect("request full record");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        let mut loaded = false;
+        while std::time::Instant::now() < deadline && !loaded {
+            for update in reader.drain_updates() {
+                if let Update::ArchiveRecord { request_id: result_id, result } = update {
+                    if result_id == request_id {
+                        let entry = result.expect("fetch historical record");
+                        assert_eq!(entry.record_id.as_deref(), Some(record_id.as_str()));
+                        assert_eq!(entry.text, text);
+                        loaded = true;
+                    }
+                }
+            }
+            if !loaded {
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+        assert!(loaded, "full PostgreSQL archive record fetch timed out");
+    }
+
+    #[test]
     fn search_parser_supports_modes_filters_and_pagination() {
         use super::{parse_search_spec, SearchMode};
 
