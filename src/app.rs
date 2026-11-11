@@ -116,6 +116,7 @@ pub struct App {
     /// Byte ranges into the complete JSONL archive for local search results.
     pub archive_search_hits: Vec<ArchiveSearchHit>,
     pending_archive_search: Option<u64>,
+    pending_postgres_archive_record: Option<u64>,
     next_archive_search_id: u64,
     /// Full historical record loaded only while its search result is open.
     pub archive_detail_entry: Option<Entry>,
@@ -229,6 +230,7 @@ impl App {
             search_hit_entry_indices: Vec::new(),
             archive_search_hits: Vec::new(),
             pending_archive_search: None,
+            pending_postgres_archive_record: None,
             next_archive_search_id: 1,
             archive_detail_entry: None,
             archive_detail_line_number: 0,
@@ -1874,6 +1876,7 @@ impl App {
         self.search_hit_entry_indices.clear();
         self.archive_search_hits.clear();
         self.pending_archive_search = None;
+        self.pending_postgres_archive_record = None;
         self.archive_detail_entry = None;
         self.archive_detail_line_number = 0;
     }
@@ -1950,6 +1953,28 @@ impl App {
                         self.search_page_offset, self.search_total
                     )
                 };
+            }
+        }
+    }
+
+    /// Apply the result of a one-record PostgreSQL archive fetch.
+    /// Only the selected historical payload is transferred into TUI memory.
+    pub fn apply_postgres_archive_record_results(&mut self) {
+        for (request_id, result) in self.journal.drain_postgres_archive_results() {
+            if self.pending_postgres_archive_record != Some(request_id) {
+                continue;
+            }
+            self.pending_postgres_archive_record = None;
+            match result {
+                Ok(entry) => {
+                    self.archive_detail_line_number = 0;
+                    self.archive_detail_entry = Some(entry);
+                    self.message_view_scroll = 0;
+                    self.status = "Loaded full historical PostgreSQL record. Esc returns to archive results.".to_string();
+                }
+                Err(error) => {
+                    self.status = format!("Could not load historical PostgreSQL record: {error}");
+                }
             }
         }
     }
@@ -2041,6 +2066,7 @@ impl App {
         self.search_hit_entry_indices.clear();
         self.archive_search_hits.clear();
         self.archive_detail_entry = None;
+        self.pending_postgres_archive_record = None;
         self.matches.clear();
         self.active_match = None;
         self.conversation_view = None;
@@ -2140,7 +2166,17 @@ impl App {
         }
 
         let Some(index) = self.search_hit_entry_indices.get(position).copied().flatten() else {
-            self.status = "This PostgreSQL record belongs to another live terminal. Its indexed snippet is shown here; its full context is not mirrored into this session.".to_string();
+            if let Some(hit) = self.search_hits.get(position) {
+                match self.journal.fetch_postgres_archive_record(hit.record_id.clone()) {
+                    Ok(request_id) => {
+                        self.pending_postgres_archive_record = Some(request_id);
+                        self.status = format!("Loading full PostgreSQL archive record {}…", hit.record_id);
+                    }
+                    Err(error) => {
+                        self.status = format!("Could not request PostgreSQL archive record: {error}");
+                    }
+                }
+            }
             return;
         };
         let is_hermes_hit = self.journal.entries.get(index)
