@@ -78,12 +78,14 @@ The default input mode is **TERMINAL**.
 - Ctrl+C copies an explicit transcript selection through OSC 52. With a keyboard-highlighted HUSR row and no active selection, Ctrl+C opens that prompt's Hermes thread; Ctrl+C in the expanded thread copies the full thread with all live deltas joined into one uninterrupted assistant message.
 - Up/Down moves a highlighted row through the transcript and keeps it visible; highlighting a `CMD` row automatically loads that command into the editable input line. Holding either key repeats row navigation.
 - `Alt+Left` / `Alt+Right` horizontally pan the feed.
-- Unbounded in-memory `Vec<Entry>` with no application-level cache eviction.
+- Rolling 30-day hot transcript: only the trailing 30 × 24 hours of journal entries are kept in the live in-memory transcript. A periodic sweep removes expired rows from the live view without deleting or rewriting durable history.
+- Complete archive retention: JSONL remains append-only; PostgreSQL remains authoritative when configured. Historical records outside the hot window are not loaded into the transcript cache.
 - Append-only persistence: local JSONL by default, or PostgreSQL as the authoritative journal when `OPERATOR_DATABASE_URL` is configured. Non-secret commands, notes, useful terminal output records, and system events are retained. Empty terminal-output rows and standard shell-prompt rows are filtered both when loading older journals and when appending new output; existing journal files are not rewritten.
-- `/search <terms>` searches journal entries and Hermes conversation events. With PostgreSQL enabled, it opens a separate results workspace while live capture and persistence continue; press `Esc` to return to the newest live transcript row.
+- `/search <terms>` searches the complete history, not just the 30-day transcript. JSONL mode runs a background streaming scan of the full archive and retains only a paged set of lightweight hit offsets/snippets; PostgreSQL mode searches its full-history indexes. Live capture and persistence continue while the separate results workspace is open; press `Esc` to return to the newest live transcript row.
+- Local JSONL archive results are newest-first. Use `limit:` and `offset:` to page results; press Enter to load the selected historical record on demand. Adjacent Hermes stream deltas are reassembled for phrase matching.
 - `n` / `N` navigate ranked search results; Enter opens the matching Hermes conversation when applicable.
 - PostgreSQL search modes include web full-text, literal substring, exact phrase, advanced `tsquery`, and trigram fuzzy matching, with kind/session/conversation/date filters and paged results.
-- PostgreSQL search results are rendered from the database result itself, so records originating in other terminals are still discoverable even when their full bodies are not mirrored into the current terminal's cache; remote records display indexed snippets and metadata, while full-record opening requires the row to be locally available.
+- PostgreSQL search results are rendered from indexed archive records, so records originating in other terminals and records older than the hot window remain discoverable. Search results show indexed snippets and metadata; the local JSONL archive viewer loads an old full record by byte range only when opened.
 - Command/input history, Bash-powered Tab completion for commands and filesystem paths, nine high-contrast color palettes, export, stats, path display, and save/retry.
 - Older journal entries without a `kind` field remain compatible and load as `note` entries.
 
@@ -324,19 +326,19 @@ The palettes are built into OPERATOR and require no external theme package or co
 | `Ctrl+W` | Toggle transcript word wrap on/off |
 | `/note text` | Save a note without switching mode |
 | `!command` | Run a shell command from NOTES mode |
-| `/search phrase` | Search; PostgreSQL mode opens a ranked results workspace |
-| `/search --literal TEXT` | Literal case-insensitive substring search |
+| `/search phrase` | Search the full archive; JSONL scans in the background and PostgreSQL uses full-history indexes |
+| `/search --literal TEXT` | Literal case-insensitive substring search across the archive |
 | `/search --phrase TEXT` | PostgreSQL phrase search |
 | `/search --tsquery QUERY` | Advanced PostgreSQL `tsquery` syntax |
 | `/search --fuzzy TEXT` | Trigram similarity search |
-| Search filters | `kind:`, `session:`, `conversation:`, `after:`, `before:`, `limit:`, `offset:` |
+| Search filters | PostgreSQL supports `kind:`, `session:`, `conversation:`, `after:`, `before:`; both backends support `limit:` and `offset:` |
 | `/view` | Open the full body of the selected Hermes event |
 | `/threads` | Browse expandable Hermes conversations and their complete tool/assistant timeline |
 | `n` / `N` | Next / previous search result |
 | `/clear` | Clear search and return to the live tail; does not delete data |
 | `/save` | Retry pending writes and sync the journal |
 | `/export [path]` | Export the complete journal as readable text |
-| `/stats` | Show entry count, cached text bytes, pending writes, and hit count |
+| `/stats` | Show the 30-day hot-cache entry count/bytes, pending writes, and hit count |
 | `/path` | Show the journal file path |
 | `/scp on|off|status` | Enable, disable, or inspect SSH SCP/SFTP passthrough (persistent; enabled by default) |
 | `/mode [shell|notes]` | Switch mode; no argument toggles |
@@ -390,15 +392,22 @@ The transcript renders each stored RFC 3339 timestamp as local `YYYY-MM-DD HH:MM
 
 Kinds include `note`, `terminal_command`, `terminal_output`, `system`, `hermes_user`, `hermes_assistant`, `hermes_tool_call`, `hermes_tool_result`, `hermes_stream_start`, `hermes_stream_delta`, `hermes_stream_end`, `hermes_history`, `hermes_interim`, and `hermes_session`. Hermes records also carry optional session, turn, tool-call, and iteration identifiers. Old records without `kind` are treated as notes. The journal is append-only from the application's perspective; malformed lines are skipped at load and counted in the startup status. It is never truncated by OPERATOR. Input entered while terminal echo is off is intentionally not included.
 
-## Cache and persistence semantics
+## Hot transcript and complete archive
 
-The cache is **unbounded by the application**: no old entries are dropped to enforce a configured size. The complete JSONL journal is loaded into memory at startup, and search scans every cached entry. PTY output is collected in the background reader thread and batched for disk persistence to avoid forcing an fsync for every line during large command output.
+OPERATOR separates the live transcript cache from the durable journal:
 
-There is no literal infinite memory on a finite computer. The in-memory vector grows until the process or operating system reaches its available memory limit. The JSONL file is the durable journal. Each normal note and command is appended immediately; PTY output is appended in short batches. Failed appends remain queued for retry via `/save` and on normal exit.
+- **Hot window:** the transcript retains entries from the trailing 30 × 24 hours (a rolling 30-day window, not a calendar month). Expired rows are pruned from memory at startup and during the live session; the running TUI checks for expiry once per minute.
+- **Complete history:** the JSONL journal is append-only and is never truncated by hot-cache expiry. PostgreSQL stores and indexes the complete history when configured. Expired records remain available to archive search and export.
+- **JSONL archive search:** `/search` runs in a background worker that scans the durable file sequentially. It keeps only the requested result page as snippets and byte ranges; it does not build a second full-history `Vec<Entry>`. Results are newest-first. Use `limit:` and `offset:` to page through matches. Enter loads one selected historical record from its byte range instead of keeping every historical body in memory.
+- **Hermes streams:** adjacent stream deltas are joined while scanning so a literal phrase can match across delta boundaries. The original durable event rows are preserved.
+- **PostgreSQL:** startup hydrates only the last 30 days into the TUI; the database's full-text, literal, phrase, tsquery, and trigram indexes cover the complete archive. JSONL migration import and JSONL export are streamed in batches rather than materializing the entire file/database at once.
+- **Persistence:** new journal records are written immediately or queued for retry. PTY output is collected in the background and batched to avoid forcing an fsync for every line during large command output. `/save` retries pending writes and waits for PostgreSQL commits.
+
+The archive remains durable and searchable while the in-memory transcript stays bounded by recency. This is a rolling time window, not a record-count limit; exceptionally high activity during a 30-day period can still require substantial memory.
 
 ## Security and privacy
 
-Commands run with the permissions of the user who launched OPERATOR. Terminal output is saved to the journal, which may include paths, host information, command output, or other sensitive data. When the PTY's ECHO flag is off (as with normal `sudo` password prompts), OPERATOR masks the footer and does not save the submitted input to the command journal or input history. This is a safeguard, not a complete secret-management system: avoid entering secrets as ordinary command arguments, and remember that a program can itself print sensitive data to its output. The journal file inherits the creating user's umask and directory permissions.
+Commands run with the permissions of the user who launched OPERATOR. Terminal output is saved to the journal, which may include paths, host information, command output, or other sensitive data. When the PTY's ECHO flag is off (as with normal `sudo` password prompts), OPERATOR masks the footer and does not save the submitted input to the command journal or input history. This is a safeguard, not a complete secret-management system: avoid entering secrets as ordinary command arguments, and remember that a program can itself print sensitive data to its output. The journal file contains terminal and Hermes activity; protect it with owner-only permissions and restrict access to its containing directory.
 
 ## Implementation notes
 
