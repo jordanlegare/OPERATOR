@@ -10,8 +10,24 @@ permissions:
 
 jobs:
   test:
-    name: Build and test
+    name: Build and archive tests
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: operator
+          POSTGRES_PASSWORD: operator
+          POSTGRES_DB: operator_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U operator -d operator_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      OPERATOR_TEST_DATABASE_URL: postgresql://operator:operator@localhost:5432/operator_test?sslmode=disable
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -22,5 +38,22 @@ jobs:
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Run test suite
-        run: cargo test --all-targets
+      - name: Compile all targets
+        run: cargo check --all-targets
+
+      - name: Test bounded-memory JSONL archive search
+        run: cargo test archive::tests
+
+      - name: Test 30-day journal hot window
+        run: cargo test storage::hot_window_tests
+
+      - name: Test archive search in the TUI
+        run: cargo test app::tests::archive_search
+
+      - name: Test cache expiry with an open archive result
+        run: cargo test app::tests::hot_cache_expiry
+
+      - name: Test PostgreSQL historical record and Hermes stream loading
+        run: |
+          cargo test postgres::tests::postgres_fetches_full_archive_record_on_demand
+          cargo test postgres::tests::postgres_index_and_live_notifications
