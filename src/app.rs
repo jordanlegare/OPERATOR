@@ -100,6 +100,16 @@ pub struct App {
     pub follow_tail: bool,
     pub search_query: Option<String>,
     pub matches: Vec<usize>,
+    /// Dedicated results view; live capture and persistence continue underneath.
+    pub search_view: bool,
+    pub search_scroll: usize,
+    pub search_total: usize,
+    pub search_page_offset: usize,
+    pub search_page_limit: usize,
+    pub search_mode_label: String,
+    pub search_error: Option<String>,
+    pub search_snippets: HashMap<usize, String>,
+    pub search_ranks: HashMap<usize, f32>,
     pending_postgres_search: Option<(u64, String)>,
     pub active_match: Option<usize>,
     pub history: Vec<String>,
@@ -198,6 +208,15 @@ impl App {
             follow_tail: true,
             search_query: None,
             matches: Vec::new(),
+            search_view: false,
+            search_scroll: 0,
+            search_total: 0,
+            search_page_offset: 0,
+            search_page_limit: 200,
+            search_mode_label: String::new(),
+            search_error: None,
+            search_snippets: HashMap::new(),
+            search_ranks: HashMap::new(),
             pending_postgres_search: None,
             active_match: None,
             history,
@@ -449,6 +468,10 @@ impl App {
     }
 
     pub fn scroll_up(&mut self, amount: usize) {
+        if self.search_view {
+            self.search_scroll = self.search_scroll.saturating_sub(amount);
+            return;
+        }
         let current = self.current_top();
         self.scroll_top = current.saturating_sub(amount);
         self.follow_tail = false;
@@ -456,6 +479,10 @@ impl App {
     }
 
     pub fn scroll_down(&mut self, amount: usize) {
+        if self.search_view {
+            self.scroll_search_results(amount);
+            return;
+        }
         let next = self.current_top().saturating_add(amount).min(self.max_top());
         self.scroll_top = next;
         self.follow_tail = false;
@@ -1804,16 +1831,43 @@ impl App {
         self.active_match = None;
         self.conversation_focus_entry = None;
         self.pending_postgres_search = None;
+        self.search_view = false;
+        self.search_scroll = 0;
+        self.search_total = 0;
+        self.search_page_offset = 0;
+        self.search_page_limit = 200;
+        self.search_mode_label.clear();
+        self.search_error = None;
+        self.search_snippets.clear();
+        self.search_ranks.clear();
     }
 
-    /// Apply completed asynchronous PostgreSQL search requests on the UI thread.
-    /// Record IDs are translated into this process's in-memory transcript indices.
+    /// Leave the temporary results workspace and resume the newest live row.
+    pub fn exit_search_view(&mut self) {
+        self.clear_search();
+        self.conversation_view = None;
+        self.message_view_index = None;
+        self.jump_to_latest();
+        self.status = "Returned to LIVE transcript.".to_string();
+    }
+
+    /// Apply asynchronous PostgreSQL results on the UI thread, mapping stable
+    /// record IDs back to local transcript indices while preserving rank order.
     pub fn apply_postgres_search_results(&mut self) {
         for result in self.journal.drain_postgres_search_results() {
-            let Some((pending_id, query)) = self.pending_postgres_search.clone() else {
+            let Some((pending_id, original_query)) = self.pending_postgres_search.clone() else {
                 continue;
             };
             if pending_id != result.request_id {
+                continue;
+            }
+            self.pending_postgres_search = None;
+
+            if let Some(error) = result.error {
+                self.matches.clear();
+                self.active_match = None;
+                self.search_error = Some(error.clone());
+                self.status = error;
                 continue;
             }
 
@@ -1824,33 +1878,52 @@ impl App {
                     entry.record_id.as_deref().map(|record_id| (record_id, index))
                 })
                 .collect();
-            self.matches = result.record_ids
-                .iter()
-                .filter_map(|record_id| index_by_record_id.get(record_id.as_str()).copied())
-                .collect();
-            self.search_query = Some(query.clone());
-            self.pending_postgres_search = None;
+
+            self.matches.clear();
+            self.search_snippets.clear();
+            self.search_ranks.clear();
+            for hit in result.hits {
+                if let Some(index) = index_by_record_id.get(hit.record_id.as_str()).copied() {
+                    self.matches.push(index);
+                    self.search_snippets.insert(index, hit.snippet);
+                    self.search_ranks.insert(index, hit.rank);
+                }
+            }
+            self.search_query = Some(result.query);
+            self.search_total = result.total;
+            self.search_page_offset = result.offset;
+            self.search_page_limit = result.limit;
+            self.search_mode_label = result.mode;
+            self.search_error = None;
+            self.search_scroll = 0;
+            self.active_match = None;
+            self.conversation_view = None;
             self.conversation_focus_entry = None;
 
             if !self.matches.is_empty() {
-                let latest_position = self.matches.len() - 1;
-                self.activate_match(latest_position);
+                self.select_search_result(0);
                 self.status = format!(
-                    "Found {} indexed hit(s) for {:?} in PostgreSQL. n/N navigate.",
+                    "PostgreSQL {} · {} result(s) on this page · {} total · offset {}. Esc returns LIVE.",
+                    self.search_mode_label,
                     self.matches.len(),
-                    query
+                    self.search_total,
+                    self.search_page_offset
                 );
             } else {
-                self.active_match = None;
-                self.conversation_view = None;
-                self.status = format!("No PostgreSQL matches for {:?}.", query);
+                self.status = if self.search_total == 0 {
+                    format!("No PostgreSQL matches for {:?}. Esc returns LIVE.", original_query)
+                } else {
+                    format!(
+                        "No results at offset {}; {} total matches. Change offset: or reduce filters.",
+                        self.search_page_offset, self.search_total
+                    )
+                };
             }
         }
     }
 
-    /// Return the text users can actually read in the journal and expanded
-    /// Hermes conversations. Stream fragments are indexed as one logical
-    /// assistant message, so a query may span adjacent delta events.
+    /// Return human-readable transcript text; stream fragments are collapsed
+    /// into their logical Hermes message before the local fallback searches.
     fn searchable_entry_texts(&self) -> Vec<(usize, String)> {
         let mut searchable = self
             .journal
@@ -1894,79 +1967,135 @@ impl App {
         let query = query.trim();
         if query.is_empty() {
             self.clear_search();
-            self.status = "Search cleared.".to_string();
+            self.jump_to_latest();
+            self.status = "Search cleared; LIVE transcript restored.".to_string();
             return;
         }
+
+        self.search_view = true;
+        self.search_scroll = 0;
+        self.search_error = None;
+        self.search_snippets.clear();
+        self.search_ranks.clear();
+        self.matches.clear();
+        self.active_match = None;
+        self.conversation_view = None;
+        self.conversation_focus_entry = None;
 
         match self.journal.search_postgres(query.to_string()) {
             Ok(Some(request_id)) => {
                 self.pending_postgres_search = Some((request_id, query.to_string()));
                 self.search_query = Some(query.to_string());
-                self.matches.clear();
-                self.active_match = None;
-                self.conversation_focus_entry = None;
-                self.status = format!("Searching PostgreSQL index for {:?}…", query);
+                self.search_mode_label = "POSTGRESQL".to_string();
+                self.search_total = 0;
+                self.search_page_offset = 0;
+                self.status = format!("Searching PostgreSQL for {:?}… Esc returns LIVE.", query);
                 return;
             }
             Ok(None) => {}
             Err(error) => {
+                self.search_error = Some(error.to_string());
                 self.status = format!("PostgreSQL search failed: {error}");
                 return;
             }
         }
 
-        let needle = query.to_lowercase();
+        let local_query = query.split_whitespace()
+            .filter(|token| !token.starts_with("--") && !token.contains(':'))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_string();
+        let needle = if local_query.is_empty() { query } else { local_query.as_str() };
+        let needle_lower = needle.to_lowercase();
         let found = self
             .searchable_entry_texts()
             .into_iter()
             .filter_map(|(index, text)| {
                 text.to_lowercase()
-                    .contains(needle.as_str())
-                    .then_some(index)
+                    .contains(needle_lower.as_str())
+                    .then_some((index, text))
             })
             .collect::<Vec<_>>();
 
-        self.search_query = Some(query.to_string());
-        self.matches = found;
-        self.conversation_focus_entry = None;
+        self.search_query = Some(needle.to_string());
+        self.search_mode_label = "LOCAL JSONL SUBSTRING".to_string();
+        self.search_total = found.len();
+        self.search_page_offset = 0;
+        self.search_page_limit = found.len().max(1);
+        self.matches = found.iter().map(|(index, _)| *index).collect();
+        self.search_snippets = found.into_iter().map(|(index, text)| {
+            let snippet = text.chars().take(260).collect::<String>().replace('\n', " ");
+            (index, snippet)
+        }).collect();
+        self.search_ranks.clear();
+
         if !self.matches.is_empty() {
-            let latest_position = self.matches.len() - 1;
-            self.activate_match(latest_position);
+            self.select_search_result(self.matches.len() - 1);
             self.status = format!(
-                "Found {} hit(s) for {:?} across the journal and full Hermes conversation text. n/N navigate.",
-                self.matches.len(),
-                query
+                "Found {} local substring hit(s). Configure PostgreSQL for ranked full-text search. Esc returns LIVE.",
+                self.matches.len()
             );
         } else {
-            self.active_match = None;
-            self.conversation_view = None;
             self.status = format!(
-                "No matches for {:?} in {} journal entries or Hermes conversation messages.",
-                query,
+                "No local matches for {:?} in {} journal entries or Hermes conversation messages. Esc returns LIVE.",
+                needle,
                 self.journal.entries.len()
             );
         }
     }
 
-    pub fn next_match(&mut self) {
+    /// Select a result without opening a Hermes conversation overlay.
+    pub fn select_search_result(&mut self, position: usize) {
         if self.matches.is_empty() {
+            self.active_match = None;
             return;
         }
+        let position = position.min(self.matches.len() - 1);
+        self.active_match = Some(position);
+        self.selected_row = Some(self.matches[position]);
+        self.follow_tail = false;
+        let viewport = self.feed_viewport_height.max(1);
+        if position < self.search_scroll {
+            self.search_scroll = position;
+        } else if position >= self.search_scroll.saturating_add(viewport) {
+            self.search_scroll = position.saturating_add(1).saturating_sub(viewport);
+        }
+        self.status = format!(
+            "Search result {}/{} · journal row {} · Enter opens Hermes context · Esc returns LIVE.",
+            self.search_page_offset + position + 1,
+            self.search_total.max(self.matches.len()),
+            self.matches[position] + 1
+        );
+    }
+
+    pub fn scroll_search_results(&mut self, amount: usize) {
+        let max_top = self.matches.len().saturating_sub(self.feed_viewport_height.max(1));
+        self.search_scroll = self.search_scroll.saturating_add(amount).min(max_top);
+    }
+
+    pub fn open_active_search_result(&mut self) {
+        if let Some(position) = self.active_match {
+            self.activate_match(position);
+        }
+    }
+
+    pub fn pending_postgres_search_is_pending(&self) -> bool {
+        self.pending_postgres_search.is_some()
+    }
+
+    pub fn next_match(&mut self) {
+        if self.matches.is_empty() { return; }
         let next = self.active_match.unwrap_or(0).saturating_add(1) % self.matches.len();
-        self.activate_match(next);
+        if self.search_view { self.select_search_result(next); } else { self.activate_match(next); }
     }
 
     pub fn previous_match(&mut self) {
-        if self.matches.is_empty() {
-            return;
-        }
+        if self.matches.is_empty() { return; }
         let current = self.active_match.unwrap_or(0);
-        let previous = if current == 0 {
-            self.matches.len() - 1
-        } else {
-            current - 1
-        };
-        self.activate_match(previous);
+        let previous = if current == 0 { self.matches.len() - 1 } else { current - 1 };
+        if self.search_view { self.select_search_result(previous); } else { self.activate_match(previous); }
     }
 
     fn activate_match(&mut self, position: usize) {
@@ -2014,7 +2143,7 @@ impl App {
     }
 
     pub fn is_match(&self, entry_index: usize) -> bool {
-        self.matches.binary_search(&entry_index).is_ok()
+        self.matches.contains(&entry_index)
     }
 
     pub fn is_active_match(&self, entry_index: usize) -> bool {
