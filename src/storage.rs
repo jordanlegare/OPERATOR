@@ -1267,6 +1267,75 @@ mod timestamp_tests {
 
 
 #[cfg(test)]
+mod hot_window_tests {
+    use super::{Entry, EntryKind, Journal, HOT_WINDOW_DAYS};
+    use chrono::{Duration, Utc};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicUsize, Ordering},
+        thread,
+        time::{Duration as StdDuration, Instant},
+    };
+
+    static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_path() -> PathBuf {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "operator-hot-window-{}-{id}.jsonl",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn startup_keeps_only_thirty_days_but_searches_the_complete_archive() {
+        let path = test_path();
+        let mut old = Entry::with_kind(
+            EntryKind::Note,
+            "historical archive needle from outside the hot window".to_string(),
+        );
+        old.timestamp = (Utc::now() - Duration::days(HOT_WINDOW_DAYS + 1)).to_rfc3339();
+        let recent = Entry::with_kind(EntryKind::Note, "recent live transcript row".to_string());
+
+        let mut bytes = serde_json::to_vec(&old).expect("serialize historical record");
+        bytes.push(b'\n');
+        bytes.extend(serde_json::to_vec(&recent).expect("serialize recent record"));
+        bytes.push(b'\n');
+        fs::write(&path, bytes).expect("write full archive");
+
+        let journal = Journal::open(path.clone()).expect("open hot journal");
+        assert_eq!(journal.entries.len(), 1);
+        assert_eq!(journal.entries[0].text, "recent live transcript row");
+        assert_eq!(journal.total_text_bytes, "recent live transcript row".len());
+
+        journal.search_archive(17, "historical archive needle".to_string())
+            .expect("start full archive search");
+        let deadline = Instant::now() + StdDuration::from_secs(3);
+        let result = loop {
+            if let Some(result) = journal.drain_archive_search_results().into_iter()
+                .find(|result| result.request_id == 17)
+            {
+                break result;
+            }
+            assert!(Instant::now() < deadline, "archive search timed out");
+            thread::sleep(StdDuration::from_millis(5));
+        };
+        assert!(result.error.is_none(), "archive search failed: {:?}", result.error);
+        assert_eq!(result.total, 1);
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].line_number, 1);
+        let loaded = journal.load_archive_hit(&result.hits[0])
+            .expect("load selected historical record");
+        assert_eq!(loaded.text, old.text);
+
+        drop(journal);
+        assert_eq!(fs::read_to_string(&path).expect("read original archive").lines().count(), 2);
+        let _ = fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
 mod terminal_output_filter_tests {
     use super::{should_suppress_terminal_output, Entry, EntryKind, Journal};
     use std::{
