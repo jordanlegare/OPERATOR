@@ -1214,6 +1214,7 @@ fn drain_shared_journal_updates(
     // Private inboxes provide reliable per-instance Hermes delivery. The
     // shared journal tail also mirrors notes written by any peer terminal.
     let shared_journal_imported = app.journal.refresh_external_entries()?;
+    app.apply_archive_search_results();
     app.apply_postgres_search_results();
     if app.journal.entries.len() > previous_len {
         app.update_selected_tail_after_append(was_tracking_tail);
@@ -1230,8 +1231,13 @@ fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     app.active_reviewer_count = review_server.active_reviewer_count();
     let mut last_reviewer_count_refresh = Instant::now();
+    let mut last_hot_cache_prune = Instant::now();
 
     loop {
+        if last_hot_cache_prune.elapsed() >= Duration::from_secs(60) {
+            app.prune_hot_cache();
+            last_hot_cache_prune = Instant::now();
+        }
         app.expire_hermes_review_if_needed();
         review_server.set_enabled(app.review_hermes_responses);
         refresh_active_reviewer_count(app, review_server, &mut last_reviewer_count_refresh);
@@ -1993,6 +1999,33 @@ fn handle_key(
         return Ok(false);
     }
 
+    // Historical archive records are loaded on demand and remain above the
+    // search results workspace until the operator closes the record viewer.
+    if let Some(entry) = app.archive_detail_entry.as_ref() {
+        match code {
+            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                let text = entry.text.clone();
+                if text.len() > 60_000 {
+                    app.status = "Archive record exceeds the 60 KB terminal clipboard limit.".to_string();
+                } else {
+                    match copy_to_terminal_clipboard(&text) {
+                        Ok(()) => app.status = format!("Copied {} archived characters.", text.chars().count()),
+                        Err(error) => app.status = format!("Could not copy archived record: {error}"),
+                    }
+                }
+            }
+            KeyCode::Esc => app.archive_detail_entry = None,
+            KeyCode::Up => app.message_view_scroll = app.message_view_scroll.saturating_sub(1),
+            KeyCode::Down => app.message_view_scroll = app.message_view_scroll.saturating_add(1),
+            KeyCode::PageUp => app.message_view_scroll = app.message_view_scroll.saturating_sub(app.feed_viewport_height.max(1) as u16),
+            KeyCode::PageDown => app.message_view_scroll = app.message_view_scroll.saturating_add(app.feed_viewport_height.max(1) as u16),
+            KeyCode::Home => app.message_view_scroll = 0,
+            KeyCode::End => app.message_view_scroll = u16::MAX,
+            _ => {}
+        }
+        return Ok(false);
+    }
+
     // The full Hermes message viewer owns keyboard focus until dismissed.
     if app.message_view_index.is_some() {
         match code {
@@ -2042,6 +2075,9 @@ fn handle_key(
             KeyCode::Char('s') if modifiers.contains(KeyModifiers::CONTROL) => app.save(),
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                 let selected = app.active_match.and_then(|position| {
+                    if let Some(hit) = app.archive_search_hits.get(position) {
+                        return app.journal.load_archive_hit(hit).ok().map(|entry| (entry.text, true));
+                    }
                     let hit = app.search_hits.get(position)?;
                     let local = app.search_hit_entry_indices.get(position).copied().flatten();
                     let text = local
@@ -2062,6 +2098,8 @@ fn handle_key(
                             Err(error) => app.status = format!("Could not copy search result: {error}"),
                         }
                     }
+                } else {
+                    app.status = "Could not load the selected archive record.".to_string();
                 }
             }
             KeyCode::Esc => app.exit_search_view(),
@@ -2071,14 +2109,14 @@ fn handle_key(
             }
             KeyCode::Down => {
                 let current = app.active_match.unwrap_or(0);
-                if !app.matches.is_empty() {
+                if !app.search_hits.is_empty() {
                     app.select_search_result(current.saturating_add(1).min(app.matches.len() - 1));
                 }
             }
             KeyCode::PageUp => app.scroll_up((app.feed_viewport_height / 2).max(1)),
             KeyCode::PageDown => app.scroll_down((app.feed_viewport_height / 2).max(1)),
             KeyCode::Home => app.select_search_result(0),
-            KeyCode::End => app.select_search_result(app.matches.len().saturating_sub(1)),
+            KeyCode::End => app.select_search_result(app.search_hits.len().saturating_sub(1)),
             KeyCode::Char('n') => app.next_match(),
             KeyCode::Char('N') => app.previous_match(),
             KeyCode::Enter => app.open_active_search_result(),
