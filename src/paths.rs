@@ -240,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn leaves_an_existing_operator_directory_untouched() {
+    fn does_not_overwrite_existing_operator_children() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -250,10 +250,20 @@ mod tests {
         let operator = base.join("operator");
         fs::create_dir_all(&legacy).expect("create legacy directory");
         fs::create_dir_all(&operator).expect("create current directory");
-        fs::write(legacy.join("old.txt"), b"legacy").expect("write old data");
+        fs::write(legacy.join("settings.json"), b"legacy settings")
+            .expect("write old settings");
+        fs::write(operator.join("settings.json"), b"new settings")
+            .expect("write new settings");
 
         assert_eq!(migrate_legacy_dir(PathBuf::from(&operator)), operator);
-        assert!(legacy.join("old.txt").exists());
+        assert_eq!(
+            fs::read(operator.join("settings.json")).expect("read current settings"),
+            b"new settings"
+        );
+        assert_eq!(
+            fs::read(legacy.join("settings.json")).expect("preserved legacy settings"),
+            b"legacy settings"
+        );
 
         fs::remove_dir_all(&base).expect("clean temporary directory");
     }
