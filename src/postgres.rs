@@ -20,7 +20,7 @@ use sqlx::{
 };
 use tokio::sync::mpsc as tokio_mpsc;
 
-use crate::storage::{Entry, EntryKind};
+use crate::storage::{sanitize_entry_text, Entry, EntryKind};
 
 const SCHEMA: &str = include_str!("../migrations/0001_postgres_journal.sql");
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -347,6 +347,7 @@ async fn initialize_database(
                 let Ok(mut entry) = serde_json::from_str::<Entry>(&line) else {
                     continue;
                 };
+                entry.text = sanitize_entry_text(entry.kind, &entry.text);
                 entry.ensure_record_id();
                 if insert_entry(&mut transaction, &entry)
                     .await
@@ -1105,6 +1106,7 @@ async fn run_worker(
                             if let Some(body) = indexed_body {
                                 entry.text = body;
                             }
+                            entry.text = sanitize_entry_text(entry.kind, &entry.text);
                             let indexed_kind: Option<String> = row.try_get("indexed_kind")
                                 .map_err(|error| format!("read indexed historical kind: {error}"))?;
                             if let Some(kind) = indexed_kind.as_deref().and_then(entry_kind_from_name) {
