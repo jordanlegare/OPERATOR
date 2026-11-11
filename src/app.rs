@@ -2100,7 +2100,11 @@ impl App {
         if self.search_view {
             if self.search_hits.is_empty() { return; }
             let next = self.active_match.unwrap_or(0).saturating_add(1) % self.search_hits.len();
+            let reopen_detail = self.conversation_view.is_some() || self.message_view_index.is_some();
+            self.conversation_view = None;
+            self.message_view_index = None;
             self.select_search_result(next);
+            if reopen_detail { self.open_active_search_result(); }
             return;
         }
         if self.matches.is_empty() { return; }
@@ -2113,7 +2117,11 @@ impl App {
             if self.search_hits.is_empty() { return; }
             let current = self.active_match.unwrap_or(0);
             let previous = if current == 0 { self.search_hits.len() - 1 } else { current - 1 };
+            let reopen_detail = self.conversation_view.is_some() || self.message_view_index.is_some();
+            self.conversation_view = None;
+            self.message_view_index = None;
             self.select_search_result(previous);
+            if reopen_detail { self.open_active_search_result(); }
             return;
         }
         if self.matches.is_empty() { return; }
