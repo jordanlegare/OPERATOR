@@ -701,7 +701,8 @@ fn parse_search_spec(raw: &str) -> Result<SearchSpec, String> {
             if parsed == 0 { return Err("limit must be between 1 and 500".to_string()); }
             limit = parsed.min(500);
         } else if let Some(value) = token.strip_prefix("offset:") {
-            offset = value.parse::<usize>().map_err(|_| format!("invalid offset {value:?}"))?;
+            let parsed = value.parse::<usize>().map_err(|_| format!("invalid offset {value:?}"))?;
+            offset = parsed.min(1_000_000_000);
         } else {
             query_tokens.push(token);
         }
