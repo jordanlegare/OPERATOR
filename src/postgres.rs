@@ -1167,7 +1167,7 @@ mod tests {
         }
         assert!(received_notification, "peer instance did not receive the committed journal record");
 
-        let request_id = reader.search(searchable_text).expect("submit indexed search");
+        let request_id = reader.search(searchable_text.clone()).expect("submit indexed search");
         let deadline = std::time::Instant::now() + Duration::from_secs(8);
         let mut found_record = false;
         while std::time::Instant::now() < deadline && !found_record {
