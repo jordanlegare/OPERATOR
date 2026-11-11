@@ -922,7 +922,6 @@ impl Journal {
         result
     }
 }
-}
 
 /// Return true for PTY rows that are presentation noise rather than useful output:
 /// blank lines and the standard user@host:path$ / user@host:path# shell prompt.
@@ -1068,11 +1067,6 @@ fn is_hermes_journal_kind(kind: EntryKind) -> bool {
 fn export_plain_text_from_jsonl(source: &Path, destination: &Path) -> io::Result<()> {
     if let Some(parent) = destination.parent().filter(|path| !path.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-        }
     }
 
     let mut options = OpenOptions::new();
