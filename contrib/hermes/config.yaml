@@ -2478,53 +2478,53 @@ model:
 
 hooks:
   pre_tool_call:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   post_tool_call:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   pre_llm_call:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   post_llm_call:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   on_stream_start:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   on_stream_delta:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   on_stream_end:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   on_interim_message:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   on_session_start:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   on_session_end:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   on_session_finalize:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   on_session_reset:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
 
   post_compaction:
-    - command: "/home/jordan/.hermes/hooks/streenote-capture"
+    - command: "/home/jordan/.hermes/hooks/operator-capture"
       timeout: 3
