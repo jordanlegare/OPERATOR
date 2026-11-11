@@ -170,6 +170,7 @@ pub struct Journal {
     /// PostgreSQL is authoritative when configured; path remains the JSONL import/export path.
     postgres: Option<PostgresJournal>,
     postgres_search_results: Vec<PostgresSearchResult>,
+    postgres_archive_results: Vec<(u64, Result<Entry, String>)>,
     archive_searcher: Option<ArchiveSearcher>,
 }
 
@@ -321,6 +322,7 @@ impl Journal {
             journal_scan_offset,
             postgres: None,
             postgres_search_results: Vec::new(),
+            postgres_archive_results: Vec::new(),
             archive_searcher,
         })
     }
@@ -350,6 +352,7 @@ impl Journal {
             journal_scan_offset: 0,
             postgres: Some(postgres),
             postgres_search_results: Vec::new(),
+            postgres_archive_results: Vec::new(),
             archive_searcher: None,
         };
 
@@ -384,6 +387,17 @@ impl Journal {
 
     pub fn drain_postgres_search_results(&mut self) -> Vec<PostgresSearchResult> {
         std::mem::take(&mut self.postgres_search_results)
+    }
+
+    pub fn fetch_postgres_archive_record(&mut self, record_id: String) -> io::Result<u64> {
+        self.postgres
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "PostgreSQL archive is not configured"))?
+            .fetch_record(record_id)
+    }
+
+    pub fn drain_postgres_archive_results(&mut self) -> Vec<(u64, Result<Entry, String>)> {
+        std::mem::take(&mut self.postgres_archive_results)
     }
 
     pub fn search_archive(&self, request_id: u64, query: String) -> io::Result<()> {
@@ -651,6 +665,9 @@ impl Journal {
                         }
                     }
                     PostgresUpdate::SearchResult(result) => self.postgres_search_results.push(result),
+                    PostgresUpdate::ArchiveRecord { request_id, result } => {
+                        self.postgres_archive_results.push((request_id, result));
+                    }
                     PostgresUpdate::Error(error) => {
                         if first_error.is_none() {
                             first_error = Some(error);
