@@ -208,7 +208,7 @@ fn scan_archive(
     loop {
         buffer.clear();
         let start_offset = byte_offset;
-        let count = reader.read_until(b'\\n', &mut buffer)
+        let count = reader.read_until(b'\n', &mut buffer)
             .map_err(|error| format!("read JSONL archive: {error}"))?;
         if count == 0 {
             break;
