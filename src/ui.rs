@@ -721,7 +721,7 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
     };
     frame.render_widget(
         Paragraph::new(content)
-            .alignment(Alignment::Left)
+            .alignment(Alignment::Center)
             .style(Style::default().fg(theme.text).bg(theme.panel)),
         content_area,
     );
