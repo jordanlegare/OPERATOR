@@ -1,8 +1,8 @@
-"""Hermes final-response gate backed by the STREENOTE review socket.
+"""Hermes final-response gate backed by the OPERATOR review socket.
 
-The plugin holds a completed assistant response until STREENOTE releases the
+The plugin holds a completed assistant response until OPERATOR releases the
 original, returns an edited replacement, or rejects it. The request channel
-uses a private Unix-domain socket shared by the Hermes gateway and STREENOTE.
+uses a private Unix-domain socket shared by the Hermes gateway and OPERATOR.
 """
 
 from __future__ import annotations
@@ -27,6 +27,21 @@ SOCKET_TIMEOUT_SECONDS = 550
 MAX_METADATA_CHARS = 1024
 MAX_PROMPT_BYTES = 8 * 1024 * 1024
 
+
+def env_value(name: str, default=None):
+    """Prefer OPERATOR settings while accepting pre-rename Hermes environments."""
+    value = os.environ.get(name)
+    if value is None and name.startswith("OPERATOR_"):
+        value = os.environ.get("STREENOTE_" + name[len("OPERATOR_"):])
+        if value is not None and name.endswith(("_DIR", "_SOCKET", "_LOG", "_INBOX")):
+            parts = list(Path(value).parts)
+            if "streenote" in parts:
+                parts[parts.index("streenote")] = "operator"
+                rewritten = Path(*parts)
+                if rewritten.exists() or rewritten.parent.exists():
+                    value = str(rewritten)
+    return default if value is None else value
+
 _PROMPT_SECRET_ASSIGNMENT = re.compile(
     r"""(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|authorization|credential)\b(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)"""
 )
@@ -37,14 +52,14 @@ _PROMPT_SECRET_FLAG = re.compile(
 
 
 def _diagnostic_log_path() -> Path:
-    explicit = os.environ.get("STREENOTE_HERMES_REVIEW_LOG")
+    explicit = env_value("OPERATOR_HERMES_REVIEW_LOG")
     if explicit and Path(explicit).expanduser().is_absolute():
         return Path(explicit).expanduser()
     runtime_dir = Path("/run/user") / str(os.getuid())
     try:
         runtime_stat = runtime_dir.stat()
         if runtime_dir.is_dir() and runtime_stat.st_uid == os.getuid():
-            return runtime_dir / "streenote" / "hermes-review.log"
+            return runtime_dir / "operator" / "hermes-review.log"
     except OSError:
         pass
     state_home = os.environ.get("XDG_STATE_HOME")
@@ -52,7 +67,7 @@ def _diagnostic_log_path() -> Path:
         root = Path(state_home)
     else:
         root = Path.home() / ".local" / "state"
-    return root / "streenote" / "hermes-review.log"
+    return root / "operator" / "hermes-review.log"
 
 
 def _log_event(event: str, **fields: Any) -> None:
@@ -80,7 +95,7 @@ def _log_event(event: str, **fields: Any) -> None:
 
 
 def _review_required() -> bool:
-    return os.environ.get("STREENOTE_HERMES_REVIEW_REQUIRED", "").strip().lower() in {
+    return env_value("OPERATOR_HERMES_REVIEW_REQUIRED", "").strip().lower() in {
         "1", "true", "yes", "on"
     }
 
@@ -94,18 +109,18 @@ def runtime_review_socket_path(uid: int | None = None, runtime_root: Path = Path
         return None
     if not runtime_dir.is_dir() or metadata.st_uid != uid:
         return None
-    return runtime_dir / "streenote" / "review.sock"
+    return runtime_dir / "operator" / "review.sock"
 
 
 def review_socket_path() -> Path:
-    """Resolve the same per-user socket path used by the STREENOTE process."""
-    explicit = os.environ.get("STREENOTE_HERMES_REVIEW_SOCKET")
+    """Resolve the same per-user socket path used by the OPERATOR process."""
+    explicit = env_value("OPERATOR_HERMES_REVIEW_SOCKET")
     if explicit:
         candidate = Path(explicit).expanduser()
         if candidate.is_absolute():
             return candidate
 
-    # The Hermes gateway and the STREENOTE PTY can have different HOME and
+    # The Hermes gateway and the OPERATOR PTY can have different HOME and
     # XDG_DATA_HOME values. /run/user/<uid> is shared by processes of this
     # Unix account and avoids that environment-dependent path mismatch.
     runtime_path = runtime_review_socket_path()
@@ -117,11 +132,11 @@ def review_socket_path() -> Path:
         data_root = Path(xdg_data_home)
     else:
         data_root = Path.home() / ".local" / "share"
-    return data_root / "streenote" / "review.sock"
+    return data_root / "operator" / "review.sock"
 
 def review_session_registry_dir() -> Path:
-    """Directory containing one socket/manifest pair per live STREENOTE TUI."""
-    explicit = os.environ.get("STREENOTE_HERMES_REVIEW_SESSION_DIR")
+    """Directory containing one socket/manifest pair per live OPERATOR TUI."""
+    explicit = env_value("OPERATOR_HERMES_REVIEW_SESSION_DIR")
     if explicit:
         candidate = Path(explicit).expanduser()
         if candidate.is_absolute():
@@ -198,7 +213,7 @@ def _load_review_routes() -> tuple[list[dict[str, Any]], Path]:
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 continue
 
-    # Preserve compatibility with older STREENOTE binaries and single-socket
+    # Preserve compatibility with older OPERATOR binaries and single-socket
     # unit-test/standalone deployments, even when no new registry exists yet.
     legacy_path = review_socket_path()
     if _owned_unix_socket(legacy_path) and all(
@@ -320,7 +335,7 @@ def _acquire_review_slot(
             return selected
         if time.monotonic() >= deadline:
             raise TimeoutError(
-                "All enabled STREENOTE reviewers remained busy until the review queue deadline."
+                "All enabled OPERATOR reviewers remained busy until the review queue deadline."
             )
         time.sleep(0.05)
 
@@ -336,23 +351,23 @@ def _read_json_line(connection: socket.socket) -> dict[str, Any]:
     while b"\n" not in received:
         remaining = MAX_REPLY_WIRE_BYTES + 1 - len(received)
         if remaining <= 0:
-            raise RuntimeError("STREENOTE review reply exceeded the size limit")
+            raise RuntimeError("OPERATOR review reply exceeded the size limit")
         chunk = connection.recv(min(65536, remaining))
         if not chunk:
-            raise RuntimeError("STREENOTE closed the review channel without a decision")
+            raise RuntimeError("OPERATOR closed the review channel without a decision")
         received.extend(chunk)
 
     line, _, trailing = received.partition(b"\n")
     if trailing.strip():
-        raise RuntimeError("STREENOTE sent unexpected data after the review reply")
+        raise RuntimeError("OPERATOR sent unexpected data after the review reply")
     if len(line) > MAX_REPLY_WIRE_BYTES:
-        raise RuntimeError("STREENOTE review reply exceeded the size limit")
+        raise RuntimeError("OPERATOR review reply exceeded the size limit")
     try:
         decoded = json.loads(line.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise RuntimeError(f"STREENOTE returned an invalid review reply: {error}") from error
+        raise RuntimeError(f"OPERATOR returned an invalid review reply: {error}") from error
     if not isinstance(decoded, dict):
-        raise RuntimeError("STREENOTE review reply was not a JSON object")
+        raise RuntimeError("OPERATOR review reply was not a JSON object")
     return decoded
 
 
@@ -376,7 +391,7 @@ def _exchange(
         payload, ensure_ascii=False, separators=(",", ":")
     ).encode("utf-8")
     if len(encoded) > MAX_REVIEW_BYTES:
-        raise RuntimeError("Hermes final response exceeds STREENOTE's 8 MiB review limit")
+        raise RuntimeError("Hermes final response exceeds OPERATOR's 8 MiB review limit")
 
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     connection.settimeout(SOCKET_TIMEOUT_SECONDS)
@@ -477,13 +492,13 @@ def _last_user_message_from_history(history: Any) -> Any:
 
 
 def _default_prompt_inbox() -> Path:
-    explicit = os.environ.get("STREENOTE_HERMES_INBOX")
+    explicit = env_value("OPERATOR_HERMES_INBOX")
     if explicit and Path(explicit).expanduser().is_absolute():
         return Path(explicit).expanduser()
     data_home = os.environ.get("XDG_DATA_HOME")
     if data_home and Path(data_home).expanduser().is_absolute():
-        return Path(data_home).expanduser() / "streenote" / "hermes-inbox"
-    return Path.home() / ".local" / "share" / "streenote" / "hermes-inbox"
+        return Path(data_home).expanduser() / "operator" / "hermes-inbox"
+    return Path.home() / ".local" / "share" / "operator" / "hermes-inbox"
 
 
 def _write_prompt_event(inbox: Path, event: dict[str, Any]) -> None:
@@ -497,7 +512,7 @@ def _write_prompt_event(inbox: Path, event: dict[str, Any]) -> None:
 
     final_path = ready / f"{time.time_ns():020d}-{event['event_id']}.json"
     descriptor, temporary_name = tempfile.mkstemp(
-        prefix=".streenote-prompt-", suffix=".tmp", dir=ready
+        prefix=".operator-prompt-", suffix=".tmp", dir=ready
     )
     try:
         with os.fdopen(descriptor, "wb") as temporary:
@@ -705,7 +720,7 @@ def review_response(
         _log_event("SOCKET_MISSING", socket_path=str(legacy_path), required=required)
         if required:
             raise RuntimeError(
-                f"STREENOTE review is required but no active review socket is registered "
+                f"OPERATOR review is required but no active review socket is registered "
                 f"under {registry_dir}; the Hermes response was withheld."
             )
         return None
@@ -740,7 +755,7 @@ def review_response(
                 required=required,
             )
             raise RuntimeError(
-                "All active STREENOTE reviewers are busy; the Hermes response was withheld."
+                "All active OPERATOR reviewers are busy; the Hermes response was withheld."
             ) from error
 
         if acquired is None:
@@ -785,7 +800,7 @@ def review_response(
                 ]
                 if not routes:
                     raise RuntimeError(
-                        "All registered STREENOTE review sockets are stale or unavailable; "
+                        "All registered OPERATOR review sockets are stale or unavailable; "
                         "the Hermes response was withheld."
                     ) from error
                 selected_route = None
@@ -794,12 +809,12 @@ def review_response(
         except (TimeoutError, socket.timeout) as error:
             _log_event("REVIEW_ERROR", request_id=request_id, error="socket timeout")
             raise RuntimeError(
-                "STREENOTE review timed out; the Hermes response was withheld."
+                "OPERATOR review timed out; the Hermes response was withheld."
             ) from error
         except OSError as error:
             _log_event("REVIEW_ERROR", request_id=request_id, error=str(error))
             raise RuntimeError(
-                f"STREENOTE review channel failed; the Hermes response was withheld: {error}"
+                f"OPERATOR review channel failed; the Hermes response was withheld: {error}"
             ) from error
         finally:
             _release_review_slot(slot_fd)
@@ -822,12 +837,12 @@ def review_response(
     if selected_route is None:
         # Every connected terminal has explicitly opted out (or became
         # unavailable while this request was queued). This deliberate operator
-        # choice bypasses even STREENOTE_HERMES_REVIEW_REQUIRED.
+        # choice bypasses even OPERATOR_HERMES_REVIEW_REQUIRED.
         return None
 
     if reply is None:
         raise RuntimeError(
-            "No connected STREENOTE reviewer was available; the Hermes response was withheld."
+            "No connected OPERATOR reviewer was available; the Hermes response was withheld."
         )
 
     session_hash = hashlib.sha256(str(session_id or "").encode("utf-8")).hexdigest()[:16]
@@ -841,7 +856,7 @@ def review_response(
 
     if reply.get("version") != 1:
         _log_event("REVIEW_ERROR", request_id=request_id, error="unsupported protocol version")
-        raise RuntimeError("STREENOTE returned an unsupported review protocol version")
+        raise RuntimeError("OPERATOR returned an unsupported review protocol version")
 
     decision = reply.get("decision")
     _log_event(
@@ -862,12 +877,12 @@ def review_response(
         if not isinstance(replacement, str) or not replacement.strip():
             _log_event("REVIEW_ERROR", request_id=request_id, error="empty replacement")
             raise RuntimeError(
-                "STREENOTE returned an empty replacement; the Hermes response was withheld."
+                "OPERATOR returned an empty replacement; the Hermes response was withheld."
             )
         if len(replacement.encode("utf-8")) > MAX_REVIEW_BYTES:
             _log_event("REVIEW_ERROR", request_id=request_id, error="replacement too large")
             raise RuntimeError(
-                "STREENOTE replacement exceeded the review limit; the Hermes response was withheld."
+                "OPERATOR replacement exceeded the review limit; the Hermes response was withheld."
             )
         _log_event(
             "REVIEW_REPLACED",
@@ -879,10 +894,10 @@ def review_response(
         reason = reply.get("error")
         detail = f" ({reason})" if isinstance(reason, str) and reason else ""
         _log_event("REVIEW_REJECTED", request_id=request_id, reason=str(reason or "")[:300])
-        raise RuntimeError(f"STREENOTE operator withheld this Hermes response{detail}.")
+        raise RuntimeError(f"OPERATOR operator withheld this Hermes response{detail}.")
     _log_event("REVIEW_ERROR", request_id=request_id, error=f"unknown decision {decision!r}")
     raise RuntimeError(
-        f"STREENOTE returned an unknown review decision {decision!r}; the response was withheld."
+        f"OPERATOR returned an unknown review decision {decision!r}; the response was withheld."
     )
 
 
@@ -894,7 +909,7 @@ def register(ctx: Any) -> None:
     ctx.register_hook("pre_api_request", capture_pre_api_prompt)
     ctx.register_hook("post_llm_call", capture_post_llm_prompt)
     # hold_stream is essential: without it, Hermes could display the original
-    # draft before STREENOTE has had a chance to review or replace it.
+    # draft before OPERATOR has had a chance to review or replace it.
     ctx.register_hook("transform_llm_output", review_response, hold_stream=True)
     _log_event(
         "PLUGIN_REGISTERED",

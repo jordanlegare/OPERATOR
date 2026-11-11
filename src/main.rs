@@ -1,4 +1,5 @@
 mod app;
+mod paths;
 mod conversations;
 mod hermes_bridge;
 mod hermes_review;
@@ -45,9 +46,9 @@ use shell::ShellSession;
 use storage::Journal;
 
 #[derive(Debug, Parser)]
-#[command(name = "streamnote", version, about = "A live Debian shell transcript and unwrapped note stream")]
+#[command(name = "operator", version, about = "A live Debian shell transcript and unwrapped note stream")]
 struct Args {
-    /// Journal file. Defaults to ~/.local/share/streenote/journal.jsonl
+    /// Journal file. Defaults to ~/.local/share/operator/journal.jsonl
     #[arg(short, long)]
     file: Option<PathBuf>,
 }
@@ -117,13 +118,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start review routing before the PTY so its identity can be inherited by
     // the interactive shell and Hermes' pre_llm_call capture hook.
     let mut review_server = HermesReviewServer::start()?;
+    paths::set_compatible_env(
+        "OPERATOR_HERMES_REVIEW_SOCKET",
+        hermes_review::default_review_socket_path(),
+    );
     if let Some(instance_id) = review_server.instance_id() {
         if let Some(registry_dir) = review_server.session_registry_dir() {
-            std::env::set_var("STREENOTE_HERMES_REVIEW_SESSION_DIR", &registry_dir);
+            paths::set_compatible_env("OPERATOR_HERMES_REVIEW_SESSION_DIR", &registry_dir);
             // Each SSH-launched TUI consumes its own inbox fan-out. The capture
             // hook writes every Hermes event to every live instance's inbox.
             let instance_inbox = registry_dir.join("inboxes").join(instance_id);
-            std::env::set_var(HERMES_INBOX_ENV, instance_inbox);
+            paths::set_compatible_env(HERMES_INBOX_ENV, instance_inbox);
         }
     }
 
@@ -150,7 +155,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => {
             app.set_mode(InputMode::Notes);
             app.record_system(
-                "Shell unavailable. Notes mode is active; install /bin/bash or set STREAMNOTE_SHELL.".to_string(),
+                "Shell unavailable. Notes mode is active; install /bin/bash or set OPERATOR_SHELL.".to_string(),
             );
         }
     }
@@ -359,7 +364,7 @@ fn show_access_disclaimer(
                 }
                 KeyCode::Esc => {
                     return Err(
-                        "Operator declined the access notice; STREENOTE was not started.".into(),
+                        "Operator declined the access notice; OPERATOR was not started.".into(),
                     );
                 }
                 _ => {}
@@ -451,8 +456,8 @@ fn access_notice_policy(
         ("obtain clarification from the rights-holder or responsible administrator.", body_style),
         ("This operator notice is not itself a transfer of copyright or a complete proprietary", body_style),
         ("file licence. A separate signed or otherwise valid written agreement may be needed.", body_style),
-        ("STREENOTE application source code is separately distributed under the MIT licence", body_style),
-        ("identified in the repository LICENSE file. That software licence does not grant", body_style),
+        ("OPERATOR application source code is dedicated to the public domain under CC0 1.0", body_style),
+        ("Universal, as set out in the repository LICENSE file. That dedication does not grant", body_style),
         ("rights to third-party files, user data, credentials, or content stored in the journal.", body_style),
         ("", body_style),
         ("4. CONFIDENTIALITY AND NEED-TO-KNOW HANDLING", warning_style),
@@ -472,7 +477,7 @@ fn access_notice_policy(
         ("the authorized purpose ends or when the rights-holder or administrator directs.", body_style),
         ("", body_style),
         ("5. JOURNALS, TRANSCRIPTS, STORAGE, AND DATA RETENTION", warning_style),
-        ("STREENOTE may record commands, notes, system messages, and terminal output in a", body_style),
+        ("OPERATOR may record commands, notes, system messages, and terminal output in a", body_style),
         ("local journal. Output can reveal usernames, host details, directory paths, network", body_style),
         ("addresses, filenames, application data, personal information, or business secrets.", body_style),
         ("A command may cause a program to print sensitive material even when the operator", body_style),
@@ -1001,14 +1006,14 @@ fn dispatch_ssh_invocation() {
     }
 
     let Some(command) = arguments.next() else {
-        eprintln!("STREENOTE: SSH supplied -c without a command.");
+        eprintln!("OPERATOR: SSH supplied -c without a command.");
         std::process::exit(2);
     };
     let command_text = command.to_string_lossy();
 
     if let Some(request) = detect_file_transfer_request(&command_text) {
         if !settings::Settings::load().scp_sftp_passthrough {
-            eprintln!("STREENOTE: SCP/SFTP passthrough is disabled. Enable it with /scp on.");
+            eprintln!("OPERATOR: SCP/SFTP passthrough is disabled. Enable it with /scp on.");
             std::process::exit(1);
         }
 
@@ -1019,7 +1024,7 @@ fn dispatch_ssh_invocation() {
                 let words = match split_command_words(&command_text) {
                     Some(words) if !words.is_empty() => words,
                     _ => {
-                        eprintln!("STREENOTE: invalid SFTP subsystem command.");
+                        eprintln!("OPERATOR: invalid SFTP subsystem command.");
                         std::process::exit(2);
                     }
                 };
@@ -1029,13 +1034,13 @@ fn dispatch_ssh_invocation() {
                     0
                 };
                 let Some(program) = words.get(program_index) else {
-                    eprintln!("STREENOTE: invalid SFTP subsystem command.");
+                    eprintln!("OPERATOR: invalid SFTP subsystem command.");
                     std::process::exit(2);
                 };
                 let mut server = Command::new(program);
                 server.args(&words[program_index + 1..]);
                 let error = server.exec();
-                eprintln!("STREENOTE: could not execute SFTP subsystem: {error}");
+                eprintln!("OPERATOR: could not execute SFTP subsystem: {error}");
                 std::process::exit(127);
             }
             FileTransferRequest::LegacyScp => {
@@ -1046,7 +1051,7 @@ fn dispatch_ssh_invocation() {
                     .arg(&command)
                     .env("SHELL", "/bin/bash")
                     .exec();
-                eprintln!("STREENOTE: could not execute legacy SCP command: {error}");
+                eprintln!("OPERATOR: could not execute legacy SCP command: {error}");
                 std::process::exit(127);
             }
         }
@@ -1056,11 +1061,11 @@ fn dispatch_ssh_invocation() {
     let error = Command::new("/bin/bash")
         .arg("-c")
         .arg(&command)
-        .arg("streenote-ssh")
+        .arg("operator-ssh")
         .args(arguments)
         .env("SHELL", "/bin/bash")
         .exec();
-    eprintln!("STREENOTE: could not execute remote command through /bin/bash: {error}");
+    eprintln!("OPERATOR: could not execute remote command through /bin/bash: {error}");
     std::process::exit(127);
 }
 
@@ -1249,7 +1254,7 @@ fn run(
                                 review_server,
                             )?;
                             // Dropping this session closes only the workspace shell.
-                            // STREENOTE's primary transcript shell remains untouched.
+                            // OPERATOR's primary transcript shell remains untouched.
                             terminal.clear()?;
                         }
                         Err(error) => {
@@ -1316,7 +1321,7 @@ fn run(
 }
 
 /// Temporarily hand the real terminal to the shell PTY for full-screen programs.
-/// F1 returns to the StreeNote transcript workspace.
+/// F1 returns to the OPERATOR transcript workspace.
 fn run_terminal_workspace(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -1344,7 +1349,7 @@ fn run_terminal_workspace(
     let result = run_terminal_workspace_loop(terminal, app, session, hermes_bridge, review_server);
     let echo_result = session.set_echo(false);
 
-    // Restore the input modes expected by STREENOTE. A nested full-screen
+    // Restore the input modes expected by OPERATOR. A nested full-screen
     // child may have changed bracketed-paste or mouse modes while it owned TTY.
     execute!(
         out,
@@ -1627,13 +1632,13 @@ fn paste_review_from_system_clipboard(app: &mut App) {
         Ok(text) if !text.is_empty() => {
             let count = text.chars().count();
             app.review_insert_text(&text);
-            app.status = format!("Pasted {count} characters from the STREENOTE server clipboard into the held answer.");
+            app.status = format!("Pasted {count} characters from the OPERATOR server clipboard into the held answer.");
             return;
         }
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => {
-            app.status = format!("Could not read STREENOTE clipboard cache: {error}");
+            app.status = format!("Could not read OPERATOR clipboard cache: {error}");
         }
     }
 
@@ -1720,7 +1725,7 @@ fn run_terminal_workspace_loop(
 
 /// Read raw input from the controlling terminal without parsing ANSI sequences.
 /// This allows OSC 52 responses from the SSH client to pass through F1 into a
-/// nested STREENOTE running on another host.
+/// nested OPERATOR running on another host.
 #[cfg(unix)]
 fn poll_terminal_input(
     tty: &mut std::fs::File,
@@ -2128,7 +2133,7 @@ const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
 const OSC52_READ_TIMEOUT: Duration = Duration::from_millis(1800);
 
 /// Per-user, per-server clipboard cache. This makes copy/paste available to
-/// other STREENOTE sessions on the same host even when no desktop is present.
+/// other OPERATOR sessions on the same host even when no desktop is present.
 fn server_clipboard_cache_path() -> PathBuf {
     default_journal_path().with_file_name("clipboard.txt")
 }
@@ -2348,14 +2353,14 @@ fn paste_from_system_clipboard(app: &mut App) {
     match read_server_clipboard_cache() {
         Ok(text) => {
             if text.is_empty() {
-                app.status = "STREENOTE server clipboard cache is empty.".to_string();
+                app.status = "OPERATOR server clipboard cache is empty.".to_string();
             } else {
-                paste_clipboard_text(app, &text, "STREENOTE server clipboard");
+                paste_clipboard_text(app, &text, "OPERATOR server clipboard");
             }
             return;
         }
         Err(error) if error.kind() != io::ErrorKind::NotFound => {
-            app.status = format!("Could not read STREENOTE server clipboard: {error}");
+            app.status = format!("Could not read OPERATOR server clipboard: {error}");
             return;
         }
         Err(_) => {}
@@ -2375,7 +2380,7 @@ fn paste_from_system_clipboard(app: &mut App) {
 }
 
 fn copy_to_terminal_clipboard(text: &str) -> io::Result<()> {
-    // Keep a private copy on this host for later pastes and other STREENOTE
+    // Keep a private copy on this host for later pastes and other OPERATOR
     // sessions, then send OSC 52 outward so the attached client clipboard updates.
     write_server_clipboard_cache(text)?;
     let encoded = base64_encode(text.as_bytes());
@@ -2452,9 +2457,7 @@ fn default_journal_path() -> PathBuf {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    base.join(".local")
-        .join("share")
-        .join("streenote")
+    paths::migrate_legacy_dir(base.join(".local").join("share").join("operator"))
         .join("journal.jsonl")
 }
 
@@ -2639,12 +2642,12 @@ mod clipboard_tests {
 
     fn test_path() -> PathBuf {
         let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
-        env::temp_dir().join(format!("streenote-clipboard-{}-{id}.txt", std::process::id()))
+        env::temp_dir().join(format!("operator-clipboard-{}-{id}.txt", std::process::id()))
     }
 
     #[test]
     fn base64_encodes_and_decodes_empty_ascii_and_utf8_text() {
-        for text in ["", "f", "fo", "foo", "café", "SSH → STREENOTE"] {
+        for text in ["", "f", "fo", "foo", "café", "SSH → OPERATOR"] {
             let encoded = base64_encode(text.as_bytes());
             assert_eq!(base64_decode(encoded.as_bytes()).unwrap(), text.as_bytes());
         }
@@ -2655,7 +2658,7 @@ mod clipboard_tests {
         let bel = b"\x1b]52;c;SGVsbG8=\x07";
         let st = b"\x1b]52;c;U1NIIHRvIFN0cmVlTm90ZQ==\x1b\\";
         assert_eq!(parse_osc52_response(bel).as_deref(), Some("Hello"));
-        assert_eq!(parse_osc52_response(st).as_deref(), Some("SSH to StreeNote"));
+        assert_eq!(parse_osc52_response(st).as_deref(), Some("SSH to OPERATOR"));
         assert!(parse_osc52_response(b"\x1b]52;p;SGVsbG8=\x07").is_none());
         assert!(parse_osc52_response(b"\x1b]52;c;!!!\x07").is_none());
     }

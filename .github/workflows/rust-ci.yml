@@ -23,8 +23,10 @@ jobs:
           cargo test hermes_review::tests
       - name: Test Hermes response-review plugin
         run: |
-          python3 -m py_compile contrib/hermes/streenote-review/__init__.py
-          python3 -m unittest discover -s contrib/hermes/streenote-review -p 'test_*.py'
+          python3 -m py_compile contrib/hermes/operator-review/__init__.py
+          python3 -m unittest discover -s contrib/hermes/operator-review -p 'test_*.py'
+      - name: Test OPERATOR path migration
+        run: cargo test paths::tests
       - name: Test Hermes inbox bridge
         run: cargo test hermes_bridge::tests
       - name: Test Hermes conversation grouping and stream persistence
@@ -34,32 +36,33 @@ jobs:
           cargo test hermes_bridge::tool_event_tests
       - name: Smoke-test Hermes shell hook
         run: |
-          python3 -m py_compile contrib/hermes/streenote-capture.py
+          sh -n contrib/hermes/hooks/operator-capture
+          python3 -m py_compile contrib/hermes/hooks/operator-capture.py
           inbox="$(mktemp -d)"
           printf '%s' '{"hook_event_name":"pre_llm_call","session_id":"ci-session","extra":{"turn_id":"ci-turn","user_message":"capture smoke test","conversation_history":[{"role":"system","content":"SYSTEM MUST NOT BE RECORDED"},{"role":"user","content":"earlier prompt"},{"role":"assistant","content":"earlier answer"},{"role":"tool","name":"terminal","content":"api_key=topsecret"}]}}' \
-            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+            | OPERATOR_HERMES_INBOX="$inbox" python3 contrib/hermes/hooks/operator-capture.py
           printf '%s' '{"hook_event_name":"post_llm_call","session_id":"ci-session","extra":{"turn_id":"ci-turn","assistant_response":"captured answer"}}' \
-            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+            | OPERATOR_HERMES_INBOX="$inbox" python3 contrib/hermes/hooks/operator-capture.py
           printf '%s' '{"hook_event_name":"on_stream_start","session_id":"ci-session","extra":{"turn_id":"ci-turn","iteration":0}}' \
-            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+            | OPERATOR_HERMES_INBOX="$inbox" python3 contrib/hermes/hooks/operator-capture.py
           printf '%s' '{"hook_event_name":"on_stream_delta","session_id":"ci-session","extra":{"turn_id":"ci-turn","iteration":0,"kind":"text","delta":" "}}' \
-            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+            | OPERATOR_HERMES_INBOX="$inbox" python3 contrib/hermes/hooks/operator-capture.py
           printf '%s' '{"hook_event_name":"on_stream_end","session_id":"ci-session","extra":{"turn_id":"ci-turn","iteration":0,"finished":true}}' \
-            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+            | OPERATOR_HERMES_INBOX="$inbox" python3 contrib/hermes/hooks/operator-capture.py
           printf '%s' '{"hook_event_name":"on_interim_message","session_id":"ci-session","extra":{"turn_id":"ci-turn","text":"Interim status update"}}' \
-            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+            | OPERATOR_HERMES_INBOX="$inbox" python3 contrib/hermes/hooks/operator-capture.py
           printf '%s' '{"hook_event_name":"on_session_start","session_id":"ci-session"}' \
-            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+            | OPERATOR_HERMES_INBOX="$inbox" python3 contrib/hermes/hooks/operator-capture.py
           printf '%s' '{"hook_event_name":"on_session_end","session_id":"ci-session","extra":{"completed":true,"interrupted":false,"turn_exit_reason":"completed"}}' \
-            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+            | OPERATOR_HERMES_INBOX="$inbox" python3 contrib/hermes/hooks/operator-capture.py
           printf '%s' '{"hook_event_name":"on_session_finalize","session_id":"ci-session","extra":{"reason":"normal_exit"}}' \
-            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+            | OPERATOR_HERMES_INBOX="$inbox" python3 contrib/hermes/hooks/operator-capture.py
           printf '%s' '{"hook_event_name":"on_session_reset","session_id":"ci-session","extra":{"reason":"new_conversation"}}' \
-            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+            | OPERATOR_HERMES_INBOX="$inbox" python3 contrib/hermes/hooks/operator-capture.py
           printf '%s' '{"hook_event_name":"post_compaction","session_id":"ci-session-v2","extra":{"old_session_id":"ci-session","kind":"summarize","reason":"manual","before_tokens":900,"after_tokens":300}}' \
-            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+            | OPERATOR_HERMES_INBOX="$inbox" python3 contrib/hermes/hooks/operator-capture.py
           printf '%s' '{"hook_event_name":"pre_llm_call","session_id":"ci-session","extra":{"turn_id":"ci-turn-2","user_message":"second turn","conversation_history":[{"role":"user","content":"earlier prompt"},{"role":"assistant","content":"earlier answer"},{"role":"user","content":"new message"}]}}' \
-            | STREENOTE_HERMES_INBOX="$inbox" python3 contrib/hermes/streenote-capture.py
+            | OPERATOR_HERMES_INBOX="$inbox" python3 contrib/hermes/hooks/operator-capture.py
           python3 - "$inbox" <<'PY'
           import json
           import pathlib

@@ -13,8 +13,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-SCRIPT = Path(__file__).with_name("streenote-capture.py")
-SPEC = importlib.util.spec_from_file_location("streenote_capture", SCRIPT)
+SCRIPT = Path(__file__).with_name("operator-capture.py")
+SPEC = importlib.util.spec_from_file_location("operator_capture", SCRIPT)
 CAPTURE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(CAPTURE)
@@ -55,7 +55,7 @@ class CapturePromptFanoutTests(unittest.TestCase):
     def _run_hook(self, payload, *, include_inbox_env=True):
         environment = {}
         if include_inbox_env:
-            environment["STREENOTE_HERMES_INBOX"] = str(self.inboxes["a1"])
+            environment["OPERATOR_HERMES_INBOX"] = str(self.inboxes["a1"])
 
         with patch.dict(CAPTURE.os.environ, environment, clear=True), patch.object(
             CAPTURE,
@@ -68,9 +68,9 @@ class CapturePromptFanoutTests(unittest.TestCase):
             previous_stdin = CAPTURE.sys.stdin
             CAPTURE.sys.stdin = io.StringIO(json.dumps(payload))
             try:
-                expected_inbox = environment.get("STREENOTE_HERMES_INBOX")
+                expected_inbox = environment.get("OPERATOR_HERMES_INBOX")
                 self.assertEqual(
-                    CAPTURE.os.environ.get("STREENOTE_HERMES_INBOX"),
+                    CAPTURE.os.environ.get("OPERATOR_HERMES_INBOX"),
                     expected_inbox,
                 )
                 self.assertEqual(CAPTURE.main(), 0)
@@ -84,9 +84,20 @@ class CapturePromptFanoutTests(unittest.TestCase):
             for path in sorted(ready.glob("*.json"))
         ]
 
+    def test_legacy_environment_alias_is_still_accepted(self):
+        with patch.dict(os.environ, {"STREENOTE_HERMES_INBOX": "/tmp/legacy-inbox"}, clear=True):
+            self.assertEqual(CAPTURE.env_value("OPERATOR_HERMES_INBOX"), "/tmp/legacy-inbox")
+
+    def test_new_environment_name_takes_precedence(self):
+        with patch.dict(os.environ, {
+            "STREENOTE_HERMES_INBOX": "/tmp/legacy-inbox",
+            "OPERATOR_HERMES_INBOX": "/tmp/operator-inbox",
+        }, clear=True):
+            self.assertEqual(CAPTURE.env_value("OPERATOR_HERMES_INBOX"), "/tmp/operator-inbox")
+
     def test_original_prompt_and_initial_history_reach_every_terminal(self):
         # Simulate a systemd gateway that did not inherit the
-        # STREENOTE_HERMES_REVIEW_SESSION_DIR from an SSH PTY.
+        # OPERATOR_HERMES_REVIEW_SESSION_DIR from an SSH PTY.
         self._run_hook({
             "hook_event_name": "pre_llm_call",
             "session_id": "shared-hermes-session",

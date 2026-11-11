@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture Hermes prompts, answers, tool calls, and tool results for STREENOTE.
+"""Capture Hermes prompts, answers, tool calls, and tool results for OPERATOR.
 
 The hook is a passive observer. It writes private, atomic inbox events and never
 emits a Hermes hook-protocol directive on stdout.
@@ -23,6 +23,21 @@ MAX_EVENT_BYTES = 8 * 1024 * 1024
 MAX_TOOL_DETAIL_BYTES = 48 * 1024
 MAX_HISTORY_BYTES = 1024 * 1024
 
+
+def env_value(name: str, default=None):
+    """Prefer OPERATOR settings while accepting pre-rename Hermes environments."""
+    value = os.environ.get(name)
+    if value is None and name.startswith("OPERATOR_"):
+        value = os.environ.get("STREENOTE_" + name[len("OPERATOR_"):])
+        if value is not None and name.endswith(("_DIR", "_SOCKET", "_LOG", "_INBOX")):
+            parts = list(Path(value).parts)
+            if "streenote" in parts:
+                parts[parts.index("streenote")] = "operator"
+                rewritten = Path(*parts)
+                if rewritten.exists() or rewritten.parent.exists():
+                    value = str(rewritten)
+    return default if value is None else value
+
 SENSITIVE_KEY = re.compile(
     r"(?i)(password|passwd|secret|token|api[_-]?key|authorization|credential|private[_-]?key)"
 )
@@ -41,7 +56,7 @@ def event_value(payload: dict, extra: dict, key: str):
 
 
 def _review_instance_is_active(registry: Path, instance_id: str) -> bool:
-    """Return True only when the named STREENOTE listener is still registered and live."""
+    """Return True only when the named OPERATOR listener is still registered and live."""
     if not isinstance(instance_id, str) or not re.fullmatch(r"[a-f0-9-]{1,64}", instance_id):
         return False
     manifest = registry / f"{instance_id}.json"
@@ -295,7 +310,7 @@ def _write_inbox_event_one(inbox: Path, event: dict) -> None:
     event_id = str(event["event_id"])
     final_path = ready / f"{time.time_ns():020d}-{event_id}.json"
     fd, temporary_name = tempfile.mkstemp(
-        prefix=".streenote-", suffix=".tmp", dir=ready
+        prefix=".operator-", suffix=".tmp", dir=ready
     )
     try:
         with os.fdopen(fd, "wb") as temporary:
@@ -325,7 +340,7 @@ def review_session_registry_candidates() -> list[Path]:
     """
     candidates = []
 
-    configured = os.environ.get("STREENOTE_HERMES_REVIEW_SESSION_DIR")
+    configured = env_value("OPERATOR_HERMES_REVIEW_SESSION_DIR")
     if configured:
         path = Path(configured).expanduser()
         if path.is_absolute():
@@ -336,11 +351,11 @@ def review_session_registry_candidates() -> list[Path]:
     try:
         runtime_stat = runtime_root.stat()
         if stat.S_ISDIR(runtime_stat.st_mode) and runtime_stat.st_uid == uid:
-            candidates.append(runtime_root / "streenote" / "review-sessions")
+            candidates.append(runtime_root / "operator" / "review-sessions")
     except OSError:
         pass
 
-    legacy_socket = os.environ.get("STREENOTE_HERMES_REVIEW_SOCKET")
+    legacy_socket = env_value("OPERATOR_HERMES_REVIEW_SOCKET")
     if legacy_socket:
         path = Path(legacy_socket).expanduser()
         if path.is_absolute():
@@ -348,9 +363,9 @@ def review_session_registry_candidates() -> list[Path]:
 
     data_home = os.environ.get("XDG_DATA_HOME")
     if data_home and Path(data_home).expanduser().is_absolute():
-        candidates.append(Path(data_home).expanduser() / "streenote" / "review-sessions")
+        candidates.append(Path(data_home).expanduser() / "operator" / "review-sessions")
 
-    candidates.append(Path.home() / ".local" / "share" / "streenote" / "review-sessions")
+    candidates.append(Path.home() / ".local" / "share" / "operator" / "review-sessions")
 
     unique = []
     seen = set()
@@ -363,7 +378,7 @@ def review_session_registry_candidates() -> list[Path]:
 
 
 def _connected_instance_inboxes(registry: Path) -> list[Path]:
-    """Find private per-terminal inboxes for every currently live STREENOTE listener."""
+    """Find private per-terminal inboxes for every currently live OPERATOR listener."""
     try:
         registry_stat = registry.lstat()
         if (
@@ -408,7 +423,7 @@ def _connected_instance_inboxes(registry: Path) -> list[Path]:
 
 
 def write_inbox_event(inbox: Path, event: dict) -> None:
-    """Fan each Hermes hook event out to every live STREENOTE terminal.
+    """Fan each Hermes hook event out to every live OPERATOR terminal.
 
     The hook may run in a detached systemd gateway with no PTY environment.
     Resolve the per-user registry using the same defaults as Rust, rather than
@@ -460,10 +475,10 @@ def write_inbox_event(inbox: Path, event: dict) -> None:
             + "; ".join(failures)
         )
 
-    if os.environ.get("STREENOTE_HERMES_CAPTURE_DEBUG") == "1":
+    if env_value("OPERATOR_HERMES_CAPTURE_DEBUG") == "1":
         route = ",".join(str(item) for item in registries) or "origin-inbox fallback"
         print(
-            f"STREENOTE Hermes capture: fanned event {event.get('event_id', 'unknown')} "
+            f"OPERATOR Hermes capture: fanned event {event.get('event_id', 'unknown')} "
             f"to {delivered}/{len(recipients)} terminal inbox(es) via {route}",
             file=sys.stderr,
         )
@@ -555,7 +570,7 @@ def session_event_text(event_name: str, payload: dict, extra: dict) -> str:
 
 
 def main() -> int:
-    inbox_value = os.environ.get("STREENOTE_HERMES_INBOX")
+    inbox_value = env_value("OPERATOR_HERMES_INBOX")
     if not inbox_value:
         # A detached gateway may invoke the Python hook directly, without the
         # per-PTY inbox variable. Select a live registered inbox as the history
@@ -653,7 +668,7 @@ def main() -> int:
         encoded_text = text.encode("utf-8")
         if len(encoded_text) > MAX_EVENT_BYTES:
             print(
-                f"STREENOTE Hermes capture: event exceeds {MAX_EVENT_BYTES} bytes; skipped",
+                f"OPERATOR Hermes capture: event exceeds {MAX_EVENT_BYTES} bytes; skipped",
                 file=sys.stderr,
             )
             return 0
@@ -685,7 +700,7 @@ def main() -> int:
                     # A history snapshot is supplementary. Do not lose the
                     # current prompt if snapshot storage is unavailable.
                     print(
-                        f"STREENOTE Hermes history snapshot failed: {exc}",
+                        f"OPERATOR Hermes history snapshot failed: {exc}",
                         file=sys.stderr,
                     )
         tool_call_id = event_value(payload, extra, "tool_call_id")
@@ -728,7 +743,7 @@ def main() -> int:
 
         return 0
     except Exception as exc:
-        print(f"STREENOTE Hermes capture failed: {exc}", file=sys.stderr)
+        print(f"OPERATOR Hermes capture failed: {exc}", file=sys.stderr)
         return 0
 
 

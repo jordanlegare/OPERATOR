@@ -1,6 +1,6 @@
-name: streenote-review
+name: operator-review
 version: "1.0"
-description: Hold final Hermes answers for STREENOTE operator review before delivery.
+description: Hold final Hermes answers for review in OPERATOR before delivery.
 provides_hooks:
   - pre_llm_call
   - pre_api_request

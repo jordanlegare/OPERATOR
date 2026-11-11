@@ -12,27 +12,27 @@ from unittest.mock import patch
 
 
 PLUGIN_PATH = Path(__file__).with_name("__init__.py")
-SPEC = importlib.util.spec_from_file_location("streenote_review_plugin", PLUGIN_PATH)
+SPEC = importlib.util.spec_from_file_location("operator_review_plugin", PLUGIN_PATH)
 PLUGIN = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PLUGIN)
 
-CAPTURE_PATH = PLUGIN_PATH.parent.parent / "streenote-capture.py"
-CAPTURE_SPEC = importlib.util.spec_from_file_location("streenote_capture_plugin", CAPTURE_PATH)
+CAPTURE_PATH = PLUGIN_PATH.parent.parent / "hooks" / "operator-capture.py"
+CAPTURE_SPEC = importlib.util.spec_from_file_location("operator_capture_plugin", CAPTURE_PATH)
 CAPTURE = importlib.util.module_from_spec(CAPTURE_SPEC)
 CAPTURE_SPEC.loader.exec_module(CAPTURE)
 
 
 class HermesReviewPluginTests(unittest.TestCase):
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory(prefix="streenote-review-plugin-")
+        self.temp_dir = tempfile.TemporaryDirectory(prefix="operator-review-plugin-")
         self.socket_path = Path(self.temp_dir.name) / "review.sock"
         self.diagnostic_path = Path(self.temp_dir.name) / "hermes-review.log"
         self.env = patch.dict(
             os.environ,
             {
-                "STREENOTE_HERMES_REVIEW_SOCKET": str(self.socket_path),
-                "STREENOTE_HERMES_REVIEW_SESSION_DIR": str(Path(self.temp_dir.name) / "sessions"),
-                "STREENOTE_HERMES_REVIEW_LOG": str(self.diagnostic_path),
+                "OPERATOR_HERMES_REVIEW_SOCKET": str(self.socket_path),
+                "OPERATOR_HERMES_REVIEW_SESSION_DIR": str(Path(self.temp_dir.name) / "sessions"),
+                "OPERATOR_HERMES_REVIEW_LOG": str(self.diagnostic_path),
             },
             clear=False,
         )
@@ -41,6 +41,17 @@ class HermesReviewPluginTests(unittest.TestCase):
     def tearDown(self):
         self.env.stop()
         self.temp_dir.cleanup()
+
+    def test_legacy_environment_alias_remains_supported(self):
+        with patch.dict(os.environ, {"STREENOTE_HERMES_REVIEW_REQUIRED": "1"}, clear=True):
+            self.assertEqual(PLUGIN.env_value("OPERATOR_HERMES_REVIEW_REQUIRED"), "1")
+
+    def test_operator_environment_name_takes_precedence(self):
+        with patch.dict(os.environ, {
+            "STREENOTE_HERMES_REVIEW_REQUIRED": "0",
+            "OPERATOR_HERMES_REVIEW_REQUIRED": "1",
+        }, clear=True):
+            self.assertEqual(PLUGIN.env_value("OPERATOR_HERMES_REVIEW_REQUIRED"), "1")
 
     def _serve(self, reply, socket_path=None, accept_count=1):
         errors = []
@@ -119,7 +130,7 @@ class HermesReviewPluginTests(unittest.TestCase):
         self.assertEqual(records[-1]["event"], "PLUGIN_REGISTERED")
 
     def test_response_is_dispatched_only_to_enabled_reviewer_terminals(self):
-        registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
+        registry = Path(os.environ["OPERATOR_HERMES_REVIEW_SESSION_DIR"])
         registry.mkdir(mode=0o700, parents=True)
         instance_ids = ("a1", "b2", "c3")
         workers = []
@@ -174,7 +185,7 @@ class HermesReviewPluginTests(unittest.TestCase):
         self.assertNotIn("c3", delivered)
 
     def test_edited_final_answer_is_returned_only_by_the_selected_reviewer(self):
-        registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
+        registry = Path(os.environ["OPERATOR_HERMES_REVIEW_SESSION_DIR"])
         registry.mkdir(mode=0o700, parents=True)
         requests_by_instance = {}
         workers = []
@@ -219,7 +230,7 @@ class HermesReviewPluginTests(unittest.TestCase):
         self.assertEqual(requests_by_instance["b2"], [])
 
     def test_all_reviewers_opted_out_bypass_without_contact_even_when_review_required(self):
-        registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
+        registry = Path(os.environ["OPERATOR_HERMES_REVIEW_SESSION_DIR"])
         registry.mkdir(mode=0o700, parents=True)
         socket_path = registry / "a1.sock"
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -236,14 +247,14 @@ class HermesReviewPluginTests(unittest.TestCase):
         }))
         os.chmod(manifest, 0o600)
 
-        with patch.dict(os.environ, {"STREENOTE_HERMES_REVIEW_REQUIRED": "1"}):
+        with patch.dict(os.environ, {"OPERATOR_HERMES_REVIEW_REQUIRED": "1"}):
             self.assertIsNone(self._call())
         with self.assertRaises(socket.timeout):
             listener.accept()
         listener.close()
 
     def test_scheduler_adds_rejoined_operator_while_another_reviewer_is_busy(self):
-        registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
+        registry = Path(os.environ["OPERATOR_HERMES_REVIEW_SESSION_DIR"])
         registry.mkdir(mode=0o700, parents=True)
         sockets = {}
         manifests = {}
@@ -303,7 +314,7 @@ class HermesReviewPluginTests(unittest.TestCase):
                 listener.close()
 
     def test_scheduler_refreshes_live_registration_when_operator_opts_out_while_queued(self):
-        registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
+        registry = Path(os.environ["OPERATOR_HERMES_REVIEW_SESSION_DIR"])
         registry.mkdir(mode=0o700, parents=True)
         socket_path = registry / "a1.sock"
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -352,7 +363,7 @@ class HermesReviewPluginTests(unittest.TestCase):
             listener.close()
 
     def test_review_pool_round_robins_and_skips_a_terminal_with_an_active_lease(self):
-        registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
+        registry = Path(os.environ["OPERATOR_HERMES_REVIEW_SESSION_DIR"])
         registry.mkdir(mode=0o700, parents=True)
         routes = [
             {"instance_id": name, "review_enabled": True}
@@ -382,7 +393,7 @@ class HermesReviewPluginTests(unittest.TestCase):
 
 
     def test_pre_llm_plugin_hook_fans_first_prompt_to_every_live_terminal_inbox(self):
-        registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
+        registry = Path(os.environ["OPERATOR_HERMES_REVIEW_SESSION_DIR"])
         registry.mkdir(mode=0o700, parents=True)
         listeners = []
         instance_ids = ("a1", "b2", "c3")
@@ -435,7 +446,7 @@ class HermesReviewPluginTests(unittest.TestCase):
 
 
     def test_prompt_capture_falls_back_to_last_user_message_in_conversation_history(self):
-        registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
+        registry = Path(os.environ["OPERATOR_HERMES_REVIEW_SESSION_DIR"])
         registry.mkdir(mode=0o700, parents=True)
         listeners = []
         for instance_id in ("a1", "b2"):
@@ -486,7 +497,7 @@ class HermesReviewPluginTests(unittest.TestCase):
             listener.close()
 
     def test_capture_fans_each_hook_event_out_to_each_live_terminal_inbox(self):
-        registry = Path(os.environ["STREENOTE_HERMES_REVIEW_SESSION_DIR"])
+        registry = Path(os.environ["OPERATOR_HERMES_REVIEW_SESSION_DIR"])
         registry.mkdir(mode=0o700, parents=True)
         listeners = []
         instance_ids = ("a1", "b2", "c3")
@@ -526,27 +537,27 @@ class HermesReviewPluginTests(unittest.TestCase):
             listener.close()
 
     def test_runtime_socket_path_is_shared_by_processes_with_different_home_values(self):
-        with tempfile.TemporaryDirectory(prefix="streenote-runtime-") as runtime:
+        with tempfile.TemporaryDirectory(prefix="operator-runtime-") as runtime:
             runtime_root = Path(runtime)
             runtime_dir = runtime_root / str(os.getuid())
             runtime_dir.mkdir()
             resolved = PLUGIN.runtime_review_socket_path(
                 uid=os.getuid(), runtime_root=runtime_root
             )
-            self.assertEqual(resolved, runtime_dir / "streenote" / "review.sock")
+            self.assertEqual(resolved, runtime_dir / "operator" / "review.sock")
 
     def test_no_active_socket_leaves_ordinary_hermes_sessions_unchanged(self):
         self.assertFalse(self.socket_path.exists())
         self.assertIsNone(self._call())
 
     def test_required_review_fails_closed_when_socket_is_missing(self):
-        with patch.dict(os.environ, {"STREENOTE_HERMES_REVIEW_REQUIRED": "1"}):
+        with patch.dict(os.environ, {"OPERATOR_HERMES_REVIEW_REQUIRED": "1"}):
             with self.assertRaisesRegex(RuntimeError, "no active review socket.*withheld"):
                 self._call()
 
     def test_required_review_allows_explicit_listener_bypass_when_review_is_off(self):
         worker, _, errors = self._serve({"version": 1, "decision": "bypass"})
-        with patch.dict(os.environ, {"STREENOTE_HERMES_REVIEW_REQUIRED": "true"}):
+        with patch.dict(os.environ, {"OPERATOR_HERMES_REVIEW_REQUIRED": "true"}):
             self.assertIsNone(self._call())
         worker.join(timeout=2)
         self.assertFalse(worker.is_alive())
@@ -558,7 +569,7 @@ class HermesReviewPluginTests(unittest.TestCase):
 
     def test_callback_and_socket_decisions_are_logged_without_answer_content(self):
         log_path = Path(self.temp_dir.name) / "diagnostics.jsonl"
-        with patch.dict(os.environ, {"STREENOTE_HERMES_REVIEW_LOG": str(log_path)}):
+        with patch.dict(os.environ, {"OPERATOR_HERMES_REVIEW_LOG": str(log_path)}):
             worker, _, errors = self._serve({"version": 1, "decision": "approve"})
             self.assertEqual(self._call(), "The unreviewed draft.")
             worker.join(timeout=2)

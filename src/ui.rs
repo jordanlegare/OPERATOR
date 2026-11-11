@@ -544,23 +544,23 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
 fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
     let art = vec![
         Line::from(Span::styled(
-            "  ____  _____ ____  _____  _____ _   _  ___ _____ _____ ",
+            "### ##  ### ##   #  ### ### ## ",
             Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            " / ___|| |_ _|  _ \\| ____|| ____| \\ | |/ _ \\_   _| ____|",
+            "# # # # #   # # # #  #  # # # #",
             Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            " \\___ \\  | | | |_) |  _|  |  _| |  \\| | | | || | |  _|",
+            "# # ##  ##  ##  ###  #  # # ## ",
             Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            "  ___) | | | |  _ <| |___ | |___| |\\  | |_| || | | |___",
+            "# # #   #   # # # #  #  # # # #",
             Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            " |____/  |_| |_| \\_\\_____||_____|_| \\_|\\___/ |_| |_____|  // SHELL · NOTES · JOURNAL",
+            "### #   ### # # # #  #  ### # #  // SHELL · NOTES · JOURNAL",
             Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
         )),
     ];
@@ -1033,7 +1033,7 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
     frame.render_widget(Clear, popup);
     let text = vec![
         Line::from(Span::styled(
-            "STREAMNOTE · DEBIAN SHELL + NOTE JOURNAL",
+            "OPERATOR · DEBIAN SHELL + NOTE JOURNAL",
             Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),

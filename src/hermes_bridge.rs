@@ -1,6 +1,6 @@
 //! Import bridge for Hermes CLI shell-hook events.
 //!
-//! Hermes hooks write one atomically-renamed JSON file per event. STREENOTE
+//! Hermes hooks write one atomically-renamed JSON file per event. OPERATOR
 //! imports those files through Journal::append so the normal in-memory view,
 //! append-only JSONL file, and retry queue remain authoritative.
 
@@ -13,7 +13,10 @@ use std::{
 use chrono::{DateTime, Local, SecondsFormat};
 use serde::Deserialize;
 
-use crate::storage::{Entry, EntryKind, Journal};
+use crate::{
+    paths::{env_var, migrate_legacy_dir},
+    storage::{Entry, EntryKind, Journal},
+};
 
 const MAX_EVENT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_EVENTS_PER_POLL: usize = 64;
@@ -149,20 +152,20 @@ impl HermesBridge {
     }
 }
 
-/// Environment variable shared by STREENOTE-managed PTYs and Hermes hook adapters.
+/// Environment variable shared by OPERATOR-managed PTYs and Hermes hook adapters.
 ///
-/// STREENOTE injects this variable into every shell PTY it creates. Processes
+/// OPERATOR injects this variable into every shell PTY it creates. Processes
 /// launched from those shells inherit the same inbox location automatically.
-pub const HERMES_INBOX_ENV: &str = "STREENOTE_HERMES_INBOX";
+pub const HERMES_INBOX_ENV: &str = "OPERATOR_HERMES_INBOX";
 
 /// Resolve the inbox path used by both the journal importer and child PTYs.
 ///
-/// An explicit absolute STREENOTE_HERMES_INBOX takes precedence, followed by
+/// An explicit absolute OPERATOR_HERMES_INBOX takes precedence, followed by
 /// XDG_DATA_HOME and then HOME. The resolved path is always absolute so child
 /// processes do not depend on their current working directory.
 pub fn default_inbox_path() -> PathBuf {
     resolve_inbox_path(
-        std::env::var_os(HERMES_INBOX_ENV).map(PathBuf::from),
+        env_var(HERMES_INBOX_ENV).map(PathBuf::from),
         std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
         std::env::var_os("HOME").map(PathBuf::from),
     )
@@ -189,7 +192,7 @@ fn resolve_inbox_path(
                 .join(".local/share")
         });
 
-    data_root.join("streenote").join("hermes-inbox")
+    migrate_legacy_dir(data_root.join("operator")).join("hermes-inbox")
 }
 
 fn create_private_dir(path: &Path) -> io::Result<()> {
@@ -224,7 +227,7 @@ mod tests {
     fn test_root() -> PathBuf {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         env::temp_dir().join(format!(
-            "streenote-hermes-bridge-{}-{id}",
+            "operator-hermes-bridge-{}-{id}",
             std::process::id()
         ))
     }
@@ -247,11 +250,11 @@ mod tests {
     #[test]
     fn explicit_absolute_inbox_override_takes_precedence() {
         let resolved = super::resolve_inbox_path(
-            Some(PathBuf::from("/srv/streenote/custom-inbox")),
+            Some(PathBuf::from("/srv/operator/custom-inbox")),
             Some(PathBuf::from("/xdg/data")),
             Some(PathBuf::from("/home/test")),
         );
-        assert_eq!(resolved, PathBuf::from("/srv/streenote/custom-inbox"));
+        assert_eq!(resolved, PathBuf::from("/srv/operator/custom-inbox"));
     }
 
     #[test]
@@ -261,7 +264,7 @@ mod tests {
             Some(PathBuf::from("/xdg/data")),
             Some(PathBuf::from("/home/test")),
         );
-        assert_eq!(resolved, PathBuf::from("/xdg/data/streenote/hermes-inbox"));
+        assert_eq!(resolved, PathBuf::from("/xdg/data/operator/hermes-inbox"));
     }
 
     #[test]
@@ -273,7 +276,7 @@ mod tests {
         );
         assert_eq!(
             resolved,
-            PathBuf::from("/home/test/.local/share/streenote/hermes-inbox")
+            PathBuf::from("/home/test/.local/share/operator/hermes-inbox")
         );
     }
 
@@ -400,7 +403,7 @@ mod tool_event_tests {
     fn imports_tool_call_and_tool_result_events() {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let root = env::temp_dir().join(format!(
-            "streenote-hermes-tools-{}-{id}",
+            "operator-hermes-tools-{}-{id}",
             std::process::id()
         ));
         let ready = root.join("ready");
@@ -438,7 +441,7 @@ mod tool_event_tests {
     fn imports_conversation_turn_tool_and_iteration_metadata() {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let root = env::temp_dir().join(format!(
-            "streenote-hermes-metadata-{}-{id}",
+            "operator-hermes-metadata-{}-{id}",
             std::process::id()
         ));
         let ready = root.join("ready");
