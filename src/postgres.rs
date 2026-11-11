@@ -53,6 +53,7 @@ pub struct SearchResult {
 pub enum Update {
     ExternalEntries(Vec<Entry>),
     SearchResult(SearchResult),
+    ArchiveRecord { request_id: u64, result: Result<Entry, String> },
     Error(String),
 }
 
@@ -60,6 +61,7 @@ enum Command {
     Append(Entry),
     AppendBatch(Vec<Entry>),
     Search { request_id: u64, query: String },
+    FetchRecord { request_id: u64, record_id: String },
     Flush(Sender<Result<(), String>>),
     ExportJsonl { path: PathBuf, reply: Sender<Result<(), String>> },
     Shutdown,
@@ -226,6 +228,17 @@ impl PostgresJournal {
         self.next_search_id = self.next_search_id.wrapping_add(1).max(1);
         self.commands
             .send(Command::Search { request_id, query })
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "PostgreSQL worker is not available"))?;
+        Ok(request_id)
+    }
+
+    /// Fetch one complete historical entry on demand; only the selected
+    /// payload is materialized, never the complete archive.
+    pub fn fetch_record(&mut self, record_id: String) -> io::Result<u64> {
+        let request_id = self.next_search_id;
+        self.next_search_id = self.next_search_id.wrapping_add(1).max(1);
+        self.commands
+            .send(Command::FetchRecord { request_id, record_id })
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "PostgreSQL worker is not available"))?;
         Ok(request_id)
     }
@@ -1058,6 +1071,23 @@ async fn run_worker(
                         }
                         let result = search_records(&pool, &query, request_id).await;
                         let _ = updates.send(Update::SearchResult(result));
+                    }
+                    Some(Command::FetchRecord { request_id, record_id }) => {
+                        let result = async {
+                            let payload: Option<String> = sqlx::query_scalar(
+                                "SELECT payload::text FROM operator_journal_entries WHERE record_id = $1"
+                            )
+                            .bind(&record_id)
+                            .fetch_optional(&pool)
+                            .await
+                            .map_err(|error| format!("fetch historical PostgreSQL record: {error}"))?;
+                            let payload = payload.ok_or_else(|| {
+                                format!("archive record {record_id} no longer exists")
+                            })?;
+                            serde_json::from_str::<Entry>(&payload)
+                                .map_err(|error| format!("decode historical PostgreSQL record: {error}"))
+                        }.await;
+                        let _ = updates.send(Update::ArchiveRecord { request_id, result });
                     }
                     Some(Command::Flush(reply)) => {
                         let result = retry_pending(&pool, &mut pending, last_seen_id, &pending_count, &updates).await;
