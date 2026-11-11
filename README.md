@@ -108,7 +108,7 @@ cat > ~/.hermes/hooks/operator-capture <<'SH'
 : "${XDG_DATA_HOME:=$HOME/.local/share}"
 export OPERATOR_HERMES_INBOX="${OPERATOR_HERMES_INBOX:-$XDG_DATA_HOME/operator/hermes-inbox}"
 export OPERATOR_HERMES_REVIEW_SESSION_DIR="${OPERATOR_HERMES_REVIEW_SESSION_DIR:-/run/user/$(id -u)/operator/review-sessions}"
-exec "$HOME/.hermes/agent-hooks/operator-capture.py"
+exec "$HOME/.hermes/hooks/operator-capture.py"
 SH
 chmod 700 ~/.hermes/hooks/operator-capture
 ```
