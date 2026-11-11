@@ -434,8 +434,14 @@ impl Journal {
             // needed when old rows cross the 30-day boundary.
             self.hot_event_timestamps.retain(|_, timestamp| timestamp >= &cutoff);
             self.hot_record_timestamps.retain(|_, timestamp| timestamp >= &cutoff);
-            self.persisted_event_ids = self.hot_event_timestamps.keys().cloned().collect();
-            self.persisted_record_ids = self.hot_record_timestamps.keys().cloned().collect();
+            self.persisted_event_ids = self.hot_event_timestamps.keys()
+                .filter(|id| !self.pending_event_ids.contains(*id))
+                .cloned()
+                .collect();
+            self.persisted_record_ids = self.hot_record_timestamps.keys()
+                .filter(|id| !self.pending_record_ids.contains(*id))
+                .cloned()
+                .collect();
             self.cached_event_ids = self.persisted_event_ids.clone();
             self.cached_record_ids = self.persisted_record_ids.clone();
             self.cached_event_ids.extend(self.pending_event_ids.iter().cloned());
@@ -543,6 +549,11 @@ impl Journal {
         }
 
         if let Some(record_id) = record_id.as_ref() {
+            if !self.persisted_record_ids.contains(record_id)
+                && archive_contains_record_id(&self.path, record_id)?
+            {
+                return Ok(());
+            }
             if self.persisted_record_ids.contains(record_id) {
                 if self.cached_record_ids.insert(record_id.clone()) {
                     self.push_entry_to_memory(entry);
@@ -596,6 +607,7 @@ impl Journal {
                     if let Some(record_id) = record_id.as_ref() {
                         self.pending_record_ids.insert(record_id.clone());
                     }
+                    self.remember_hot_identity(&entry);
                 }
                 self.pending.push(entry);
                 Err(error)
@@ -918,6 +930,9 @@ impl Journal {
         // damaged fragment before retrying. Blank lines are ignored by the loader.
         file.write_all(b"\n")?;
         let pending = std::mem::take(&mut self.pending);
+        for entry in &pending {
+            self.remember_hot_identity(entry);
+        }
         for (index, entry) in pending.iter().enumerate() {
             let mut bytes = match serde_json::to_vec(entry) {
                 Ok(bytes) => bytes,
@@ -1187,6 +1202,23 @@ fn archive_contains_event_id(path: &Path, event_id: &str) -> io::Result<bool> {
             {
                 return Ok(true);
             }
+        }
+    }
+    Ok(false)
+}
+
+fn archive_contains_record_id(path: &Path, record_id: &str) -> io::Result<bool> {
+    let encoded = serde_json::to_string(record_id).map_err(io::Error::other)?;
+    let file = File::open(path)?;
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        if line.contains(&encoded)
+            && serde_json::from_str::<Entry>(&line)
+                .ok()
+                .and_then(|entry| entry.record_id)
+                .as_deref() == Some(record_id)
+        {
+            return Ok(true);
         }
     }
     Ok(false)
