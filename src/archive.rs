@@ -122,10 +122,22 @@ impl ArchiveSearcher {
             }
         }
 
-        combined.ok_or_else(|| io::Error::new(
+        let entry = combined.ok_or_else(|| io::Error::new(
             io::ErrorKind::InvalidData,
             "could not decode the selected archive record",
-        ))
+        ))?;
+        // The JSONL file is append-only by contract, but it can still be
+        // replaced or truncated by an external process. Never show an
+        // unrelated row when an old byte range no longer identifies its hit.
+        if !hit.record_id.starts_with("archive-line-")
+            && entry.record_id.as_deref() != Some(hit.record_id.as_str())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "archive changed after search; run the search again",
+            ));
+        }
+        Ok(entry)
     }
 }
 
