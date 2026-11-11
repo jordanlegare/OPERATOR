@@ -552,8 +552,6 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
         r" \____/|_|   |_____|_| \_/_/   \_\_| \___/|_| \_\",
     ];
 
-    // The supplied poppy is kept as text (rather than an image) so it stays
-    // crisp in terminal fonts. It is fitted to the available bottom-left area.
     const POPPY: [&str; 33] = [
         r"⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⡠⠖⠛⠢⠤⠤⢤⣀⡀⢀⣠⣶⣲⠀⠈⠉⠉⠑⠒⣦⠤⢄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
         r"⠀⠀⠀⠀⠀⣀⣤⠔⠚⠻⠤⠤⣀⡀⠀⠀⠀⠀⢫⢿⠿⣌⡇⠀⠀⠀⠀⠀⠀⡏⠀⠀⠉⠢⣄⠀⠀⢀⣀⣀⣀⣀⡀⠀⠀⠀⠀⠀⠀⠀",
@@ -569,7 +567,7 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
         r"⠹⣄⠀⠀⢠⠀⢉⡳⢆⣨⠽⠖⣦⣤⣬⣭⣭⣿⣿⣿⣿⣟⣛⣿⣿⣿⣿⣿⣿⣿⣤⣤⣿⣿⣿⡿⠗⠀⢸⠀⠀⢀⡔⠁⠀⠀⠀⠀⠀⠀",
         r"⠀⠈⠓⠦⣼⣄⠀⠀⠀⠀⠉⠻⠥⠤⣴⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣽⣿⣿⣟⣿⣿⣿⡿⠟⠉⠀⠀⣼⠁⠀⣠⠊⠀⠀⠀⠀⠀⠀⠀⠀",
         r"⠀⠀⠀⠀⣶⣾⡷⣄⠀⠀⠀⠀⠀⠀⠀⠀⠘⢛⣿⣿⣟⣿⣿⣿⣿⡏⠙⡟⣿⢿⣿⠏⠀⠀⠀⠀⣶⠏⢀⠔⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀",
-        r"⠀⠀⠀⠀⠙⠷⣤⣽⢶⣄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠰⠟⢻⡿⠋⡟⠃⣀⡧⠽⠿⠧⠖⢊⣵⣶⡶⠿⠖⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        r"⠀⠀⠀⠀⠙⢷⣤⣽⢶⣄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠰⠟⢻⡿⠋⡟⠃⣀⡧⠽⠿⠧⠖⢊⣵⣶⡶⠿⠖⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
         r"⠀⠀⠀⠀⠀⠀⠀⠈⠉⠛⠛⠓⠲⠶⣶⣦⢦⡤⣀⡠⠤⠯⠤⠤⠛⠉⠀⠀⠀⣠⣶⢞⠿⠃⣲⣤⢤⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
         r"⠀⠀⠀⠀⠀⣀⡴⠒⠲⣶⠾⡏⡟⠙⣦⠈⠿⡛⢾⢷⣄⣠⣴⣦⣀⣠⣶⠶⠛⡽⢳⠏⣴⣟⡵⠷⢶⡾⠂⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
         r"⠀⠀⠀⠀⠾⣢⡝⢁⣴⣷⠞⣧⣠⢤⡇⠓⠤⠼⣆⠃⠰⡄⠉⠉⢹⣯⣿⣠⠘⢠⢯⢞⣛⡶⢾⣗⣮⣿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
@@ -594,11 +592,9 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    // Advance the hue field quickly while keeping every element at a fixed
-    // coordinate. Since each line's hue increases from left to right, advancing
-    // phase moves the spectrum right-to-left; the 360-degree wrap brings the
-    // departing colours back in at the far right for a seamless rolling loop.
-    // One full cycle takes 6.48 seconds (18 ms per degree).
+    // Colour travels from right to left across every character; after crossing
+    // the left boundary the spectrum wraps and re-enters from the far right.
+    // Position never changes, so the motion is entirely chromatic.
     let phase = (now_ms % 6_480) as f32 / 18.0;
     let popup = centered_rect(96, 96, area);
     frame.render_widget(Clear, popup);
@@ -634,11 +630,15 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
     } else {
         2usize
     };
+
+    // Reserve enough vertical space for the complete poem before assigning
+    // remaining rows to the poppy. On compact terminals the artwork contracts,
+    // never the poem or its line breaks.
+    const POEM_HEIGHT: usize = 17;
     let total_height = inner.height as usize;
     let art_height = (total_height / 3)
-        .max(4)
-        .min(POPPY.len())
-        .min(total_height.saturating_sub(footer_height + 4));
+        .min(total_height.saturating_sub(footer_height + POEM_HEIGHT))
+        .min(POPPY.len());
     let main_height = total_height.saturating_sub(art_height + footer_height);
 
     let main_area = Rect {
@@ -660,26 +660,33 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
         height: footer_height as u16,
     };
 
-    // A compact, stationary field guide keeps the splash legible on ordinary
-    // terminal heights. The full, unabridged guide remains available through /help.
+    // The left column keeps the identity and command guide; the right column
+    // is reserved for the poem. A fixed split avoids collisions as colours roll.
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(61), Constraint::Percentage(39)])
+        .split(main_area);
+    let left_area = columns[0];
+    let right_area = columns[1];
+
     const GUIDE: [&str; 13] = [
-        "PTY SHELL    Interactive shell; submitted commands and captured output enter the journal.",
-        "NOTES        Ctrl+T switches Terminal / Notes; /note TEXT stores a note.",
-        "SEARCH       /search WORDS scans terminal records and Hermes conversation bodies.",
-        "HERMES       Captured prompts, streams, tool activity, threads, and final-response review.",
-        "THREADS      /threads opens the conversation browser; Enter expands a thread.",
-        "REVIEW       /review on|off|status holds final answers for operator approval.",
+        "PTY SHELL    Interactive shell; commands and output enter the journal.",
+        "NOTES        Ctrl+T switches Terminal / Notes; /note TEXT saves a note.",
+        "SEARCH       /search WORDS scans records and Hermes conversations.",
+        "HERMES       Prompts, streams, tools, threads, and response review.",
+        "THREADS      /threads browses conversations; Enter expands a thread.",
+        "REVIEW       /review on|off|status controls answer release.",
         "COMMANDS     /view · /save · /export · /stats · /path · /scp · /canada",
         "CONTROL      Tab completion · Ctrl+P/N history · Ctrl+W wrap · Ctrl+S save.",
-        "THEMES       F2–F10 switches palettes; F12 hides or restores this splash.",
+        "THEMES       F2–F10 changes palettes; F12 hides or restores this splash.",
         "HELP         /help opens the complete command and keyboard reference.",
-        "SSH          F1 opens the terminal workspace; SCP/SFTP passthrough is configurable.",
-        "JOURNAL      Persistent, searchable JSONL event stream for shell and Hermes activity.",
+        "SSH          F1 opens the terminal workspace; SCP/SFTP is configurable.",
+        "JOURNAL      Searchable JSONL record of shell and Hermes activity.",
         "FIELD NOTE   The work continues. The record remains. Never again.",
     ];
 
     let mut content = Vec::new();
-    if main_area.height >= 7 && main_area.width >= 56 {
+    if left_area.width >= 56 && main_area.height >= 7 {
         for (row, line) in LOGO.iter().enumerate() {
             content.push(psychedelic_line(line, phase, row, true));
         }
@@ -690,12 +697,7 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
             true,
         ));
     } else {
-        content.push(psychedelic_line(
-            "✦ O P E R A T O R ✦",
-            phase + 80.0,
-            0,
-            true,
-        ));
+        content.push(psychedelic_line("✦ O P E R A T O R ✦", phase + 80.0, 0, true));
         content.push(psychedelic_line(
             "SHELL  ·  NOTES  ·  JOURNAL  ·  HERMES",
             phase + 110.0,
@@ -704,24 +706,17 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
         ));
     }
     content.push(Line::from(""));
-    let guide_slots = (main_area.height as usize).saturating_sub(content.len());
+    let guide_slots = (left_area.height as usize).saturating_sub(content.len());
     for (row, line) in GUIDE.iter().take(guide_slots).enumerate() {
-        content.push(psychedelic_line(
-            line,
-            phase + 145.0,
-            row + 8,
-            row == 0,
-        ));
+        content.push(psychedelic_line(line, phase + 145.0, row + 8, row == 0));
     }
 
-    // Keep the block vertically centred and left aligned; there is no timed
-    // scroll offset, marquee, or position animation.
-    let content_height = content.len().min(main_area.height as usize);
-    let top_padding = (main_area.height as usize).saturating_sub(content_height) / 2;
+    let content_height = content.len().min(left_area.height as usize);
+    let top_padding = (left_area.height as usize).saturating_sub(content_height) / 2;
     let content_area = Rect {
-        x: main_area.x,
-        y: main_area.y.saturating_add(top_padding as u16),
-        width: main_area.width,
+        x: left_area.x,
+        y: left_area.y.saturating_add(top_padding as u16),
+        width: left_area.width,
         height: content_height as u16,
     };
     frame.render_widget(
@@ -731,11 +726,97 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
         content_area,
     );
 
-    // Sample the supplied illustration evenly when the terminal is too short
-    // for all 33 source rows, then fit each row horizontally without wrapping.
+    // The poem is vertically centred in its own quiet column. Its italic
+    // lines and spectral edge make it read like a second, slower voice.
+    let poem_block = Block::default()
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(spectrum_color(phase + 270.0)))
+        .style(Style::default().bg(theme.panel));
+    let poem_inner = poem_block.inner(right_area);
+    frame.render_widget(poem_block, right_area);
+
+    let poem_source: [Option<&str>; POEM_HEIGHT] = [
+        Some("-=- Snowflakes and Ashes -=-"),
+        None,
+        Some("All that's left are minerals"),
+        Some("the frost succession"),
+        None,
+        Some("All that's left are the funerals"),
+        Some("the body processions"),
+        None,
+        Some("One by one they fall"),
+        Some("as white and grey they were"),
+        None,
+        Some("One by one they crawl"),
+        Some("as white and grey matter"),
+        None,
+        Some("For winter has brought a dream"),
+        Some("many awake, few sleeping"),
+        None,
+    ];
+    // The remaining stanzas continue below in the same panel, after the
+    // first three stanzas, so compact layouts can still render them faithfully.
+    let mut poem_source = poem_source.to_vec();
+    poem_source.extend([
+        Some("For their dreams turned to ashes"),
+        Some("a restless, relentless; struggling"),
+        None,
+        Some("I closed my eyes to a headache"),
+        Some("blinded by the light, Awake"),
+        None,
+        Some("They carry out burden and ache"),
+        Some("blinded by the snowflake, awake"),
+        None,
+        Some("I release you in heaven"),
+        Some("White, grey a raven"),
+        Some("on a windy day"),
+        Some("I got carried away."),
+    ]);
+
+    let mut poem_lines = Vec::with_capacity(poem_source.len());
+    for (row, stanza_line) in poem_source.iter().enumerate() {
+        match stanza_line {
+            Some(text) if row == 0 => {
+                poem_lines.push(psychedelic_line(text, phase + 230.0, row, true));
+            }
+            Some(text) => {
+                let mut line = psychedelic_line(text, phase + 210.0, row, false);
+                for span in &mut line.spans {
+                    span.style = span.style.add_modifier(Modifier::ITALIC);
+                }
+                poem_lines.push(line);
+            }
+            None => poem_lines.push(Line::from("")),
+        }
+    }
+
+    let poem_height = poem_lines.len().min(poem_inner.height as usize);
+    let poem_top = (poem_inner.height as usize).saturating_sub(poem_height) / 2;
+    let poem_area = Rect {
+        x: poem_inner.x,
+        y: poem_inner.y.saturating_add(poem_top as u16),
+        width: poem_inner.width,
+        height: poem_height as u16,
+    };
+    frame.render_widget(
+        Paragraph::new(poem_lines)
+            .alignment(Alignment::Left)
+            .style(Style::default().fg(theme.text).bg(theme.panel))
+            .wrap(Wrap { trim: false }),
+        poem_area,
+    );
+
+    // Keep the poppy at bottom-left, separate from the right-hand poem.
+    let poppy_width = columns[0].width;
+    let art_area = Rect {
+        x: inner.x,
+        y: art_area.y,
+        width: poppy_width,
+        height: art_area.height,
+    };
     let mut poppy = Vec::with_capacity(art_height);
     for row in 0..art_height {
-        let source_row = if art_height == 1 {
+        let source_row = if art_height <= 1 {
             0
         } else {
             row.saturating_mul(POPPY.len() - 1) / (art_height - 1)
