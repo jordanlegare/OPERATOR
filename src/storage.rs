@@ -1417,6 +1417,33 @@ mod hot_window_tests {
         assert_eq!(fs::read_to_string(&path).expect("read original archive").lines().count(), 2);
         let _ = fs::remove_file(path);
     }
+    #[test]
+    fn pruning_expired_rows_keeps_durable_archive_and_expires_ids_without_disk_rescan() {
+        let path = test_path();
+        let mut entry = Entry::with_kind(EntryKind::Note, "expiring hot record".to_string());
+        entry.timestamp = (Utc::now() - Duration::hours(1)).to_rfc3339();
+        let record_id = entry.record_id.clone().expect("entry record ID");
+        let mut journal = Journal::open(path.clone()).expect("open test journal");
+        journal.append(entry.clone()).expect("append record");
+        assert_eq!(journal.entries.len(), 1);
+        assert!(journal.hot_record_timestamps.contains_key(&record_id));
+
+        let expired = Utc::now() - Duration::days(HOT_WINDOW_DAYS + 1);
+        journal.entries[0].timestamp = expired.to_rfc3339();
+        journal.hot_record_timestamps.insert(record_id.clone(), expired);
+        let removed = journal.prune_hot_cache();
+
+        assert_eq!(removed, 1);
+        assert!(journal.entries.is_empty());
+        assert!(journal.cached_record_ids.is_empty());
+        assert!(journal.persisted_record_ids.is_empty());
+        assert!(!journal.hot_record_timestamps.contains_key(&record_id));
+        assert!(fs::read_to_string(&path).expect("read durable journal").contains("expiring hot record"));
+
+        drop(journal);
+        let _ = fs::remove_file(path);
+    }
+
 }
 
 #[cfg(test)]
