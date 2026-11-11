@@ -83,6 +83,7 @@ The default input mode is **TERMINAL**.
 - `/search <terms>` searches journal entries and Hermes conversation events. With PostgreSQL enabled, it opens a separate results workspace while live capture and persistence continue; press `Esc` to return to the newest live transcript row.
 - `n` / `N` navigate ranked search results; Enter opens the matching Hermes conversation when applicable.
 - PostgreSQL search modes include web full-text, literal substring, exact phrase, advanced `tsquery`, and trigram fuzzy matching, with kind/session/conversation/date filters and paged results.
+- PostgreSQL search results are rendered from the database result itself, so records originating in other terminals are still discoverable even when their full bodies are not mirrored into the current terminal's cache; remote records display indexed snippets and metadata, while full-record opening requires the row to be locally available.
 - Command/input history, Bash-powered Tab completion for commands and filesystem paths, nine high-contrast color palettes, export, stats, path display, and save/retry.
 - Older journal entries without a `kind` field remain compatible and load as `note` entries.
 
