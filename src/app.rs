@@ -1992,7 +1992,7 @@ impl App {
                 self.status = format!("Searching PostgreSQL for {:?}… Esc returns LIVE.", query);
                 return;
             }
-            Ok(None) => {}
+            Ok(None) => { self.search_view = false; }
             Err(error) => {
                 self.search_error = Some(error.to_string());
                 self.status = format!("PostgreSQL search failed: {error}");
@@ -2032,9 +2032,10 @@ impl App {
         self.search_ranks.clear();
 
         if !self.matches.is_empty() {
-            self.select_search_result(self.matches.len() - 1);
+            let latest = self.matches.len() - 1;
+            self.activate_match(latest);
             self.status = format!(
-                "Found {} local substring hit(s). Configure PostgreSQL for ranked full-text search. Esc returns LIVE.",
+                "Found {} local substring hit(s). Configure PostgreSQL for ranked full-text search.",
                 self.matches.len()
             );
         } else {
@@ -2056,7 +2057,7 @@ impl App {
         self.active_match = Some(position);
         self.selected_row = Some(self.matches[position]);
         self.follow_tail = false;
-        let viewport = self.feed_viewport_height.max(1);
+        let viewport = (self.feed_viewport_height / 2).max(1);
         if position < self.search_scroll {
             self.search_scroll = position;
         } else if position >= self.search_scroll.saturating_add(viewport) {
@@ -2071,7 +2072,8 @@ impl App {
     }
 
     pub fn scroll_search_results(&mut self, amount: usize) {
-        let max_top = self.matches.len().saturating_sub(self.feed_viewport_height.max(1));
+        let visible_results = (self.feed_viewport_height / 2).max(1);
+        let max_top = self.matches.len().saturating_sub(visible_results);
         self.search_scroll = self.search_scroll.saturating_add(amount).min(max_top);
     }
 
