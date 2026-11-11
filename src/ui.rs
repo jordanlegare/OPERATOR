@@ -594,9 +594,12 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    // Only colour changes over time: every element keeps a fixed coordinate.
-    // This gives the splash a slow spectral pulse without scrolling or drifting.
-    let phase = ((now_ms / 140) % 360) as f32;
+    // Advance the hue field quickly while keeping every element at a fixed
+    // coordinate. Since each line's hue increases from left to right, advancing
+    // phase moves the spectrum right-to-left; the 360-degree wrap brings the
+    // departing colours back in at the far right for a seamless rolling loop.
+    // One full cycle takes 6.48 seconds (18 ms per degree).
+    let phase = (now_ms % 6_480) as f32 / 18.0;
     let popup = centered_rect(96, 96, area);
     frame.render_widget(Clear, popup);
 
