@@ -1,0 +1,4 @@
+#!/bin/sh
+export STREENOTE_HERMES_REVIEW_SESSION_DIR="${STREENOTE_HERMES_REVIEW_SESSION_DIR:-/run/user/$(id -u)/streenote/review-sessions}"
+export STREENOTE_HERMES_INBOX="$HOME/.local/share/streenote/hermes-inbox"
+exec "$HOME/.hermes/hooks/streenote-capture.py"
