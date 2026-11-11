@@ -2001,7 +2001,7 @@ fn handle_key(
 
     // Historical archive records are loaded on demand and remain above the
     // search results workspace until the operator closes the record viewer.
-    if let Some(entry) = app.archive_detail_entry.as_ref() {
+    if let Some(entry) = app.archive_detail_entry.clone() {
         match code {
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                 let text = entry.text.clone();
