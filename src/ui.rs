@@ -726,12 +726,10 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
         content_area,
     );
 
-    // The poem is vertically centred in its own quiet column. Its italic
-    // lines and spectral edge make it read like a second, slower voice.
-    let poem_block = Block::default()
-        .borders(Borders::LEFT)
-        .border_style(Style::default().fg(spectrum_color(phase + 270.0)))
-        .style(Style::default().bg(theme.panel));
+    // Keep the poem in the right-hand column, without a vertical divider.
+    // Each line is centred horizontally while the complete poem stays centred
+    // vertically in the available space.
+    let poem_block = Block::default().style(Style::default().bg(theme.panel));
     let poem_inner = poem_block.inner(right_area);
     frame.render_widget(poem_block, right_area);
 
@@ -800,7 +798,7 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
     };
     frame.render_widget(
         Paragraph::new(poem_lines)
-            .alignment(Alignment::Left)
+            .alignment(Alignment::Center)
             .style(Style::default().fg(theme.text).bg(theme.panel))
             .wrap(Wrap { trim: false }),
         poem_area,
