@@ -435,8 +435,8 @@ impl Journal {
             self.total_text_bytes = self.entries.iter().map(|entry| entry.text.len()).sum();
             // Expire identity metadata incrementally. No full archive scan is
             // needed when old rows cross the 30-day boundary.
-            self.hot_event_timestamps.retain(|_, timestamp| timestamp >= &cutoff);
-            self.hot_record_timestamps.retain(|_, timestamp| timestamp >= &cutoff);
+            self.hot_event_timestamps.retain(|_, timestamp| timestamp.to_owned() >= cutoff);
+            self.hot_record_timestamps.retain(|_, timestamp| timestamp.to_owned() >= cutoff);
             self.persisted_event_ids = self.hot_event_timestamps.keys()
                 .filter(|id| !self.pending_event_ids.contains(*id))
                 .cloned()
