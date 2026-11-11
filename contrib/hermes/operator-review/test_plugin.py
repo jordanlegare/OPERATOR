@@ -16,7 +16,7 @@ SPEC = importlib.util.spec_from_file_location("operator_review_plugin", PLUGIN_P
 PLUGIN = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PLUGIN)
 
-CAPTURE_PATH = PLUGIN_PATH.parent.parent / "operator-capture.py"
+CAPTURE_PATH = PLUGIN_PATH.parent.parent / "hooks" / "operator-capture.py"
 CAPTURE_SPEC = importlib.util.spec_from_file_location("operator_capture_plugin", CAPTURE_PATH)
 CAPTURE = importlib.util.module_from_spec(CAPTURE_SPEC)
 CAPTURE_SPEC.loader.exec_module(CAPTURE)
