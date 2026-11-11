@@ -42,6 +42,17 @@ class HermesReviewPluginTests(unittest.TestCase):
         self.env.stop()
         self.temp_dir.cleanup()
 
+    def test_legacy_environment_alias_remains_supported(self):
+        with patch.dict(os.environ, {"STREENOTE_HERMES_REVIEW_REQUIRED": "1"}, clear=True):
+            self.assertEqual(PLUGIN.env_value("OPERATOR_HERMES_REVIEW_REQUIRED"), "1")
+
+    def test_operator_environment_name_takes_precedence(self):
+        with patch.dict(os.environ, {
+            "STREENOTE_HERMES_REVIEW_REQUIRED": "0",
+            "OPERATOR_HERMES_REVIEW_REQUIRED": "1",
+        }, clear=True):
+            self.assertEqual(PLUGIN.env_value("OPERATOR_HERMES_REVIEW_REQUIRED"), "1")
+
     def _serve(self, reply, socket_path=None, accept_count=1):
         errors = []
         requests = []
