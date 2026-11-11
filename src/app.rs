@@ -132,9 +132,9 @@ pub struct App {
     pub conversation_focus_entry: Option<usize>,
     /// Whether final Hermes responses must be approved before client delivery.
     pub review_hermes_responses: bool,
-    /// Number of live STREENOTE terminals currently opted into review.
+    /// Number of live OPERATOR terminals currently opted into review.
     pub active_reviewer_count: usize,
-    /// Explicit review decisions completed in this STREENOTE terminal session.
+    /// Explicit review decisions completed in this OPERATOR terminal session.
     pub reviews_handled: u64,
     /// Active final-response review; its channel is the only release path to Hermes.
     pub pending_review: Option<ReviewRequest>,
@@ -866,7 +866,7 @@ impl App {
 
         if submitted.starts_with("//") {
             self.commit_note(submitted[1..].to_string());
-        } else if is_streamnote_command(&submitted)
+        } else if is_operator_command(&submitted)
             || (self.input_mode == InputMode::Notes && submitted.starts_with('/'))
         {
             self.execute_command(&submitted);
@@ -874,7 +874,7 @@ impl App {
             self.dispatch_terminal_command(command.trim(), shell);
         } else if self.input_mode == InputMode::Terminal {
             // Absolute paths such as /usr/bin/ls are valid shell commands;
-            // only recognized StreamNote slash-commands are intercepted.
+            // only recognized OPERATOR slash-commands are intercepted.
             self.dispatch_terminal_command(&submitted, shell);
         } else {
             self.commit_note(submitted);
@@ -1286,7 +1286,7 @@ impl App {
         };
     }
 
-    /// Set reviewer availability for this STREENOTE terminal only. The main
+    /// Set reviewer availability for this OPERATOR terminal only. The main
     /// loop publishes this value to this instance's private registry manifest;
     /// it must never be persisted as a shared user preference.
     pub fn set_hermes_review_enabled(&mut self, enabled: bool) {
@@ -2071,10 +2071,10 @@ impl App {
 }
 
 fn default_export_path(journal_path: &PathBuf) -> PathBuf {
-    journal_path.with_file_name("streamnote-export.txt")
+    journal_path.with_file_name("operator-export.txt")
 }
 
-fn is_streamnote_command(line: &str) -> bool {
+fn is_operator_command(line: &str) -> bool {
     let command = line
         .split_whitespace()
         .next()
@@ -2165,7 +2165,7 @@ mod tests {
     fn test_app() -> (App, PathBuf) {
         let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
         let path = env::temp_dir().join(format!(
-            "streamnote-secret-input-test-{}-{id}.jsonl",
+            "operator-secret-input-test-{}-{id}.jsonl",
             std::process::id()
         ));
         let _ = fs::remove_file(&path);
@@ -2591,8 +2591,8 @@ mod tests {
     #[test]
     fn input_prompt_tracks_shell_prompt_and_notes_mode() {
         let (mut app, path) = test_app();
-        app.set_terminal_prompt("jordan@server:~/Projects/STREENOTE$ ".to_string());
-        assert_eq!(app.input_prompt(), "jordan@server:~/Projects/STREENOTE$ ");
+        app.set_terminal_prompt("jordan@server:~/Projects/OPERATOR$ ".to_string());
+        assert_eq!(app.input_prompt(), "jordan@server:~/Projects/OPERATOR$ ");
 
         app.input_mode = InputMode::Notes;
         assert_eq!(app.input_prompt(), "note› ");
@@ -2809,7 +2809,7 @@ mod tests {
         assert!(looks_like_secret_prompt("PIN:"));
         assert!(looks_like_secret_prompt("Verification code:"));
         assert!(!looks_like_secret_prompt("Welcome to Debian"));
-        assert!(!looks_like_secret_prompt("Compiling streamnote"));
+        assert!(!looks_like_secret_prompt("Compiling operator"));
     }
     #[test]
     fn arrow_navigation_highlights_rows_and_scrolls_the_selected_row_into_view() {
@@ -3251,11 +3251,11 @@ mod completion_tests {
     #[test]
     fn completion_finds_longest_common_prefix() {
         let candidates = vec![
-            "streamnote/".to_string(),
-            "streamnoted/".to_string(),
-            "streamnotes/".to_string(),
+            "operator/".to_string(),
+            "operatord/".to_string(),
+            "operators/".to_string(),
         ];
-        assert_eq!(completion_common_prefix(&candidates), "streamnote");
+        assert_eq!(completion_common_prefix(&candidates), "operator");
     }
 
     #[test]
