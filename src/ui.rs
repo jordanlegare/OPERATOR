@@ -270,6 +270,26 @@ fn draw_hermes_message(
     frame.render_widget(Clear, popup);
 
     let title = match entry.kind {
+        EntryKind::Note => format!(
+            " JOURNAL NOTE · ROW {} · {} ",
+            index + 1,
+            format_timestamp(&entry.timestamp)
+        ),
+        EntryKind::TerminalCommand => format!(
+            " TERMINAL COMMAND · ROW {} · {} ",
+            index + 1,
+            format_timestamp(&entry.timestamp)
+        ),
+        EntryKind::TerminalOutput => format!(
+            " TERMINAL OUTPUT · ROW {} · {} ",
+            index + 1,
+            format_timestamp(&entry.timestamp)
+        ),
+        EntryKind::System => format!(
+            " SYSTEM EVENT · ROW {} · {} ",
+            index + 1,
+            format_timestamp(&entry.timestamp)
+        ),
         EntryKind::HermesUser => format!(
             " HERMES USER MESSAGE · ROW {} · {} ",
             index + 1,
