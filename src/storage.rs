@@ -411,7 +411,7 @@ impl Journal {
         self.refresh_external_entries_locked()
     }
 
-    /// Refresh rows appended by other STREENOTE processes since our last file
+    /// Refresh rows appended by other OPERATOR processes since our last file
     /// offset. The caller holds the inter-process journal lock.
     fn refresh_external_entries_locked(&mut self) -> io::Result<usize> {
         let metadata = fs::metadata(&self.path)?;
@@ -630,10 +630,10 @@ impl Journal {
 
 /// Return true for PTY rows that are presentation noise rather than useful output:
 /// blank lines and the standard user@host:path$ / user@host:path# shell prompt.
-/// The prompt is already shown in StreamNote's live input footer.
+/// The prompt is already shown in OPERATOR's live input footer.
 /// Return true for PTY rows that are presentation noise rather than useful output:
 /// blank lines and the standard user@host:path$ / user@host:path# shell prompt.
-/// The prompt is already shown in StreamNote's live input footer.
+/// The prompt is already shown in OPERATOR's live input footer.
 pub fn should_suppress_terminal_output(line: &str) -> bool {
     let line = line.trim();
     if line.is_empty() {
@@ -798,7 +798,7 @@ pub fn sanitize_single_line(input: &str) -> String {
 }
 
 /// Preserve Markdown line breaks while removing terminal control characters
-/// that could otherwise affect the STREENOTE display.
+/// that could otherwise affect the OPERATOR display.
 pub fn sanitize_multiline(input: &str) -> String {
     let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
     normalized
@@ -858,7 +858,7 @@ mod terminal_output_filter_tests {
     fn test_path(label: &str) -> PathBuf {
         let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
         env::temp_dir().join(format!(
-            "streamnote-{label}-{}-{id}.jsonl",
+            "operator-{label}-{}-{id}.jsonl",
             std::process::id()
         ))
     }
@@ -1001,7 +1001,7 @@ mod hermes_stream_delta_tests {
 
     fn journal_path() -> PathBuf {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        env::temp_dir().join(format!("streenote-stream-{}-{id}.jsonl", std::process::id()))
+        env::temp_dir().join(format!("operator-stream-{}-{id}.jsonl", std::process::id()))
     }
 
     fn delta(event_id: &str, text: &str) -> Entry {
@@ -1069,7 +1069,7 @@ mod shared_journal_tests {
     fn journal_path() -> PathBuf {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "streenote-shared-journal-{}-{id}.jsonl",
+            "operator-shared-journal-{}-{id}.jsonl",
             std::process::id()
         ))
     }
