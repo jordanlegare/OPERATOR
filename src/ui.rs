@@ -1,6 +1,8 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use ratatui::{
     buffer::CellDiffOption,
-    layout::{Constraint, Direction, Layout, Position, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
@@ -20,29 +22,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let theme = THEMES.get(app.theme_index.saturating_sub(1)).copied().unwrap_or(THEMES[0]);
     frame.render_widget(Block::default().style(Style::default().bg(theme.bg)), frame.area());
 
-    let mut constraints = Vec::with_capacity(5);
-    if app.show_banner {
-        constraints.push(Constraint::Length(5));
-    }
-    constraints.extend([
-        Constraint::Length(1),
-        Constraint::Min(3),
-        Constraint::Length(3),
-        Constraint::Length(1),
-    ]);
+    // The application stays fully rendered underneath the optional splash.
+    // F12 simply toggles App::show_banner; the overlay never changes input
+    // handling, terminal state, or the persisted banner preference.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(constraints)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ])
         .split(frame.area());
 
-    let offset = if app.show_banner { 1 } else { 0 };
-    if app.show_banner {
-        draw_banner(frame, chunks[0], theme);
-    }
-    draw_status(frame, chunks[offset], app, theme);
-    draw_feed(frame, chunks[offset + 1], app, theme);
-    draw_input(frame, chunks[offset + 2], app, theme);
-    draw_hints(frame, chunks[offset + 3], app, theme);
+    draw_status(frame, chunks[0], app, theme);
+    draw_feed(frame, chunks[1], app, theme);
+    draw_input(frame, chunks[2], app, theme);
+    draw_hints(frame, chunks[3], app, theme);
 
     if let Some(index) = app.message_view_index {
         if let Some(entry) = app.journal.entries.get(index) {
@@ -64,6 +60,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         && app.conversation_view.is_none()
     {
         draw_help(frame, frame.area(), theme);
+    }
+
+    // Render last so the splash is a true foreground overlay. F12 removes it
+    // immediately and reveals the live application underneath.
+    if app.show_banner {
+        draw_banner(frame, frame.area(), theme);
     }
 }
 
@@ -542,29 +544,171 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
 }
 
 fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
-    let art = vec![
-        Line::from(Span::styled(
-            "### ##  ### ##   #  ### ### ## ",
-            Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            "# # # # #   # # # #  #  # # # #",
-            Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            "# # ##  ##  ##  ###  #  # # ## ",
-            Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            "# # #   #   # # # #  #  # # # #",
-            Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            "### #   ### # # # #  #  ### # #  // SHELL · NOTES · JOURNAL",
-            Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
-        )),
+    const LOGO: [&str; 5] = [
+        r"  ____  ____  _____ ____    _  _____ ___  ____  ",
+        r" / __ \|  _ \| ____|  _ \  / \|_   _/ _ \|  _ \ ",
+        r"| |  | | |_) |  _| | |_) |/ _ \ | || | | | |_) |",
+        r"| |__| |  __/| |___|  _ </ ___ \| || |_| |  _ < ",
+        r" \____/|_|   |_____|_| \_/_/   \_\_| \___/|_| \_\",
     ];
-    frame.render_widget(Paragraph::new(art).style(Style::default().bg(theme.bg)), area);
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let popup = centered_rect(96, 96, area);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.primary).add_modifier(Modifier::BOLD))
+        .title(Span::styled(
+            " OPERATOR // SYSTEM CREDITS ",
+            Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(theme.panel));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if inner.height < 3 || inner.width < 12 {
+        frame.render_widget(
+            Paragraph::new("OPERATOR · F12 RESUME")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme.primary).bg(theme.panel)),
+            inner,
+        );
+        return;
+    }
+
+    let footer_height = 1;
+    let header_height = inner.height.saturating_sub(footer_height + 1).min(7);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Min(1),
+            Constraint::Length(footer_height),
+        ])
+        .split(inner);
+    let body_height = sections[1].height.max(1) as usize;
+
+    let widest_logo = LOGO.iter().map(|line| line.chars().count()).max().unwrap_or(0);
+    let scan_position = ((now_ms / 75) % (widest_logo + 12) as u128) as usize;
+    let mut header = Vec::new();
+    if inner.width as usize >= widest_logo + 2 && header_height >= 5 {
+        for line in LOGO {
+            header.push(animated_logo_line(line, scan_position, theme));
+        }
+        if header_height >= 6 {
+            header.push(Line::from(vec![
+                Span::styled("◆  ", Style::default().fg(theme.success).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "SHELL  ·  NOTES  ·  JOURNAL  ·  HERMES",
+                    Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  ◆", Style::default().fg(theme.success).add_modifier(Modifier::BOLD)),
+            ]));
+        }
+    } else {
+        header.push(Line::from(Span::styled(
+            "◆  O P E R A T O R  ◆",
+            Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
+        )));
+        if header_height >= 2 {
+            header.push(Line::from(Span::styled(
+                "SHELL  ·  NOTES  ·  JOURNAL  ·  HERMES",
+                Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
+            )));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(header)
+            .alignment(Alignment::Center)
+            .style(Style::default().bg(theme.panel)),
+        sections[0],
+    );
+
+    // Roll the exact /help guide through the available viewport like credits.
+    // Leading/trailing blank rows let the text enter and leave gracefully;
+    // the pauses at either end make the first and last sections readable.
+    let guide = help_lines(theme);
+    let lead_in = body_height / 2;
+    let trail_out = body_height.saturating_sub(lead_in);
+    let mut rolling_lines = Vec::with_capacity(lead_in + guide.len() + trail_out);
+    for _ in 0..lead_in {
+        rolling_lines.push(Line::from(""));
+    }
+    rolling_lines.extend(guide);
+    for _ in 0..trail_out {
+        rolling_lines.push(Line::from(""));
+    }
+
+    let scroll_range = rolling_lines.len().saturating_sub(body_height);
+    let row_period_ms = 720u128;
+    let pause_ms = 2_000u128;
+    let travel_ms = (scroll_range as u128).saturating_mul(row_period_ms);
+    let cycle_ms = pause_ms
+        .saturating_add(travel_ms)
+        .saturating_add(pause_ms)
+        .max(1);
+    let cycle_position = now_ms % cycle_ms;
+    let scroll = if cycle_position < pause_ms {
+        0
+    } else if cycle_position < pause_ms.saturating_add(travel_ms) {
+        ((cycle_position - pause_ms) / row_period_ms) as u16
+    } else {
+        scroll_range.min(u16::MAX as usize) as u16
+    };
+
+    frame.render_widget(
+        Paragraph::new(rolling_lines)
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(theme.text).bg(theme.panel))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        sections[1],
+    );
+
+    let pulse = if (now_ms / 400) % 2 == 0 {
+        theme.success
+    } else {
+        theme.primary
+    };
+    let footer = Line::from(vec![
+        Span::styled(" F12 ", Style::default().fg(theme.bg).bg(pulse).add_modifier(Modifier::BOLD)),
+        Span::styled(" HIDE SPLASH  ·  ", Style::default().fg(theme.text)),
+        Span::styled("/help", Style::default().fg(theme.info).add_modifier(Modifier::BOLD)),
+        Span::styled(" OPENS THE SAME FIELD GUIDE  ·  ", Style::default().fg(theme.muted)),
+        Span::styled("OPERATOR", Style::default().fg(theme.primary).add_modifier(Modifier::BOLD)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(footer)
+            .alignment(Alignment::Center)
+            .style(Style::default().bg(theme.panel)),
+        sections[2],
+    );
+}
+
+fn animated_logo_line(source: &str, scan_position: usize, theme: Theme) -> Line<'static> {
+    let spans = source
+        .chars()
+        .enumerate()
+        .map(|(column, character)| {
+            let distance = column.abs_diff(scan_position);
+            let color = if distance <= 1 {
+                Color::White
+            } else if distance <= 5 {
+                theme.success
+            } else {
+                theme.primary
+            };
+            Span::styled(
+                character.to_string(),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )
+        })
+        .collect::<Vec<_>>();
+    Line::from(spans)
 }
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
@@ -1031,7 +1175,25 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
 fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
     let popup = centered_rect(82, 84, area);
     frame.render_widget(Clear, popup);
-    let text = vec![
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.primary))
+        .title(Span::styled(
+            " HELP ",
+            Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(theme.panel));
+    frame.render_widget(
+        Paragraph::new(help_lines(theme))
+            .style(Style::default().fg(theme.text).bg(theme.panel))
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
+fn help_lines(theme: Theme) -> Vec<Line<'static>> {
+    vec![
         Line::from(Span::styled(
             "OPERATOR · DEBIAN SHELL + NOTE JOURNAL",
             Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
@@ -1077,7 +1239,7 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         Line::from("Tab completes shell commands and paths · four spaces in Notes mode"),
         Line::from(format!("F2–F10 switches high-contrast palettes (F2 = 1, F10 = 9) · active: {}", theme.name)),
         Line::from("Ctrl+W toggles transcript word wrap · Alt+←/→ horizontal pan · Ctrl+P/N history · Ctrl+S save · Ctrl+T mode"),
-        Line::from("Ctrl+L / Esc clears the input line · F12 shows or hides the ASCII-art banner"),
+        Line::from("Ctrl+L / Esc clears the input line · F12 shows or hides the animated full-screen credits splash"),
         Line::from("Ctrl+C in a thread copies its full transcript; elsewhere it sends SIGINT or clears the draft."),
         Line::from(""),
         Line::from(Span::styled(
@@ -1085,22 +1247,7 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
             Style::default().fg(theme.muted),
         )),
         Line::from(Span::styled("F1 or Esc closes help", Style::default().fg(theme.muted))),
-    ];
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.primary))
-        .title(Span::styled(
-            " HELP ",
-            Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
-        ))
-        .style(Style::default().bg(theme.panel));
-    frame.render_widget(
-        Paragraph::new(text)
-            .style(Style::default().fg(theme.text).bg(theme.panel))
-            .block(block)
-            .wrap(Wrap { trim: false }),
-        popup,
-    );
+    ]
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
