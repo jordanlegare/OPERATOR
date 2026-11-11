@@ -3565,7 +3565,7 @@ mod tests {
 
 
     #[test]
-    fn postgres_search_workspace_retains_remote_hits_without_local_rows() {
+    fn remote_postgres_search_hit_requests_full_record_from_the_database() {
         let (mut app, path) = test_app();
         app.search_view = true;
         app.search_total = 1;
@@ -3584,7 +3584,8 @@ mod tests {
         assert!(app.selected_row.is_none());
         assert_eq!(app.search_hits[0].snippet, "remote journal result");
         app.open_active_search_result();
-        assert!(app.status.contains("another live terminal"));
+        assert!(app.status.contains("PostgreSQL archive is not configured"));
+        assert!(app.archive_detail_entry.is_none());
         let _ = fs::remove_file(path);
     }
 
