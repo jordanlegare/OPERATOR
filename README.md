@@ -310,7 +310,7 @@ Switch palettes directly with the unmodified **F2** through **F10** keys. Each k
 | `F9` | 8 | Arctic Blue |
 | `F10` | 9 | Monochrome Max |
 
-The palettes are built into OPERATOR and require no external theme package or configuration download. F1 opens a full-screen interactive terminal workspace with a separate PTY and shell process; press F1 again to return. The primary OPERATOR shell continues running independently. F12 shows or hides the ASCII-art banner.
+The palettes are built into OPERATOR and require no external theme package or configuration download. F1 opens a full-screen interactive terminal workspace with a separate PTY and shell process; press F1 again to return. The primary OPERATOR shell continues running independently. F12 shows or hides the animated, full-screen credits splash.
 
 ## Commands
 
@@ -334,7 +334,7 @@ The palettes are built into OPERATOR and require no external theme package or co
 | `/scp on|off|status` | Enable, disable, or inspect SSH SCP/SFTP passthrough (persistent; enabled by default) |
 | `/mode [shell|notes]` | Switch mode; no argument toggles |
 | `F1` | Enter/exit the full-screen interactive terminal workspace |
-| `F12` | Show or hide the ASCII-art banner |
+| `F12` | Show or hide the animated full-screen credits splash |
 | `/quit` or `/q` | Save pending records and quit |
 | `//text` | Store text beginning with `/` literally as a note |
 
@@ -367,7 +367,7 @@ The palettes are built into OPERATOR and require no external theme package or co
 | `Ctrl+D` | Send end-of-input to the shell when the terminal input is empty |
 | `Esc` | Clear the current input line; with an empty line, clear an active search |
 | `Ctrl+Q` | Quit OPERATOR |
-| `F12` | Show or hide the ASCII-art banner |
+| `F12` | Show or hide the animated full-screen credits splash |
 
 ## Journal format
 
