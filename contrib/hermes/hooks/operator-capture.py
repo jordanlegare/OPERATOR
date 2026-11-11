@@ -23,6 +23,14 @@ MAX_EVENT_BYTES = 8 * 1024 * 1024
 MAX_TOOL_DETAIL_BYTES = 48 * 1024
 MAX_HISTORY_BYTES = 1024 * 1024
 
+
+def env_value(name: str, default=None):
+    """Prefer OPERATOR settings while accepting pre-rename Hermes environments."""
+    value = os.environ.get(name)
+    if value is None and name.startswith("OPERATOR_"):
+        value = os.environ.get("STREENOTE_" + name[len("OPERATOR_"):])
+    return default if value is None else value
+
 SENSITIVE_KEY = re.compile(
     r"(?i)(password|passwd|secret|token|api[_-]?key|authorization|credential|private[_-]?key)"
 )
@@ -325,7 +333,7 @@ def review_session_registry_candidates() -> list[Path]:
     """
     candidates = []
 
-    configured = os.environ.get("OPERATOR_HERMES_REVIEW_SESSION_DIR")
+    configured = env_value("OPERATOR_HERMES_REVIEW_SESSION_DIR")
     if configured:
         path = Path(configured).expanduser()
         if path.is_absolute():
@@ -340,7 +348,7 @@ def review_session_registry_candidates() -> list[Path]:
     except OSError:
         pass
 
-    legacy_socket = os.environ.get("OPERATOR_HERMES_REVIEW_SOCKET")
+    legacy_socket = env_value("OPERATOR_HERMES_REVIEW_SOCKET")
     if legacy_socket:
         path = Path(legacy_socket).expanduser()
         if path.is_absolute():
@@ -460,7 +468,7 @@ def write_inbox_event(inbox: Path, event: dict) -> None:
             + "; ".join(failures)
         )
 
-    if os.environ.get("OPERATOR_HERMES_CAPTURE_DEBUG") == "1":
+    if env_value("OPERATOR_HERMES_CAPTURE_DEBUG") == "1":
         route = ",".join(str(item) for item in registries) or "origin-inbox fallback"
         print(
             f"OPERATOR Hermes capture: fanned event {event.get('event_id', 'unknown')} "
@@ -555,7 +563,7 @@ def session_event_text(event_name: str, payload: dict, extra: dict) -> str:
 
 
 def main() -> int:
-    inbox_value = os.environ.get("OPERATOR_HERMES_INBOX")
+    inbox_value = env_value("OPERATOR_HERMES_INBOX")
     if not inbox_value:
         # A detached gateway may invoke the Python hook directly, without the
         # per-PTY inbox variable. Select a live registered inbox as the history
