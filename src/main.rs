@@ -1,4 +1,5 @@
 mod app;
+mod archive;
 mod paths;
 mod postgres;
 mod conversations;
