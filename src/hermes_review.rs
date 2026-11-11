@@ -1,7 +1,7 @@
 //! Private Unix-socket handoff for Hermes final-answer review.
 //!
 //! Hermes' transform_llm_output plugin connects to this listener and blocks
-//! until the STREENOTE operator approves, edits, or withholds the response.
+//! until the OPERATOR operator approves, edits, or withholds the response.
 //! The listener is deliberately separate from the append-only capture inbox.
 
 use std::{
@@ -26,20 +26,20 @@ const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn diagnostic_log_path() -> PathBuf {
-    if let Some(path) = env::var_os("STREENOTE_HERMES_REVIEW_LOG").map(PathBuf::from).filter(|p| p.is_absolute()) { return path; }
+    if let Some(path) = env::var_os("OPERATOR_HERMES_REVIEW_LOG").map(PathBuf::from).filter(|p| p.is_absolute()) { return path; }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         let uid = unsafe { libc::geteuid() };
         let runtime_dir = PathBuf::from(format!("/run/user/{uid}"));
         if fs::metadata(&runtime_dir).ok().is_some_and(|m| m.is_dir() && m.uid() == uid) {
-            return runtime_dir.join("streenote").join("hermes-review.log");
+            return runtime_dir.join("operator").join("hermes-review.log");
         }
     }
     let state_root = env::var_os("XDG_STATE_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
         .or_else(|| env::var_os("HOME").map(PathBuf::from).map(|p| p.join(".local/state")))
         .unwrap_or_else(|| PathBuf::from(".local/state"));
-    state_root.join("streenote").join("hermes-review.log")
+    state_root.join("operator").join("hermes-review.log")
 }
 
 fn append_diagnostic_event(event: &str, details: serde_json::Value) {
@@ -127,7 +127,7 @@ pub fn diagnostics_summary() -> String {
     let error = latest_diagnostic(&records, "REVIEW_ERROR")
         .and_then(|r| r.get("error").or_else(|| r.get("details").and_then(|d| d.get("error"))))
         .and_then(|v| v.as_str()).unwrap_or("none");
-    format!("plugin registered: {plugin}; callback: {callback}; listeners: {socket}; reviewer: {route}; final broadcast: {broadcast}; connected: {connected}; STREENOTE request: {request}; last decision: {decision}; last error: {error}; log: {}", path.display())
+    format!("plugin registered: {plugin}; callback: {callback}; listeners: {socket}; reviewer: {route}; final broadcast: {broadcast}; connected: {connected}; OPERATOR request: {request}; last decision: {decision}; last error: {error}; log: {}", path.display())
 }
 
 #[derive(Debug)]
@@ -196,7 +196,7 @@ impl std::fmt::Debug for HermesReviewServer {
 }
 
 impl HermesReviewServer {
-    /// Start an independently addressable listener for this STREENOTE process.
+    /// Start an independently addressable listener for this OPERATOR process.
     ///
     /// Each interactive SSH session receives a unique socket and registry
     /// manifest. Hermes routes a stable session ID to one registered instance.
@@ -245,15 +245,15 @@ impl HermesReviewServer {
         fs::create_dir_all(parent)?;
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
 
-        // Recover a socket file left behind by an unclean STREENOTE exit, but
-        // never unlink a socket that belongs to another live STREENOTE process.
+        // Recover a socket file left behind by an unclean OPERATOR exit, but
+        // never unlink a socket that belongs to another live OPERATOR process.
         match fs::symlink_metadata(&socket_path) {
             Ok(metadata) if metadata.file_type().is_socket() => {
                 if UnixStream::connect(&socket_path).is_ok() {
                     return Err(io::Error::new(
                         io::ErrorKind::AddrInUse,
                         format!(
-                            "another STREENOTE review listener is already active at {}",
+                            "another OPERATOR review listener is already active at {}",
                             socket_path.display()
                         ),
                     ));
@@ -283,7 +283,7 @@ impl HermesReviewServer {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let worker = thread::Builder::new()
-            .name("streenote-hermes-review".to_string())
+            .name("operator-hermes-review".to_string())
             .spawn(move || {
                 while !worker_stop.load(Ordering::Relaxed) {
                     match listener.accept() {
@@ -295,7 +295,7 @@ impl HermesReviewServer {
                             let connection_enabled = Arc::clone(&worker_enabled);
                             let connection_stop = Arc::clone(&worker_stop);
                             let _ = thread::Builder::new()
-                                .name("streenote-review-client".to_string())
+                                .name("operator-review-client".to_string())
                                 .spawn(move || {
                                     if let Err(error) = handle_connection(
                                         stream,
@@ -307,7 +307,7 @@ impl HermesReviewServer {
                                             && error.kind() != io::ErrorKind::WouldBlock
                                             && error.kind() != io::ErrorKind::TimedOut
                                         {
-                                            eprintln!("STREENOTE Hermes review: {error}");
+                                            eprintln!("OPERATOR Hermes review: {error}");
                                         }
                                     }
                                 });
@@ -317,7 +317,7 @@ impl HermesReviewServer {
                         }
                         Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                         Err(error) => {
-                            eprintln!("STREENOTE Hermes review listener stopped: {error}");
+                            eprintln!("OPERATOR Hermes review listener stopped: {error}");
                             break;
                         }
                     }
@@ -343,7 +343,7 @@ impl HermesReviewServer {
         ))
     }
 
-    /// Unique identity for this STREENOTE process, used to bind Hermes
+    /// Unique identity for this OPERATOR process, used to bind Hermes
     /// sessions originating in its PTY to this review listener.
     pub fn instance_id(&self) -> Option<&str> {
         self.instance_id.as_deref()
@@ -359,7 +359,7 @@ impl HermesReviewServer {
     /// Count registered terminals that are opted into Hermes final-answer
     /// review and still have a live process and Unix-domain listener.
     ///
-    /// The registry is shared by every STREENOTE SSH session for this user,
+    /// The registry is shared by every OPERATOR SSH session for this user,
     /// so each terminal can independently refresh the same live count.
     pub fn active_reviewer_count(&self) -> usize {
         self.session_registry_dir()
@@ -434,10 +434,10 @@ impl Drop for HermesReviewServer {
 }
 
 /// Resolve the shared registry directory used by independently running
-/// STREENOTE TUI instances. The Hermes gateway uses the same environment and
+/// OPERATOR TUI instances. The Hermes gateway uses the same environment and
 /// UID-based default.
 pub fn default_review_session_dir() -> PathBuf {
-    let explicit = env::var_os("STREENOTE_HERMES_REVIEW_SESSION_DIR").map(PathBuf::from);
+    let explicit = env::var_os("OPERATOR_HERMES_REVIEW_SESSION_DIR").map(PathBuf::from);
     resolve_review_session_dir(explicit, default_review_socket_path())
 }
 
@@ -559,7 +559,7 @@ fn write_session_registration(path: &PathBuf, registration: &serde_json::Value) 
 }
 
 /// The legacy single-listener socket remains available as a compatibility
-/// endpoint for older STREENOTE binaries.
+/// endpoint for older OPERATOR binaries.
 pub fn default_review_socket_path() -> PathBuf {
     // A user service and an interactive PTY can have different HOME and
     // XDG_DATA_HOME values. /run/user/<uid> is stable across those process
@@ -578,7 +578,7 @@ pub fn default_review_socket_path() -> PathBuf {
     let runtime_dir: Option<PathBuf> = None;
 
     resolve_review_socket_path(
-        env::var_os("STREENOTE_HERMES_REVIEW_SOCKET").map(PathBuf::from),
+        env::var_os("OPERATOR_HERMES_REVIEW_SOCKET").map(PathBuf::from),
         runtime_dir,
         env::var_os("XDG_DATA_HOME").map(PathBuf::from),
         env::var_os("HOME").map(PathBuf::from),
@@ -596,7 +596,7 @@ fn resolve_review_socket_path(
     }
 
     if let Some(runtime_dir) = runtime_dir.filter(|path| path.is_absolute()) {
-        return runtime_dir.join("streenote").join("review.sock");
+        return runtime_dir.join("operator").join("review.sock");
     }
 
     let data_root = xdg_data_home
@@ -611,7 +611,7 @@ fn resolve_review_socket_path(
                 .join(".local/share")
         });
 
-    data_root.join("streenote").join("review.sock")
+    data_root.join("operator").join("review.sock")
 }
 
 #[cfg(unix)]
@@ -640,7 +640,7 @@ fn handle_connection(
                 version: 1,
                 decision: "reject",
                 response_text: None,
-                error: Some("invalid or oversized STREENOTE review request".to_string()),
+                error: Some("invalid or oversized OPERATOR review request".to_string()),
             },
         );
     }
@@ -706,7 +706,7 @@ fn handle_connection(
         );
     }
 
-    // A missing STREENOTE toggle must never surprise the operator with a
+    // A missing OPERATOR toggle must never surprise the operator with a
     // blocking prompt. The plugin remains loaded, but the original response
     // passes through immediately until /review on is selected.
     if !enabled.load(Ordering::Relaxed) {
@@ -744,7 +744,7 @@ fn handle_connection(
                 version: 1,
                 decision: "reject",
                 response_text: None,
-                error: Some("STREENOTE review interface is unavailable".to_string()),
+                error: Some("OPERATOR review interface is unavailable".to_string()),
             },
         );
     }
@@ -785,7 +785,7 @@ fn handle_connection(
             version: 1,
             decision: "reject",
             response_text: None,
-            error: Some("STREENOTE supplied an empty or oversized replacement".to_string()),
+            error: Some("OPERATOR supplied an empty or oversized replacement".to_string()),
         },
         ReviewDecision::Reject => WireResponse {
             version: 1,
@@ -833,7 +833,7 @@ mod tests {
     fn test_root() -> PathBuf {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         env::temp_dir().join(format!(
-            "streenote-hermes-review-{}-{id}",
+            "operator-hermes-review-{}-{id}",
             std::process::id()
         ))
     }
@@ -842,30 +842,30 @@ mod tests {
     fn review_session_directory_uses_explicit_override_or_legacy_socket_parent() {
         assert_eq!(
             resolve_review_session_dir(
-                Some(PathBuf::from("/srv/streenote/review-clients")),
-                PathBuf::from("/run/user/1000/streenote/review.sock"),
+                Some(PathBuf::from("/srv/operator/review-clients")),
+                PathBuf::from("/run/user/1000/operator/review.sock"),
             ),
-            PathBuf::from("/srv/streenote/review-clients")
+            PathBuf::from("/srv/operator/review-clients")
         );
         assert_eq!(
             resolve_review_session_dir(
                 None,
-                PathBuf::from("/run/user/1000/streenote/review.sock"),
+                PathBuf::from("/run/user/1000/operator/review.sock"),
             ),
-            PathBuf::from("/run/user/1000/streenote/review-sessions")
+            PathBuf::from("/run/user/1000/operator/review-sessions")
         );
         assert_eq!(
             resolve_review_session_dir(
                 Some(PathBuf::from("relative/path")),
-                PathBuf::from("/home/test/.local/share/streenote/review.sock"),
+                PathBuf::from("/home/test/.local/share/operator/review.sock"),
             ),
-            PathBuf::from("/home/test/.local/share/streenote/review-sessions")
+            PathBuf::from("/home/test/.local/share/operator/review-sessions")
         );
     }
 
     #[cfg(unix)]
     #[test]
-    fn concurrent_streenote_instances_register_distinct_review_sockets() {
+    fn concurrent_operator_instances_register_distinct_review_sockets() {
         let root = test_root().join("review-sessions");
         let first = HermesReviewServer::start_registered_in_for_test(root.clone())
             .expect("start first session listener");
@@ -922,7 +922,7 @@ mod tests {
                 Some(PathBuf::from("/different/xdg")),
                 Some(PathBuf::from("/different/home")),
             ),
-            PathBuf::from("/run/user/1000/streenote/review.sock")
+            PathBuf::from("/run/user/1000/operator/review.sock")
         );
         assert_eq!(
             resolve_review_socket_path(
@@ -931,7 +931,7 @@ mod tests {
                 Some(PathBuf::from("/xdg/data")),
                 Some(PathBuf::from("/home/test")),
             ),
-            PathBuf::from("/xdg/data/streenote/review.sock")
+            PathBuf::from("/xdg/data/operator/review.sock")
         );
         assert_eq!(
             resolve_review_socket_path(
@@ -940,7 +940,7 @@ mod tests {
                 None,
                 Some(PathBuf::from("/home/test")),
             ),
-            PathBuf::from("/home/test/.local/share/streenote/review.sock")
+            PathBuf::from("/home/test/.local/share/operator/review.sock")
         );
         assert_eq!(
             resolve_review_socket_path(
