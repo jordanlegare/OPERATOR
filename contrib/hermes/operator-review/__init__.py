@@ -27,6 +27,14 @@ SOCKET_TIMEOUT_SECONDS = 550
 MAX_METADATA_CHARS = 1024
 MAX_PROMPT_BYTES = 8 * 1024 * 1024
 
+
+def env_value(name: str, default=None):
+    """Prefer OPERATOR settings while accepting pre-rename Hermes environments."""
+    value = os.environ.get(name)
+    if value is None and name.startswith("OPERATOR_"):
+        value = os.environ.get("STREENOTE_" + name[len("OPERATOR_"):])
+    return default if value is None else value
+
 _PROMPT_SECRET_ASSIGNMENT = re.compile(
     r"""(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|authorization|credential)\b(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)"""
 )
@@ -37,7 +45,7 @@ _PROMPT_SECRET_FLAG = re.compile(
 
 
 def _diagnostic_log_path() -> Path:
-    explicit = os.environ.get("OPERATOR_HERMES_REVIEW_LOG")
+    explicit = env_value("OPERATOR_HERMES_REVIEW_LOG")
     if explicit and Path(explicit).expanduser().is_absolute():
         return Path(explicit).expanduser()
     runtime_dir = Path("/run/user") / str(os.getuid())
@@ -80,7 +88,7 @@ def _log_event(event: str, **fields: Any) -> None:
 
 
 def _review_required() -> bool:
-    return os.environ.get("OPERATOR_HERMES_REVIEW_REQUIRED", "").strip().lower() in {
+    return env_value("OPERATOR_HERMES_REVIEW_REQUIRED", "").strip().lower() in {
         "1", "true", "yes", "on"
     }
 
@@ -99,7 +107,7 @@ def runtime_review_socket_path(uid: int | None = None, runtime_root: Path = Path
 
 def review_socket_path() -> Path:
     """Resolve the same per-user socket path used by the OPERATOR process."""
-    explicit = os.environ.get("OPERATOR_HERMES_REVIEW_SOCKET")
+    explicit = env_value("OPERATOR_HERMES_REVIEW_SOCKET")
     if explicit:
         candidate = Path(explicit).expanduser()
         if candidate.is_absolute():
@@ -121,7 +129,7 @@ def review_socket_path() -> Path:
 
 def review_session_registry_dir() -> Path:
     """Directory containing one socket/manifest pair per live OPERATOR TUI."""
-    explicit = os.environ.get("OPERATOR_HERMES_REVIEW_SESSION_DIR")
+    explicit = env_value("OPERATOR_HERMES_REVIEW_SESSION_DIR")
     if explicit:
         candidate = Path(explicit).expanduser()
         if candidate.is_absolute():
@@ -477,7 +485,7 @@ def _last_user_message_from_history(history: Any) -> Any:
 
 
 def _default_prompt_inbox() -> Path:
-    explicit = os.environ.get("OPERATOR_HERMES_INBOX")
+    explicit = env_value("OPERATOR_HERMES_INBOX")
     if explicit and Path(explicit).expanduser().is_absolute():
         return Path(explicit).expanduser()
     data_home = os.environ.get("XDG_DATA_HOME")
