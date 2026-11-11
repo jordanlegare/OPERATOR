@@ -1,0 +1,4 @@
+#!/bin/sh
+export OPERATOR_HERMES_REVIEW_SESSION_DIR="${OPERATOR_HERMES_REVIEW_SESSION_DIR:-/run/user/$(id -u)/operator/review-sessions}"
+export OPERATOR_HERMES_INBOX="$HOME/.local/share/operator/hermes-inbox"
+exec "$HOME/.hermes/hooks/operator-capture.py"
