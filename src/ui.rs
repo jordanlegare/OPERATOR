@@ -1055,29 +1055,21 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
             format!("  Searching PostgreSQL: {query}"),
             Style::default().fg(theme.info),
         )));
-    } else if app.matches.is_empty() {
+    } else if app.search_hits.is_empty() {
         lines.push(Line::from(Span::styled(
             format!("  No results for {query:?}. Press Esc to return to the live transcript."),
             Style::default().fg(theme.muted),
         )));
     } else {
-        for (position, index) in app.matches.iter().copied().enumerate() {
-            let Some(entry) = app.journal.entries.get(index) else { continue; };
+        for (position, hit) in app.search_hits.iter().enumerate() {
+            let index = app.search_hit_entry_indices.get(position).copied().flatten();
             let selected = app.active_match == Some(position);
             let row_style = if selected {
                 Style::default().bg(theme.selected_row).add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
-            let rank = app.search_ranks.get(&index)
-                .map(|score| format!("  score:{score:.3}"))
-                .unwrap_or_default();
-            let preview = app.search_snippets.get(&index)
-                .cloned()
-                .unwrap_or_else(|| entry_display_text(entry));
-            let preview = preview.split_whitespace().collect::<Vec<_>>().join(" ");
-            let preview = preview.chars().take(320).collect::<String>();
-            let kind = match app.search_kinds.get(&index).map(String::as_str).unwrap_or("") {
+            let kind = match hit.kind.as_str() {
                 "note" => "NOTE",
                 "terminal_command" => "COMMAND",
                 "terminal_output" => "OUTPUT",
@@ -1092,30 +1084,20 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
                 "hermes_history" => "HERMES HISTORY",
                 "hermes_interim" => "HERMES INTERIM",
                 "hermes_session" => "HERMES SESSION",
-                _ => match entry.kind {
-                    EntryKind::Note => "NOTE",
-                    EntryKind::TerminalCommand => "COMMAND",
-                    EntryKind::TerminalOutput => "OUTPUT",
-                    EntryKind::System => "SYSTEM",
-                    EntryKind::HermesUser => "HERMES USER",
-                    EntryKind::HermesAssistant => "HERMES ASSISTANT",
-                    EntryKind::HermesToolCall => "HERMES TOOL",
-                    EntryKind::HermesToolResult => "HERMES RESULT",
-                    EntryKind::HermesStreamStart => "STREAM START",
-                    EntryKind::HermesStreamDelta => "STREAM DELTA",
-                    EntryKind::HermesStreamEnd => "STREAM END",
-                    EntryKind::HermesHistory => "HERMES HISTORY",
-                    EntryKind::HermesInterim => "HERMES INTERIM",
-                    EntryKind::HermesSession => "HERMES SESSION",
-                }
+                other => other,
             };
+            let row_label = index
+                .map(|row| format!("[ROW {}]", row + 1))
+                .unwrap_or_else(|| format!("[DB {}]", hit.record_id.chars().take(10).collect::<String>()));
+            let preview = hit.snippet.split_whitespace().collect::<Vec<_>>().join(" ");
+            let preview = preview.chars().take(320).collect::<String>();
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("{} {:>5}  ", if selected { "▶" } else { " " }, app.search_page_offset + position + 1),
                     Style::default().fg(theme.primary).patch(row_style),
                 ),
                 Span::styled(
-                    format!("{}  ", format_timestamp(app.search_timestamps.get(&index).map(String::as_str).unwrap_or(&entry.timestamp))),
+                    format!("{}  ", format_timestamp(&hit.occurred_at)),
                     Style::default().fg(theme.success).patch(row_style),
                 ),
                 Span::styled(
@@ -1123,7 +1105,7 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
                     Style::default().fg(theme.info).add_modifier(Modifier::BOLD).patch(row_style),
                 ),
                 Span::styled(
-                    format!("  [ROW {}]{}", index + 1, rank),
+                    format!("  {row_label}  score:{:.3}", hit.rank),
                     Style::default().fg(theme.muted).patch(row_style),
                 ),
             ]));
@@ -1145,7 +1127,6 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
         inner,
     );
 }
-
 
 fn draw_maple_watermark(frame: &mut Frame, area: Rect, theme: Theme) {
     const WATERMARK_ART: [&str; 17] = [
