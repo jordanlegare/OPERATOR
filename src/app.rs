@@ -108,10 +108,10 @@ pub struct App {
     pub search_page_limit: usize,
     pub search_mode_label: String,
     pub search_error: Option<String>,
-    pub search_snippets: HashMap<usize, String>,
-    pub search_ranks: HashMap<usize, f32>,
-    pub search_kinds: HashMap<usize, String>,
-    pub search_timestamps: HashMap<usize, String>,
+    /// Full database hits, including entries not mirrored into this terminal's cache.
+    pub search_hits: Vec<crate::postgres::SearchHit>,
+    /// Local transcript index corresponding to each hit, when this process has it cached.
+    pub search_hit_entry_indices: Vec<Option<usize>>,
     pending_postgres_search: Option<(u64, String)>,
     pub active_match: Option<usize>,
     pub history: Vec<String>,
@@ -217,10 +217,8 @@ impl App {
             search_page_limit: 200,
             search_mode_label: String::new(),
             search_error: None,
-            search_snippets: HashMap::new(),
-            search_ranks: HashMap::new(),
-            search_kinds: HashMap::new(),
-            search_timestamps: HashMap::new(),
+            search_hits: Vec::new(),
+            search_hit_entry_indices: Vec::new(),
             pending_postgres_search: None,
             active_match: None,
             history,
@@ -1842,10 +1840,8 @@ impl App {
         self.search_page_limit = 200;
         self.search_mode_label.clear();
         self.search_error = None;
-        self.search_snippets.clear();
-        self.search_ranks.clear();
-        self.search_kinds.clear();
-        self.search_timestamps.clear();
+        self.search_hits.clear();
+        self.search_hit_entry_indices.clear();
     }
 
     /// Leave the temporary results workspace and resume the newest live row.
@@ -1885,20 +1881,11 @@ impl App {
                 })
                 .collect();
 
-            self.matches.clear();
-            self.search_snippets.clear();
-            self.search_ranks.clear();
-            self.search_kinds.clear();
-            self.search_timestamps.clear();
-            for hit in result.hits {
-                if let Some(index) = index_by_record_id.get(hit.record_id.as_str()).copied() {
-                    self.matches.push(index);
-                    self.search_snippets.insert(index, hit.snippet);
-                    self.search_ranks.insert(index, hit.rank);
-                    self.search_kinds.insert(index, hit.kind);
-                    self.search_timestamps.insert(index, hit.occurred_at);
-                }
-            }
+            self.search_hits = result.hits;
+            self.search_hit_entry_indices = self.search_hits.iter()
+                .map(|hit| index_by_record_id.get(hit.record_id.as_str()).copied())
+                .collect();
+            self.matches = self.search_hit_entry_indices.iter().flatten().copied().collect();
             self.search_query = Some(result.query);
             self.search_total = result.total;
             self.search_page_offset = result.offset;
@@ -1985,10 +1972,8 @@ impl App {
         self.search_view = true;
         self.search_scroll = 0;
         self.search_error = None;
-        self.search_snippets.clear();
-        self.search_ranks.clear();
-        self.search_kinds.clear();
-        self.search_timestamps.clear();
+        self.search_hits.clear();
+        self.search_hit_entry_indices.clear();
         self.matches.clear();
         self.active_match = None;
         self.conversation_view = None;
@@ -2060,38 +2045,54 @@ impl App {
     }
 
     /// Select a result without opening a Hermes conversation overlay.
+    /// Select a result using PostgreSQL ranking order, including records
+    /// owned by another terminal and not mirrored into this local cache.
     pub fn select_search_result(&mut self, position: usize) {
-        if self.matches.is_empty() {
+        if self.search_hits.is_empty() {
             self.active_match = None;
+            self.selected_row = None;
             return;
         }
-        let position = position.min(self.matches.len() - 1);
+        let position = position.min(self.search_hits.len() - 1);
         self.active_match = Some(position);
-        self.selected_row = Some(self.matches[position]);
+        self.selected_row = self.search_hit_entry_indices.get(position).copied().flatten();
         self.follow_tail = false;
-        let viewport = (self.feed_viewport_height / 2).max(1);
+        let visible_results = (self.feed_viewport_height / 2).max(1);
         if position < self.search_scroll {
             self.search_scroll = position;
-        } else if position >= self.search_scroll.saturating_add(viewport) {
-            self.search_scroll = position.saturating_add(1).saturating_sub(viewport);
+        } else if position >= self.search_scroll.saturating_add(visible_results) {
+            self.search_scroll = position.saturating_add(1).saturating_sub(visible_results);
         }
+        let hit = &self.search_hits[position];
         self.status = format!(
-            "Search result {}/{} · journal row {} · Enter opens Hermes context · Esc returns LIVE.",
+            "Search result {}/{} · {} · Esc returns LIVE.",
             self.search_page_offset + position + 1,
-            self.search_total.max(self.matches.len()),
-            self.matches[position] + 1
+            self.search_total.max(self.search_hits.len()),
+            hit.kind
         );
     }
 
     pub fn scroll_search_results(&mut self, amount: usize) {
         let visible_results = (self.feed_viewport_height / 2).max(1);
-        let max_top = self.matches.len().saturating_sub(visible_results);
+        let max_top = self.search_hits.len().saturating_sub(visible_results);
         self.search_scroll = self.search_scroll.saturating_add(amount).min(max_top);
     }
 
     pub fn open_active_search_result(&mut self) {
-        if let Some(position) = self.active_match {
-            self.activate_match(position);
+        let Some(position) = self.active_match else { return; };
+        let Some(index) = self.search_hit_entry_indices.get(position).copied().flatten() else {
+            self.status = "This PostgreSQL record belongs to another live terminal. Its indexed snippet is shown here; its full context is not mirrored into this session.".to_string();
+            return;
+        };
+        let is_hermes_hit = self.journal.entries.get(index)
+            .is_some_and(|entry| is_hermes_event(entry.kind));
+        if is_hermes_hit && self.open_conversation_for_entry(index) {
+            self.conversation_focus_entry = Some(index);
+            self.conversation_follow_tail = false;
+            self.conversation_scroll = 0;
+        } else {
+            self.message_view_index = Some(index);
+            self.message_view_scroll = 0;
         }
     }
 
@@ -2100,16 +2101,29 @@ impl App {
     }
 
     pub fn next_match(&mut self) {
+        if self.search_view {
+            if self.search_hits.is_empty() { return; }
+            let next = self.active_match.unwrap_or(0).saturating_add(1) % self.search_hits.len();
+            self.select_search_result(next);
+            return;
+        }
         if self.matches.is_empty() { return; }
         let next = self.active_match.unwrap_or(0).saturating_add(1) % self.matches.len();
-        if self.search_view { self.select_search_result(next); } else { self.activate_match(next); }
+        self.activate_match(next);
     }
 
     pub fn previous_match(&mut self) {
+        if self.search_view {
+            if self.search_hits.is_empty() { return; }
+            let current = self.active_match.unwrap_or(0);
+            let previous = if current == 0 { self.search_hits.len() - 1 } else { current - 1 };
+            self.select_search_result(previous);
+            return;
+        }
         if self.matches.is_empty() { return; }
         let current = self.active_match.unwrap_or(0);
         let previous = if current == 0 { self.matches.len() - 1 } else { current - 1 };
-        if self.search_view { self.select_search_result(previous); } else { self.activate_match(previous); }
+        self.activate_match(previous);
     }
 
     fn activate_match(&mut self, position: usize) {
