@@ -52,15 +52,15 @@ impl ShellSession {
         // the journal (as CMD); PTY output remains fully visible and captured.
         set_input_echo(&*pair.master, false)?;
 
-        // When STREENOTE is the account's SSH login shell, SSH may set
+        // When OPERATOR is the account's SSH login shell, SSH may set
         // $SHELL to this executable. Never launch ourselves as the nested
         // interactive shell: doing so recursively enters raw mode and makes
         // the parent mistake the child PTY's disabled ECHO for a password prompt.
-        // STREAMNOTE_SHELL is the explicit override; otherwise use $SHELL only
+        // OPERATOR_SHELL is the explicit override; otherwise use $SHELL only
         // when it does not resolve to this executable.
         let shell = resolve_shell_program();
         let mut command = CommandBuilder::new(&shell);
-        // Standard Hermes integration contract: every STREENOTE-managed PTY
+        // Standard Hermes integration contract: every OPERATOR-managed PTY
         // receives the canonical inbox path from the Rust bridge. Child tools
         // inherit it; independent gateway services need their own hook adapter.
         command.env(
@@ -68,15 +68,15 @@ impl ShellSession {
             crate::hermes_bridge::default_inbox_path(),
         );
         // Bind Hermes' pre_llm_call capture events to this exact SSH-launched
-        // STREENOTE instance. The shared gateway uses that session association
+        // OPERATOR instance. The shared gateway uses that session association
         // to return final answers to the originating terminal.
-        for variable in ["STREENOTE_HERMES_REVIEW_SESSION_DIR"] {
+        for variable in ["OPERATOR_HERMES_REVIEW_SESSION_DIR"] {
             if let Some(value) = env::var_os(variable) {
                 command.env(variable, value);
             }
         }
         // Keep subprocesses and shell startup files pointed at the real shell,
-        // not at STREENOTE when it is the account's configured login shell.
+        // not at OPERATOR when it is the account's configured login shell.
         command.env("SHELL", &shell);
 
         // Start the configured interactive shell normally so Debian's shell
@@ -104,7 +104,7 @@ impl ShellSession {
 
         let (sender, receiver) = mpsc::channel();
         thread::Builder::new()
-            .name("streamnote-pty-reader".to_string())
+            .name("operator-pty-reader".to_string())
             .spawn(move || {
                 let mut buffer = [0_u8; READ_BUFFER_SIZE];
                 loop {
@@ -204,7 +204,7 @@ impl ShellSession {
         let mut command = std::process::Command::new("/bin/bash");
         command.arg("-c")
             .arg(script)
-            .arg("streamnote-completion")
+            .arg("operator-completion")
             .arg(prefix)
             .arg(if command_position { "1" } else { "0" });
 
@@ -298,7 +298,7 @@ impl ShellSession {
     }
 
     /// Query the PTY's ECHO flag for compatibility with programs that change it.
-    /// StreamNote normally disables echo globally, so a false value alone is not
+    /// OPERATOR normally disables echo globally, so a false value alone is not
     /// treated as proof of a password prompt; the app also checks prompt text.
     #[cfg(unix)]
     pub fn input_is_echoed(&self) -> Option<bool> {
@@ -323,7 +323,7 @@ impl ShellSession {
 
     /// Drain available PTY bytes without parsing them into transcript lines.
     /// Used by the independent full-screen workspace, whose output must remain
-    /// isolated from STREENOTE's persistent journal.
+    /// isolated from OPERATOR's persistent journal.
     pub fn drain_raw_output(&mut self) -> Vec<u8> {
         let mut raw = Vec::new();
         while !self.reader_closed {
@@ -407,14 +407,14 @@ fn format_shell_prompt(user: &str, hostname: &str, cwd: &Path, home: Option<&Pat
     format!("{user}@{hostname}:{}$ ", shown_path.display())
 }
 
-/// Select a real interactive shell, avoiding recursion when STREENOTE itself
+/// Select a real interactive shell, avoiding recursion when OPERATOR itself
 /// is configured as the user's login shell.
 fn resolve_shell_program() -> PathBuf {
     let current_exe = env::current_exe()
         .ok()
         .and_then(|path| fs::canonicalize(path).ok());
 
-    let configured = env::var_os("STREAMNOTE_SHELL").or_else(|| env::var_os("SHELL"));
+    let configured = env::var_os("OPERATOR_SHELL").or_else(|| env::var_os("SHELL"));
     if let Some(candidate) = configured {
         let candidate = PathBuf::from(candidate);
         let resolves_to_self = current_exe.as_ref().is_some_and(|current| {
@@ -429,7 +429,7 @@ fn resolve_shell_program() -> PathBuf {
     }
 
     // Debian and Ubuntu provide /bin/bash. This fallback is intentionally
-    // independent of $SHELL, which may identify STREENOTE as the login shell.
+    // independent of $SHELL, which may identify OPERATOR as the login shell.
     PathBuf::from("/bin/bash")
 }
 
@@ -679,10 +679,10 @@ mod tests {
             format_shell_prompt(
                 "jordan",
                 "server",
-                Path::new("/home/jordan/Projects/STREENOTE"),
+                Path::new("/home/jordan/Projects/OPERATOR"),
                 Some(Path::new("/home/jordan"))
             ),
-            "jordan@server:~/Projects/STREENOTE$ "
+            "jordan@server:~/Projects/OPERATOR$ "
         );
         assert_eq!(
             format_shell_prompt("jordan", "server", Path::new("/tmp"), Some(Path::new("/home/jordan"))),
