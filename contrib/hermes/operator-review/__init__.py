@@ -33,6 +33,13 @@ def env_value(name: str, default=None):
     value = os.environ.get(name)
     if value is None and name.startswith("OPERATOR_"):
         value = os.environ.get("STREENOTE_" + name[len("OPERATOR_"):])
+        if value is not None and name.endswith(("_DIR", "_SOCKET", "_LOG", "_INBOX")):
+            parts = list(Path(value).parts)
+            if "streenote" in parts:
+                parts[parts.index("streenote")] = "operator"
+                rewritten = Path(*parts)
+                if rewritten.exists() or rewritten.parent.exists():
+                    value = str(rewritten)
     return default if value is None else value
 
 _PROMPT_SECRET_ASSIGNMENT = re.compile(
