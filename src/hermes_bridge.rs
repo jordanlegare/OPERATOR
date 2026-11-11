@@ -162,7 +162,7 @@ pub const HERMES_INBOX_ENV: &str = "OPERATOR_HERMES_INBOX";
 /// processes do not depend on their current working directory.
 pub fn default_inbox_path() -> PathBuf {
     resolve_inbox_path(
-        std::env::var_os(HERMES_INBOX_ENV).map(PathBuf::from),
+        env_var(HERMES_INBOX_ENV).map(PathBuf::from),
         std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
         std::env::var_os("HOME").map(PathBuf::from),
     )
@@ -189,7 +189,7 @@ fn resolve_inbox_path(
                 .join(".local/share")
         });
 
-    data_root.join("operator").join("hermes-inbox")
+    migrate_legacy_dir(data_root.join("operator")).join("hermes-inbox")
 }
 
 fn create_private_dir(path: &Path) -> io::Result<()> {
