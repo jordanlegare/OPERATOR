@@ -1297,6 +1297,11 @@ fn run(
                 }
             }
             Event::Mouse(_) if app.pending_review.is_some() => {}
+            Event::Mouse(mouse) if app.search_view => match mouse.kind {
+                MouseEventKind::ScrollUp => app.scroll_up(if mouse.modifiers.contains(KeyModifiers::SHIFT) { 8 } else { 3 }),
+                MouseEventKind::ScrollDown => app.scroll_down(if mouse.modifiers.contains(KeyModifiers::SHIFT) { 8 } else { 3 }),
+                _ => {}
+            },
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Right)
                     if app.message_view_index.is_none()
