@@ -47,6 +47,7 @@ struct SearchRequest {
     query: String,
 }
 
+#[derive(Debug)]
 pub struct ArchiveSearcher {
     requests: Sender<SearchRequest>,
     results: Receiver<ArchiveSearchResult>,
