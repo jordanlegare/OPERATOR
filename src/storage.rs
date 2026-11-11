@@ -272,6 +272,11 @@ impl Journal {
                     if !is_hot_entry_at(&entry, cutoff) {
                         continue;
                     }
+                    if entry.kind == EntryKind::TerminalOutput
+                        && should_suppress_terminal_output(&entry.text)
+                    {
+                        continue;
+                    }
                     let occurred_at = entry_timestamp_utc(&entry);
                     if let Some(event_id) = entry.event_id.as_ref() {
                         if !persisted_event_ids.insert(event_id.clone()) {
@@ -284,11 +289,6 @@ impl Journal {
                             continue;
                         }
                         hot_record_timestamps.insert(record_id.clone(), occurred_at);
-                    }
-                    if entry.kind == EntryKind::TerminalOutput
-                        && should_suppress_terminal_output(&entry.text)
-                    {
-                        continue;
                     }
                     total_text_bytes = total_text_bytes.saturating_add(entry.text.len());
                     if let Some(previous) = entries.last_mut().filter(|previous| {
@@ -431,12 +431,18 @@ impl Journal {
         let before = self.entries.len();
         self.entries.retain(|entry| is_hot_entry_at(entry, cutoff));
         let removed = before.saturating_sub(self.entries.len());
+        let events_before = self.hot_event_timestamps.len();
+        let records_before = self.hot_record_timestamps.len();
+        self.hot_event_timestamps.retain(|_, timestamp| *timestamp >= cutoff);
+        self.hot_record_timestamps.retain(|_, timestamp| *timestamp >= cutoff);
+        let identities_expired = events_before != self.hot_event_timestamps.len()
+            || records_before != self.hot_record_timestamps.len();
         if removed > 0 {
             self.total_text_bytes = self.entries.iter().map(|entry| entry.text.len()).sum();
-            // Expire identity metadata incrementally. No full archive scan is
-            // needed when old rows cross the 30-day boundary.
-            self.hot_event_timestamps.retain(|_, timestamp| timestamp.to_owned() >= cutoff);
-            self.hot_record_timestamps.retain(|_, timestamp| timestamp.to_owned() >= cutoff);
+        }
+        if removed > 0 || identities_expired {
+            // Keep dedupe metadata bounded even for filtered journal rows that
+            // never created a visible transcript entry.
             self.persisted_event_ids = self.hot_event_timestamps.keys()
                 .filter(|id| !self.pending_event_ids.contains(*id))
                 .cloned()
@@ -530,9 +536,11 @@ impl Journal {
             }
         }
         self.refresh_external_entries_locked()?;
+        let hot = is_hot_entry(&entry);
 
         if let Some(event_id) = event_id.as_ref() {
-            if !self.persisted_event_ids.contains(event_id)
+            if !hot
+                && !self.persisted_event_ids.contains(event_id)
                 && archive_contains_event_id(&self.path, event_id)?
             {
                 return Ok(());
@@ -552,7 +560,8 @@ impl Journal {
         }
 
         if let Some(record_id) = record_id.as_ref() {
-            if !self.persisted_record_ids.contains(record_id)
+            if !hot
+                && !self.persisted_record_ids.contains(record_id)
                 && archive_contains_record_id(&self.path, record_id)?
             {
                 return Ok(());
@@ -565,7 +574,6 @@ impl Journal {
             }
         }
 
-        let hot = is_hot_entry(&entry);
         self.push_entry_to_memory(entry.clone());
         if hot {
             if let Some(event_id) = entry.event_id.as_ref() {
