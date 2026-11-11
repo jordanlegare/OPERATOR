@@ -1033,7 +1033,7 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
     frame.render_widget(Clear, popup);
     let text = vec![
         Line::from(Span::styled(
-            "STREAMNOTE · DEBIAN SHELL + NOTE JOURNAL",
+            "OPERATOR · DEBIAN SHELL + NOTE JOURNAL",
             Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
