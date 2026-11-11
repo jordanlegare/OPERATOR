@@ -513,6 +513,14 @@ impl Journal {
                 }
             }
             if let Err(error) = self.postgres.as_ref().expect("PostgreSQL backend configured").enqueue(entry.clone()) {
+                if hot {
+                    if let Some(event_id) = entry.event_id.as_ref() {
+                        self.pending_event_ids.insert(event_id.clone());
+                    }
+                    if let Some(record_id) = entry.record_id.as_ref() {
+                        self.pending_record_ids.insert(record_id.clone());
+                    }
+                }
                 self.pending.push(entry);
                 return Err(error);
             }
@@ -836,6 +844,16 @@ impl Journal {
                 return Ok(());
             }
             if let Err(error) = self.postgres.as_ref().expect("PostgreSQL backend configured").enqueue_batch(accepted.clone()) {
+                for entry in &accepted {
+                    if is_hot_entry(entry) {
+                        if let Some(event_id) = entry.event_id.as_ref() {
+                            self.pending_event_ids.insert(event_id.clone());
+                        }
+                        if let Some(record_id) = entry.record_id.as_ref() {
+                            self.pending_record_ids.insert(record_id.clone());
+                        }
+                    }
+                }
                 self.pending.extend(accepted);
                 return Err(error);
             }
