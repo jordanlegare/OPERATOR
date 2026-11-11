@@ -295,6 +295,9 @@ impl Journal {
                         can_merge_stream_delta(previous, &entry)
                     }) {
                         previous.text.push_str(&entry.text);
+                        // The coalesced live bubble expires with its newest raw
+                        // delta, not with the first token of a long stream.
+                        previous.timestamp = entry.timestamp.clone();
                     } else {
                         entries.push(entry);
                     }
@@ -575,11 +578,13 @@ impl Journal {
 
         // Never let a newer entry overtake an older entry whose disk append failed.
         if !self.pending.is_empty() {
-            if let Some(event_id) = entry.event_id.as_ref() {
-                self.pending_event_ids.insert(event_id.clone());
-            }
-            if let Some(record_id) = record_id.as_ref() {
-                self.pending_record_ids.insert(record_id.clone());
+            if hot {
+                if let Some(event_id) = entry.event_id.as_ref() {
+                    self.pending_event_ids.insert(event_id.clone());
+                }
+                if let Some(record_id) = record_id.as_ref() {
+                    self.pending_record_ids.insert(record_id.clone());
+                }
             }
             self.pending.push(entry);
             return self.save_pending_locked();
@@ -625,7 +630,9 @@ impl Journal {
         }) {
             // Keep one live assistant bubble in memory while persisting every
             // raw delta as its own append-only event for crash recovery.
+            // Its hot-window timestamp follows the latest chunk.
             previous.text.push_str(&entry.text);
+            previous.timestamp = entry.timestamp.clone();
         } else {
             self.entries.push(entry);
         }
@@ -705,6 +712,10 @@ impl Journal {
             self.journal_scan_offset = 0;
             self.persisted_event_ids.clear();
             self.persisted_record_ids.clear();
+            self.hot_event_timestamps.clear();
+            self.hot_record_timestamps.clear();
+            self.cached_event_ids.clear();
+            self.cached_record_ids.clear();
         }
         let file = File::open(&self.path)?;
         let mut reader = BufReader::new(file);
