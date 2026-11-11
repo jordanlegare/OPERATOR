@@ -6,6 +6,7 @@ use std::{
 };
 
 const LEGACY_APP_DIR_NAME: &str = "streenote";
+const APP_DIR_NAME: &str = "operator";
 
 /// Move a legacy per-user application directory to its OPERATOR location.
 ///
@@ -43,11 +44,46 @@ pub fn migrate_legacy_dir(operator_dir: impl AsRef<Path>) -> PathBuf {
 /// Read the new environment name first, then accept the old name as a
 /// compatibility alias for already-installed Hermes services and hooks.
 pub fn env_var(operator_name: &str) -> Option<OsString> {
-    env::var_os(operator_name).or_else(|| {
-        operator_name
-            .strip_prefix("OPERATOR_")
-            .and_then(|suffix| env::var_os(format!("STREENOTE_{suffix}")))
-    })
+    if let Some(value) = env::var_os(operator_name) {
+        return Some(value);
+    }
+    let suffix = operator_name.strip_prefix("OPERATOR_")?;
+    let legacy = env::var_os(format!("STREENOTE_{suffix}"))?;
+    let is_path = suffix.ends_with("_DIR")
+        || suffix.ends_with("_SOCKET")
+        || suffix.ends_with("_LOG")
+        || suffix.ends_with("_INBOX");
+    if is_path {
+        return Some(migrate_legacy_path(Path::new(&legacy)).into_os_string());
+    }
+    Some(legacy)
+}
+
+/// Rewrite a legacy environment path to its OPERATOR counterpart, migrating
+/// the containing application directory and preserving the old path as a
+/// symlink where supported.
+pub fn migrate_legacy_path(path: &Path) -> PathBuf {
+    let components: Vec<_> = path.components().collect();
+    let Some(index) = components
+        .iter()
+        .position(|component| component.as_os_str() == LEGACY_APP_DIR_NAME)
+    else {
+        return path.to_path_buf();
+    };
+
+    let mut legacy_dir = PathBuf::new();
+    for component in components.iter().take(index + 1) {
+        legacy_dir.push(component.as_os_str());
+    }
+    let Some(parent) = legacy_dir.parent() else {
+        return path.to_path_buf();
+    };
+    let operator_dir = migrate_legacy_dir(parent.join(APP_DIR_NAME));
+    let mut rewritten = operator_dir;
+    for component in components.iter().skip(index + 1) {
+        rewritten.push(component.as_os_str());
+    }
+    rewritten
 }
 
 /// Export the OPERATOR environment name and its legacy alias so both new and
