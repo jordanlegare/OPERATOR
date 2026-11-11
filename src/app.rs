@@ -3663,7 +3663,7 @@ mod tests {
 
         let expired = Utc::now() - Duration::days(HOT_WINDOW_DAYS + 1);
         app.journal.entries[0].timestamp = expired.to_rfc3339();
-        app.journal.hot_record_timestamps.insert(record_id, expired);
+        app.journal.set_hot_record_timestamp_for_test(record_id, expired);
 
         assert_eq!(app.prune_hot_cache(), 1);
         assert!(app.journal.entries.is_empty());
