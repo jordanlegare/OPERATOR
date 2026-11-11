@@ -13,7 +13,10 @@ use std::{
 use chrono::{DateTime, Local, SecondsFormat};
 use serde::Deserialize;
 
-use crate::storage::{Entry, EntryKind, Journal};
+use crate::{
+    paths::{env_var, migrate_legacy_dir},
+    storage::{Entry, EntryKind, Journal},
+};
 
 const MAX_EVENT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_EVENTS_PER_POLL: usize = 64;
