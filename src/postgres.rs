@@ -1463,6 +1463,30 @@ mod tests {
             }
         }
         assert!(found_split_stream, "PostgreSQL search did not reconstruct Hermes stream deltas");
+
+        // The indexed logical body is also what the historical record viewer
+        // retrieves; it must not return only the first raw delta payload.
+        let request_id = reader
+            .fetch_record(first_delta_record.clone())
+            .expect("request reconstructed Hermes archive record");
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        let mut loaded_stream = false;
+        while std::time::Instant::now() < deadline && !loaded_stream {
+            for update in reader.drain_updates() {
+                if let Update::ArchiveRecord { request_id: result_id, result } = update {
+                    if result_id == request_id {
+                        let entry = result.expect("fetch reconstructed Hermes record");
+                        assert_eq!(entry.record_id.as_deref(), Some(first_delta_record.as_str()));
+                        assert_eq!(entry.text, "multi-part-search-token-crosses-boundary");
+                        loaded_stream = true;
+                    }
+                }
+            }
+            if !loaded_stream {
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+        assert!(loaded_stream, "reconstructed PostgreSQL record fetch timed out");
     }
 
     #[test]
