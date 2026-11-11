@@ -67,10 +67,11 @@ impl ShellSession {
             crate::hermes_bridge::HERMES_INBOX_ENV,
             crate::hermes_bridge::default_inbox_path(),
         );
+        command.env("STREENOTE_HERMES_INBOX", crate::hermes_bridge::default_inbox_path());
         // Bind Hermes' pre_llm_call capture events to this exact SSH-launched
         // OPERATOR instance. The shared gateway uses that session association
         // to return final answers to the originating terminal.
-        for variable in ["OPERATOR_HERMES_REVIEW_SESSION_DIR"] {
+        for variable in ["OPERATOR_HERMES_REVIEW_SESSION_DIR", "STREENOTE_HERMES_REVIEW_SESSION_DIR"] {
             if let Some(value) = env::var_os(variable) {
                 command.env(variable, value);
             }
@@ -414,7 +415,7 @@ fn resolve_shell_program() -> PathBuf {
         .ok()
         .and_then(|path| fs::canonicalize(path).ok());
 
-    let configured = env::var_os("OPERATOR_SHELL").or_else(|| env::var_os("SHELL"));
+    let configured = env::var_os("OPERATOR_SHELL").or_else(|| env::var_os("STREAMNOTE_SHELL")).or_else(|| env::var_os("SHELL"));
     if let Some(candidate) = configured {
         let candidate = PathBuf::from(candidate);
         let resolves_to_self = current_exe.as_ref().is_some_and(|current| {
