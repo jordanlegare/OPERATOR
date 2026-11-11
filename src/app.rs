@@ -110,6 +110,8 @@ pub struct App {
     pub search_error: Option<String>,
     pub search_snippets: HashMap<usize, String>,
     pub search_ranks: HashMap<usize, f32>,
+    pub search_kinds: HashMap<usize, String>,
+    pub search_timestamps: HashMap<usize, String>,
     pending_postgres_search: Option<(u64, String)>,
     pub active_match: Option<usize>,
     pub history: Vec<String>,
@@ -217,6 +219,8 @@ impl App {
             search_error: None,
             search_snippets: HashMap::new(),
             search_ranks: HashMap::new(),
+            search_kinds: HashMap::new(),
+            search_timestamps: HashMap::new(),
             pending_postgres_search: None,
             active_match: None,
             history,
@@ -1840,6 +1844,8 @@ impl App {
         self.search_error = None;
         self.search_snippets.clear();
         self.search_ranks.clear();
+        self.search_kinds.clear();
+        self.search_timestamps.clear();
     }
 
     /// Leave the temporary results workspace and resume the newest live row.
@@ -1882,11 +1888,15 @@ impl App {
             self.matches.clear();
             self.search_snippets.clear();
             self.search_ranks.clear();
+            self.search_kinds.clear();
+            self.search_timestamps.clear();
             for hit in result.hits {
                 if let Some(index) = index_by_record_id.get(hit.record_id.as_str()).copied() {
                     self.matches.push(index);
                     self.search_snippets.insert(index, hit.snippet);
                     self.search_ranks.insert(index, hit.rank);
+                    self.search_kinds.insert(index, hit.kind);
+                    self.search_timestamps.insert(index, hit.occurred_at);
                 }
             }
             self.search_query = Some(result.query);
@@ -1977,6 +1987,8 @@ impl App {
         self.search_error = None;
         self.search_snippets.clear();
         self.search_ranks.clear();
+        self.search_kinds.clear();
+        self.search_timestamps.clear();
         self.matches.clear();
         self.active_match = None;
         self.conversation_view = None;
