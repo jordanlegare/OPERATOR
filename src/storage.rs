@@ -861,6 +861,9 @@ impl Journal {
         // a later /save retries sync_data for the complete journal.
         file.flush()?;
         file.sync_data()?;
+        for entry in &entries {
+            self.remember_hot_identity(entry);
+        }
         self.persisted_event_ids.extend(self.pending_event_ids.drain());
         self.persisted_record_ids.extend(self.pending_record_ids.drain());
         self.journal_scan_offset = fs::metadata(&self.path)?.len();
