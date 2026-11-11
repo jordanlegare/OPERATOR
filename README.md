@@ -102,15 +102,8 @@ Install the hook script and a small gateway adapter:
 mkdir -p ~/.hermes/hooks
 install -m 700 contrib/hermes/hooks/operator-capture.py \
   ~/.hermes/hooks/operator-capture.py
-
-cat > ~/.hermes/hooks/operator-capture <<'SH'
-#!/bin/sh
-: "${XDG_DATA_HOME:=$HOME/.local/share}"
-export OPERATOR_HERMES_INBOX="${OPERATOR_HERMES_INBOX:-$XDG_DATA_HOME/operator/hermes-inbox}"
-export OPERATOR_HERMES_REVIEW_SESSION_DIR="${OPERATOR_HERMES_REVIEW_SESSION_DIR:-/run/user/$(id -u)/operator/review-sessions}"
-exec "$HOME/.hermes/hooks/operator-capture.py"
-SH
-chmod 700 ~/.hermes/hooks/operator-capture
+install -m 700 contrib/hermes/hooks/operator-capture \
+  ~/.hermes/hooks/operator-capture
 ```
 
 The wrapper explicitly supplies the fallback inbox and shared registry when hooks run in a separate systemd-managed gateway. The capture hook discovers the standard `/run/user/<uid>/operator/review-sessions` registry itself, checks legacy socket/XDG/HOME paths as well, and unions inboxes from every valid candidate instead of stopping at the first partial registry. This avoids silently limiting prompts to the fallback inbox when the gateway was started before SSH terminals. Set `OPERATOR_HERMES_CAPTURE_DEBUG=1` in the hook environment temporarily to log the number of terminal inboxes reached (never prompt text). The hook fans events out to the inbox for every currently registered OPERATOR instance. Merge the following into the existing `hooks:` block in `~/.hermes/config.yaml`. Replace `/home/jordan` with the actual account home directory. Do not create a duplicate top-level `hooks:` key if one already exists.
