@@ -472,6 +472,15 @@ impl Journal {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_hot_record_timestamp_for_test(
+        &mut self,
+        record_id: String,
+        timestamp: DateTime<Utc>,
+    ) {
+        self.hot_record_timestamps.insert(record_id, timestamp);
+    }
+
     pub fn backend_label(&self) -> &'static str {
         if self.postgres.is_some() { "PostgreSQL" } else { "JSONL" }
     }
