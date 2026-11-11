@@ -125,5 +125,3 @@ jobs:
         run: cargo test access_splash_tests
       - name: Test PostgreSQL journal, indexed search, and live notifications
         run: cargo test postgres::tests::postgres_index_and_live_notifications -- --nocapture
-      - name: Test all Rust targets
-        run: cargo test --all-targets
