@@ -1425,10 +1425,15 @@ fn run_terminal_workspace_loop(
         .open("/dev/tty")?;
     let mut pending_escape = Vec::with_capacity(8);
     let mut pending_since: Option<Instant> = None;
+    let mut last_hot_cache_prune = Instant::now();
     let mut last_resize_check = Instant::now();
     let mut last_size = terminal.size()?;
 
     loop {
+        if last_hot_cache_prune.elapsed() >= Duration::from_secs(60) {
+            app.prune_hot_cache();
+            last_hot_cache_prune = Instant::now();
+        }
         app.expire_hermes_review_if_needed();
         review_server.set_enabled(app.review_hermes_responses);
         if app.pending_review.is_none() {
@@ -1531,7 +1536,12 @@ fn run_workspace_review_overlay(
     terminal.clear()?;
 
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let mut last_hot_cache_prune = Instant::now();
         while app.pending_review.is_some() {
+            if last_hot_cache_prune.elapsed() >= Duration::from_secs(60) {
+                app.prune_hot_cache();
+                last_hot_cache_prune = Instant::now();
+            }
             app.expire_hermes_review_if_needed();
             if app.pending_review.is_none() {
                 break;
@@ -1704,7 +1714,12 @@ fn run_terminal_workspace_loop(
     hermes_bridge: &mut HermesBridge,
     review_server: &mut HermesReviewServer,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let mut last_hot_cache_prune = Instant::now();
     loop {
+        if last_hot_cache_prune.elapsed() >= Duration::from_secs(60) {
+            app.prune_hot_cache();
+            last_hot_cache_prune = Instant::now();
+        }
         app.expire_hermes_review_if_needed();
         review_server.set_enabled(app.review_hermes_responses);
         if app.pending_review.is_none() {
