@@ -106,7 +106,7 @@ impl ArchiveSearcher {
 
         let mut combined: Option<Entry> = None;
         for line in bytes.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()) {
-            let Ok(mut entry) = serde_json::from_slice::<Entry>(line) else {
+            let Ok(entry) = serde_json::from_slice::<Entry>(line) else {
                 continue;
             };
             if let Some(previous) = combined.as_mut() {
@@ -390,7 +390,7 @@ mod tests {
         path::PathBuf,
         sync::atomic::{AtomicUsize, Ordering},
         thread,
-        time::{Duration, SystemTime, UNIX_EPOCH},
+        time::Duration,
     };
 
     static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
