@@ -217,7 +217,7 @@ fn scan_archive(
         line_number = line_number.saturating_add(1);
 
         // A crash can leave a partial final append. Ignore that incomplete row.
-        if !buffer.ends_with(b"\\n") {
+        if !buffer.ends_with(b"\n") {
             break;
         }
         let Ok(entry) = serde_json::from_slice::<Entry>(&buffer) else {
@@ -449,6 +449,28 @@ mod tests {
         assert_eq!(result.hits.len(), 1);
         let loaded = searcher.read_hit(&result.hits[0]).expect("read merged archive entry");
         assert_eq!(loaded.text, "archive-cross-delta-needle");
+
+        drop(searcher);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn huge_offsets_do_not_require_offset_sized_hit_buffers() {
+        let path = test_path();
+        let mut bytes = Vec::new();
+        for index in 0..8 {
+            let entry = Entry::with_kind(EntryKind::Note, format!("offset archive match {index}"));
+            bytes.extend(serde_json::to_vec(&entry).expect("serialize record"));
+            bytes.push(b'\n');
+        }
+        fs::write(&path, bytes).expect("write archive");
+        let searcher = ArchiveSearcher::new(path.clone()).expect("start search worker");
+
+        searcher.search(4, "offset limit:2 offset:1000000000".to_string())
+            .expect("queue distant archive page");
+        let result = wait_for_result(&searcher, 4);
+        assert_eq!(result.total, 8);
+        assert!(result.hits.is_empty());
 
         drop(searcher);
         let _ = fs::remove_file(path);
