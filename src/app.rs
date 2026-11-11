@@ -3417,6 +3417,60 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+
+    #[test]
+    fn postgres_search_results_workspace_returns_to_live_tail_on_escape() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        app.journal.append(Entry::with_kind(EntryKind::Note, "older result".to_string())).expect("append older");
+        app.journal.append(Entry::with_kind(EntryKind::Note, "newest live row".to_string())).expect("append newest");
+        app.feed_viewport_height = 1;
+        app.search_view = true;
+        app.search_query = Some("result".to_string());
+        app.matches = vec![0];
+        app.active_match = Some(0);
+        app.follow_tail = false;
+        app.scroll_top = 0;
+
+        app.exit_search_view();
+
+        assert!(!app.search_view);
+        assert!(app.search_query.is_none());
+        assert!(app.matches.is_empty());
+        assert!(app.follow_tail);
+        assert_eq!(app.current_top(), 1);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn ranked_search_results_keep_database_order_without_sorted_transcript_indices() {
+        use crate::storage::{Entry, EntryKind};
+
+        let (mut app, path) = test_app();
+        for text in ["result zero", "result one", "result two"] {
+            app.journal.append(Entry::with_kind(EntryKind::Note, text.to_string())).expect("append result");
+        }
+        app.search_view = true;
+        app.matches = vec![2, 0, 1];
+        app.search_total = 3;
+        app.feed_viewport_height = 4;
+        app.select_search_result(1);
+
+        assert_eq!(app.active_match, Some(1));
+        assert_eq!(app.selected_row, Some(0));
+        assert!(app.is_match(0));
+        assert!(app.is_match(1));
+        assert!(app.is_match(2));
+
+        app.next_match();
+        assert_eq!(app.active_match, Some(2));
+        assert_eq!(app.selected_row, Some(1));
+        app.previous_match();
+        assert_eq!(app.active_match, Some(1));
+        assert_eq!(app.selected_row, Some(0));
+        let _ = fs::remove_file(path);
+    }
 }
 
 
