@@ -2475,6 +2475,17 @@ mod tests {
         (App::new(journal, String::new()), path)
     }
 
+    fn wait_for_archive_search(app: &mut App) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while app.pending_archive_search.is_some() && Instant::now() < deadline {
+            app.apply_archive_search_results();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        app.apply_archive_search_results();
+        assert!(app.pending_archive_search.is_none(), "archive search did not finish");
+        assert!(app.search_error.is_none(), "archive search failed: {:?}", app.search_error);
+    }
+
     #[test]
     fn edited_hermes_response_is_returned_through_the_pending_decision_channel() {
         use crate::hermes_review::{ReviewDecision, ReviewRequest};
@@ -3364,7 +3375,7 @@ mod tests {
     }
 
     #[test]
-    fn search_indexes_full_hermes_message_bodies_and_opens_the_matching_thread() {
+    fn archive_search_indexes_full_hermes_message_bodies_and_opens_records_on_demand() {
         use crate::storage::{Entry, EntryKind};
 
         let (mut app, path) = test_app();
@@ -3386,22 +3397,25 @@ mod tests {
             let mut entry = Entry::with_kind(kind, format!("buried content: {text}"));
             entry.conversation_id = Some("deep-search-session".to_string());
             entry.turn_id = Some("turn-1".to_string());
-            let expected_index = app.journal.entries.len();
             app.journal.append(entry).expect("append deep Hermes event");
 
             app.search(text);
-            assert_eq!(app.matches, vec![expected_index], "search should find {kind:?}");
+            wait_for_archive_search(&mut app);
+            assert_eq!(app.search_hits.len(), 1, "search should find {kind:?}");
             assert_eq!(app.active_match, Some(0));
-            assert_eq!(app.conversation_focus_entry, Some(expected_index));
-            assert!(matches!(app.conversation_view, Some(ConversationView::Thread { .. })));
-            assert!(app.is_active_match(expected_index));
+            app.open_active_search_result();
+            assert!(
+                app.archive_detail_entry.as_ref().is_some_and(|entry| entry.text.contains(text)),
+                "opening an archive hit must load the full {kind:?} record"
+            );
+            app.archive_detail_entry = None;
         }
 
         let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn search_matches_a_phrase_split_across_live_stream_chunks_once() {
+    fn archive_search_matches_a_phrase_split_across_live_stream_chunks_once() {
         use crate::storage::{Entry, EntryKind};
 
         let (mut app, path) = test_app();
@@ -3414,27 +3428,29 @@ mod tests {
         first.conversation_id = Some("stream-search-session".to_string());
         first.turn_id = Some("stream-turn".to_string());
         first.iteration = Some(0);
-        let first_index = app.journal.entries.len();
         app.journal.append(first).expect("append first stream chunk");
 
         let mut second = Entry::with_kind(EntryKind::HermesStreamDelta, "needle is present".to_string());
         second.conversation_id = Some("stream-search-session".to_string());
         second.turn_id = Some("stream-turn".to_string());
         second.iteration = Some(0);
-        let second_index = app.journal.entries.len();
         app.journal.append(second).expect("append second stream chunk");
 
         app.search("cross-chunk-needle");
-        assert_eq!(app.matches, vec![first_index]);
-        assert!(!app.is_match(second_index));
-        assert_eq!(app.conversation_focus_entry, Some(first_index));
-        assert!(matches!(app.conversation_view, Some(ConversationView::Thread { .. })));
+        wait_for_archive_search(&mut app);
+        assert_eq!(app.search_hits.len(), 1);
+        assert_eq!(app.archive_search_hits[0].line_number, 2);
+        app.open_active_search_result();
+        assert_eq!(
+            app.archive_detail_entry.as_ref().map(|entry| entry.text.as_str()),
+            Some("cross-chunk-needle is present")
+        );
 
         let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn search_navigation_switches_between_full_threads_and_normal_journal_rows() {
+    fn archive_search_navigation_is_newest_first_and_covers_all_entry_kinds() {
         use crate::storage::{Entry, EntryKind};
 
         let (mut app, path) = test_app();
@@ -3457,27 +3473,29 @@ mod tests {
             .expect("append terminal output");
 
         app.search("needle");
-        assert_eq!(app.matches, vec![0, 1, 2, 3]);
-        assert_eq!(app.active_match, Some(3));
-        assert_eq!(app.conversation_view, None);
+        wait_for_archive_search(&mut app);
+        assert_eq!(app.search_hits.len(), 4);
+        assert_eq!(app.matches, vec![3, 2, 1, 0]);
+        assert_eq!(app.active_match, Some(0));
+        assert_eq!(app.selected_row, Some(3));
+
+        app.next_match();
+        assert_eq!(app.active_match, Some(1));
+        assert_eq!(app.selected_row, Some(2));
+
+        app.next_match();
+        assert_eq!(app.active_match, Some(2));
+        assert_eq!(app.selected_row, Some(1));
 
         app.previous_match();
-        assert_eq!(app.matches[app.active_match.unwrap()], 2);
-        assert!(matches!(app.conversation_view, Some(ConversationView::Thread { .. })));
-
-        app.previous_match();
-        assert_eq!(app.matches[app.active_match.unwrap()], 1);
-        assert!(matches!(app.conversation_view, Some(ConversationView::Thread { .. })));
-
-        app.previous_match();
-        assert_eq!(app.matches[app.active_match.unwrap()], 0);
-        assert_eq!(app.conversation_view, None);
+        assert_eq!(app.active_match, Some(1));
+        assert_eq!(app.selected_row, Some(2));
 
         let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn search_and_n_previous_navigate_select_the_matching_transcript_row() {
+    fn archive_search_and_n_previous_navigate_hot_transcript_rows() {
         use crate::storage::{Entry, EntryKind};
 
         let (mut app, path) = test_app();
@@ -3494,19 +3512,18 @@ mod tests {
         app.feed_viewport_height = 2;
 
         app.search("needle");
-        assert_eq!(app.active_match, Some(1));
+        wait_for_archive_search(&mut app);
+        assert_eq!(app.active_match, Some(0));
         assert_eq!(app.selected_row, Some(3));
-        assert!(app.is_active_match(3));
+        assert_eq!(app.search_total, 2);
 
         app.next_match();
-        assert_eq!(app.active_match, Some(0));
+        assert_eq!(app.active_match, Some(1));
         assert_eq!(app.selected_row, Some(0));
-        assert!(app.is_active_match(0));
 
         app.previous_match();
-        assert_eq!(app.active_match, Some(1));
+        assert_eq!(app.active_match, Some(0));
         assert_eq!(app.selected_row, Some(3));
-        assert!(app.is_active_match(3));
 
         let _ = fs::remove_file(path);
     }
