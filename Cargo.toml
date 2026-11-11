@@ -1,5 +1,5 @@
 [package]
-name = "streenote"
+name = "operator"
 version = "0.1.0"
 edition = "2021"
 description = "An unwrapped, append-only terminal note stream with full-cache search"
