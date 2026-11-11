@@ -2022,11 +2022,7 @@ impl App {
         self.search_page_offset = 0;
         self.search_page_limit = found.len().max(1);
         self.matches = found.iter().map(|(index, _)| *index).collect();
-        self.search_snippets = found.into_iter().map(|(index, text)| {
-            let snippet = text.chars().take(260).collect::<String>().replace('\n', " ");
-            (index, snippet)
-        }).collect();
-        self.search_ranks.clear();
+        self.matches = found.into_iter().map(|(index, _)| index).collect();
 
         if !self.matches.is_empty() {
             let latest = self.matches.len() - 1;
