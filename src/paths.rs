@@ -3,10 +3,8 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
-pub const APP_DIR_NAME: &str = "operator";
 const LEGACY_APP_DIR_NAME: &str = "streenote";
 
 /// Move a legacy per-user application directory to its OPERATOR location.
