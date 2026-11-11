@@ -276,7 +276,7 @@ impl Journal {
                         if !persisted_event_ids.insert(event_id.clone()) {
                             continue;
                         }
-                        hot_event_timestamps.insert(event_id.clone(), occurred_at);
+                        hot_event_timestamps.insert(event_id.clone(), occurred_at.clone());
                     }
                     if let Some(record_id) = entry.record_id.as_ref() {
                         if !persisted_record_ids.insert(record_id.clone()) {
@@ -418,8 +418,8 @@ impl Journal {
             self.total_text_bytes = self.entries.iter().map(|entry| entry.text.len()).sum();
             // Expire identity metadata incrementally. No full archive scan is
             // needed when old rows cross the 30-day boundary.
-            self.hot_event_timestamps.retain(|_, timestamp| *timestamp >= cutoff);
-            self.hot_record_timestamps.retain(|_, timestamp| *timestamp >= cutoff);
+            self.hot_event_timestamps.retain(|_, timestamp| timestamp >= &cutoff);
+            self.hot_record_timestamps.retain(|_, timestamp| timestamp >= &cutoff);
             self.persisted_event_ids = self.hot_event_timestamps.keys().cloned().collect();
             self.persisted_record_ids = self.hot_record_timestamps.keys().cloned().collect();
             self.cached_event_ids = self.persisted_event_ids.clone();
@@ -436,7 +436,7 @@ impl Journal {
         }
         let timestamp = entry_timestamp_utc(entry);
         if let Some(event_id) = entry.event_id.as_ref() {
-            self.hot_event_timestamps.insert(event_id.clone(), timestamp);
+            self.hot_event_timestamps.insert(event_id.clone(), timestamp.clone());
         }
         if let Some(record_id) = entry.record_id.as_ref() {
             self.hot_record_timestamps.insert(record_id.clone(), timestamp);
