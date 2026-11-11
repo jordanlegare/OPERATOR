@@ -10,6 +10,7 @@ use ratatui::layout::Rect;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
+    archive::ArchiveSearchHit,
     conversations::{build_threads, collapse_live_streams, is_hermes_event, ConversationThread},
     hermes_review::{
         diagnostics_summary, ReviewDecision, ReviewRequest, MAX_REVIEW_BYTES,
@@ -112,6 +113,14 @@ pub struct App {
     pub search_hits: Vec<crate::postgres::SearchHit>,
     /// Local transcript index corresponding to each hit, when this process has it cached.
     pub search_hit_entry_indices: Vec<Option<usize>>,
+    /// Byte ranges into the complete JSONL archive for local search results.
+    pub archive_search_hits: Vec<ArchiveSearchHit>,
+    pending_archive_search: Option<u64>,
+    pending_postgres_archive_record: Option<u64>,
+    next_archive_search_id: u64,
+    /// Full historical record loaded only while its search result is open.
+    pub archive_detail_entry: Option<Entry>,
+    pub archive_detail_line_number: usize,
     pending_postgres_search: Option<(u64, String)>,
     pub active_match: Option<usize>,
     pub history: Vec<String>,
@@ -219,6 +228,12 @@ impl App {
             search_error: None,
             search_hits: Vec::new(),
             search_hit_entry_indices: Vec::new(),
+            archive_search_hits: Vec::new(),
+            pending_archive_search: None,
+            pending_postgres_archive_record: None,
+            next_archive_search_id: 1,
+            archive_detail_entry: None,
+            archive_detail_line_number: 0,
             pending_postgres_search: None,
             active_match: None,
             history,
@@ -256,6 +271,46 @@ impl App {
             scp_sftp_passthrough: settings.scp_sftp_passthrough,
             should_quit: false,
         }
+    }
+
+    pub fn prune_hot_cache(&mut self) -> usize {
+        let removed = self.journal.prune_hot_cache();
+        if removed > 0 {
+            self.selected_row = None;
+            self.message_view_index = None;
+            self.conversation_view = None;
+            self.conversation_focus_entry = None;
+
+            if self.search_view {
+                // Archive results and a loaded historical detail are independent
+                // of the hot transcript. Keep them open, but refresh links to
+                // any search rows that still happen to be in the recent cache.
+                let index_by_record_id: HashMap<&str, usize> = self.journal.entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, entry)| {
+                        entry.record_id.as_deref().map(|record_id| (record_id, index))
+                    })
+                    .collect();
+                self.search_hit_entry_indices = self.search_hits
+                    .iter()
+                    .map(|hit| index_by_record_id.get(hit.record_id.as_str()).copied())
+                    .collect();
+                self.matches = self.search_hit_entry_indices.iter().flatten().copied().collect();
+                self.selected_row = self.active_match
+                    .and_then(|position| self.search_hit_entry_indices.get(position).copied().flatten());
+            } else {
+                self.archive_detail_entry = None;
+                self.clear_search();
+                self.jump_to_latest();
+            }
+
+            self.status = format!(
+                "Pruned {removed} expired row(s); transcript retains the trailing {} days. Archive history and open search results are preserved.",
+                crate::storage::HOT_WINDOW_DAYS
+            );
+        }
+        removed
     }
 
     pub fn current_top(&self) -> usize {
@@ -1794,8 +1849,7 @@ impl App {
                 };
                 match self.journal.export_plain_text(&destination) {
                     Ok(()) => self.status = format!(
-                        "Exported {} entries to {}",
-                        self.journal.entries.len(),
+                        "Exported the complete journal archive to {}",
                         destination.display()
                     ),
                     Err(error) => self.status = format!("Export failed: {error}"),
@@ -1842,6 +1896,11 @@ impl App {
         self.search_error = None;
         self.search_hits.clear();
         self.search_hit_entry_indices.clear();
+        self.archive_search_hits.clear();
+        self.pending_archive_search = None;
+        self.pending_postgres_archive_record = None;
+        self.archive_detail_entry = None;
+        self.archive_detail_line_number = 0;
     }
 
     /// Leave the temporary results workspace and resume the newest live row.
@@ -1849,6 +1908,7 @@ impl App {
         self.clear_search();
         self.conversation_view = None;
         self.message_view_index = None;
+        self.archive_detail_entry = None;
         self.jump_to_latest();
         self.status = "Returned to LIVE transcript.".to_string();
     }
@@ -1919,45 +1979,97 @@ impl App {
         }
     }
 
-    /// Return human-readable transcript text; stream fragments are collapsed
-    /// into their logical Hermes message before the local fallback searches.
-    fn searchable_entry_texts(&self) -> Vec<(usize, String)> {
-        let mut searchable = self
-            .journal
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| !is_hermes_event(entry.kind))
-            .map(|(index, entry)| (index, entry.text.clone()))
-            .collect::<Vec<_>>();
-
-        for thread in self.conversation_threads().iter() {
-            let entries = thread
-                .entries
-                .iter()
-                .filter_map(|index| self.journal.entries.get(*index).map(|entry| (*index, entry)))
-                .collect::<Vec<_>>();
-            let collapsed = collapse_live_streams(&entries);
-
-            for (index, entry) in entries {
-                if matches!(entry.kind, EntryKind::HermesStreamStart | EntryKind::HermesStreamEnd)
-                    || collapsed.hidden_delta_indices.contains(&index)
-                    || collapsed.replaced_assistant_indices.contains(&index)
-                {
-                    continue;
+    /// Apply the result of a one-record PostgreSQL archive fetch.
+    /// Only the selected historical payload is transferred into TUI memory.
+    pub fn apply_postgres_archive_record_results(&mut self) {
+        for (request_id, result) in self.journal.drain_postgres_archive_results() {
+            if self.pending_postgres_archive_record != Some(request_id) {
+                continue;
+            }
+            self.pending_postgres_archive_record = None;
+            match result {
+                Ok(entry) => {
+                    self.archive_detail_line_number = 0;
+                    self.archive_detail_entry = Some(entry);
+                    self.message_view_scroll = 0;
+                    self.status = "Loaded full historical PostgreSQL record. Esc returns to archive results.".to_string();
                 }
-
-                let text = collapsed
-                    .text_by_first_index
-                    .get(&index)
-                    .cloned()
-                    .unwrap_or_else(|| entry.text.clone());
-                searchable.push((index, text));
+                Err(error) => {
+                    self.status = format!("Could not load historical PostgreSQL record: {error}");
+                }
             }
         }
+    }
 
-        searchable.sort_unstable_by_key(|(index, _)| *index);
-        searchable
+    /// Apply asynchronous JSONL archive search results on the UI thread.
+    /// Results contain byte ranges and snippets; full records are loaded only
+    /// when a result is opened.
+    pub fn apply_archive_search_results(&mut self) {
+        for result in self.journal.drain_archive_search_results() {
+            if self.pending_archive_search != Some(result.request_id) {
+                continue;
+            }
+            self.pending_archive_search = None;
+
+            if let Some(error) = result.error {
+                self.matches.clear();
+                self.search_hits.clear();
+                self.archive_search_hits.clear();
+                self.active_match = None;
+                self.search_error = Some(error.clone());
+                self.status = format!("Archive search failed: {error}");
+                continue;
+            }
+
+            let index_by_record_id: HashMap<&str, usize> = self.journal.entries
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entry)| {
+                    entry.record_id.as_deref().map(|record_id| (record_id, index))
+                })
+                .collect();
+
+            self.archive_search_hits = result.hits;
+            self.search_hits = self.archive_search_hits
+                .iter()
+                .map(|hit| crate::postgres::SearchHit {
+                    record_id: hit.record_id.clone(),
+                    kind: hit.kind.clone(),
+                    occurred_at: hit.occurred_at.clone(),
+                    snippet: hit.snippet.clone(),
+                    rank: 1.0,
+                })
+                .collect();
+            self.search_hit_entry_indices = self.archive_search_hits
+                .iter()
+                .map(|hit| index_by_record_id.get(hit.record_id.as_str()).copied())
+                .collect();
+            self.matches = self.search_hit_entry_indices.iter().flatten().copied().collect();
+            self.search_query = Some(result.query);
+            self.search_total = result.total;
+            self.search_page_offset = result.offset;
+            self.search_page_limit = result.limit;
+            self.search_mode_label = "LOCAL JSONL ARCHIVE".to_string();
+            self.search_error = None;
+            self.search_scroll = 0;
+            self.active_match = None;
+            self.conversation_view = None;
+            self.conversation_focus_entry = None;
+
+            if !self.search_hits.is_empty() {
+                self.select_search_result(0);
+                self.status = format!(
+                    "Searched the complete JSONL archive · {} result(s) on this page · {} total. Enter opens a full record; Esc returns LIVE.",
+                    self.search_hits.len(),
+                    self.search_total
+                );
+            } else {
+                self.status = format!(
+                    "No archive matches for {:?}. Searched the complete JSONL history.",
+                    self.search_query.as_deref().unwrap_or("")
+                );
+            }
+        }
     }
 
     fn search(&mut self, query: &str) {
@@ -1974,6 +2086,9 @@ impl App {
         self.search_error = None;
         self.search_hits.clear();
         self.search_hit_entry_indices.clear();
+        self.archive_search_hits.clear();
+        self.archive_detail_entry = None;
+        self.pending_postgres_archive_record = None;
         self.matches.clear();
         self.active_match = None;
         self.conversation_view = None;
@@ -1982,14 +2097,17 @@ impl App {
         match self.journal.search_postgres(query.to_string()) {
             Ok(Some(request_id)) => {
                 self.pending_postgres_search = Some((request_id, query.to_string()));
+                self.pending_archive_search = None;
                 self.search_query = Some(query.to_string());
-                self.search_mode_label = "POSTGRESQL".to_string();
+                self.search_mode_label = "POSTGRESQL ARCHIVE".to_string();
                 self.search_total = 0;
                 self.search_page_offset = 0;
-                self.status = format!("Searching PostgreSQL for {:?}… Esc returns LIVE.", query);
+                self.status = format!("Searching the complete PostgreSQL archive for {:?}… Esc returns LIVE.", query);
                 return;
             }
-            Ok(None) => { self.search_view = false; }
+            Ok(None) => {
+                self.pending_postgres_search = None;
+            }
             Err(error) => {
                 self.search_error = Some(error.to_string());
                 self.status = format!("PostgreSQL search failed: {error}");
@@ -1997,48 +2115,25 @@ impl App {
             }
         }
 
-        let local_query = query.split_whitespace()
-            .filter(|token| !token.starts_with("--") && !token.contains(':'))
-            .collect::<Vec<_>>()
-            .join(" ")
-            .trim_matches('"')
-            .trim_matches('\'')
-            .to_string();
-        let needle = if local_query.is_empty() { query } else { local_query.as_str() };
-        let needle_lower = needle.to_lowercase();
-        let found = self
-            .searchable_entry_texts()
-            .into_iter()
-            .filter_map(|(index, text)| {
-                text.to_lowercase()
-                    .contains(needle_lower.as_str())
-                    .then_some((index, text))
-            })
-            .collect::<Vec<_>>();
-
-        self.search_query = Some(needle.to_string());
-        self.search_mode_label = "LOCAL JSONL SUBSTRING".to_string();
-        self.search_total = found.len();
-        self.search_page_offset = 0;
-        self.search_page_limit = found.len().max(1);
-        self.matches = found.iter().map(|(index, _)| *index).collect();
-        self.matches = found.into_iter().map(|(index, _)| index).collect();
-
-        if !self.matches.is_empty() {
-            let latest = self.matches.len() - 1;
-            self.activate_match(latest);
-            self.status = format!(
-                "Found {} local substring hit(s). Configure PostgreSQL for ranked full-text search.",
-                self.matches.len()
-            );
-        } else {
-            self.status = format!(
-                "No local matches for {:?} in {} journal entries or Hermes conversation messages. Esc returns LIVE.",
-                needle,
-                self.journal.entries.len()
-            );
+        let request_id = self.next_archive_search_id;
+        self.next_archive_search_id = self.next_archive_search_id.wrapping_add(1).max(1);
+        match self.journal.search_archive(request_id, query.to_string()) {
+            Ok(()) => {
+                self.pending_archive_search = Some(request_id);
+                self.search_query = Some(query.to_string());
+                self.search_mode_label = "LOCAL JSONL ARCHIVE".to_string();
+                self.search_total = 0;
+                self.search_page_offset = 0;
+                self.search_page_limit = 200;
+                self.status = format!("Searching the complete JSONL archive for {:?}… Esc returns LIVE.", query);
+            }
+            Err(error) => {
+                self.search_error = Some(error.to_string());
+                self.status = format!("Could not start archive search: {error}");
+            }
         }
     }
+
 
     /// Select a result without opening a Hermes conversation overlay.
     /// Select a result using PostgreSQL ranking order, including records
@@ -2076,8 +2171,38 @@ impl App {
 
     pub fn open_active_search_result(&mut self) {
         let Some(position) = self.active_match else { return; };
+
+        if let Some(hit) = self.archive_search_hits.get(position).cloned() {
+            match self.journal.load_archive_hit(&hit) {
+                Ok(entry) => {
+                    self.archive_detail_line_number = hit.line_number;
+                    self.archive_detail_entry = Some(entry);
+                    self.message_view_scroll = 0;
+                    self.message_view_index = None;
+                }
+                Err(error) => {
+                    self.status = format!("Could not load archived record at line {}: {error}", hit.line_number);
+                }
+            }
+            return;
+        }
+
         let Some(index) = self.search_hit_entry_indices.get(position).copied().flatten() else {
-            self.status = "This PostgreSQL record belongs to another live terminal. Its indexed snippet is shown here; its full context is not mirrored into this session.".to_string();
+            if self.journal.backend_label() != "PostgreSQL" {
+                self.status = "PostgreSQL archive is not configured for this terminal; this record belongs to another live terminal. Its indexed snippet is shown here.".to_string();
+                return;
+            }
+            if let Some(hit) = self.search_hits.get(position) {
+                match self.journal.fetch_postgres_archive_record(hit.record_id.clone()) {
+                    Ok(request_id) => {
+                        self.pending_postgres_archive_record = Some(request_id);
+                        self.status = format!("Loading full PostgreSQL archive record {}…", hit.record_id);
+                    }
+                    Err(error) => {
+                        self.status = format!("Could not request PostgreSQL archive record: {error}");
+                    }
+                }
+            }
             return;
         };
         let is_hermes_hit = self.journal.entries.get(index)
@@ -2093,8 +2218,9 @@ impl App {
     }
 
     pub fn pending_postgres_search_is_pending(&self) -> bool {
-        self.pending_postgres_search.is_some()
+        self.pending_postgres_search.is_some() || self.pending_archive_search.is_some()
     }
+
 
     pub fn next_match(&mut self) {
         if self.search_view {
@@ -2409,6 +2535,17 @@ mod tests {
         let _ = fs::remove_file(&path);
         let journal = Journal::open(path.clone()).expect("open test journal");
         (App::new(journal, String::new()), path)
+    }
+
+    fn wait_for_archive_search(app: &mut App) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while app.pending_archive_search.is_some() && Instant::now() < deadline {
+            app.apply_archive_search_results();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        app.apply_archive_search_results();
+        assert!(app.pending_archive_search.is_none(), "archive search did not finish");
+        assert!(app.search_error.is_none(), "archive search failed: {:?}", app.search_error);
     }
 
     #[test]
@@ -3300,7 +3437,7 @@ mod tests {
     }
 
     #[test]
-    fn search_indexes_full_hermes_message_bodies_and_opens_the_matching_thread() {
+    fn archive_search_indexes_full_hermes_message_bodies_and_opens_records_on_demand() {
         use crate::storage::{Entry, EntryKind};
 
         let (mut app, path) = test_app();
@@ -3322,22 +3459,25 @@ mod tests {
             let mut entry = Entry::with_kind(kind, format!("buried content: {text}"));
             entry.conversation_id = Some("deep-search-session".to_string());
             entry.turn_id = Some("turn-1".to_string());
-            let expected_index = app.journal.entries.len();
             app.journal.append(entry).expect("append deep Hermes event");
 
             app.search(text);
-            assert_eq!(app.matches, vec![expected_index], "search should find {kind:?}");
+            wait_for_archive_search(&mut app);
+            assert_eq!(app.search_hits.len(), 1, "search should find {kind:?}");
             assert_eq!(app.active_match, Some(0));
-            assert_eq!(app.conversation_focus_entry, Some(expected_index));
-            assert!(matches!(app.conversation_view, Some(ConversationView::Thread { .. })));
-            assert!(app.is_active_match(expected_index));
+            app.open_active_search_result();
+            assert!(
+                app.archive_detail_entry.as_ref().is_some_and(|entry| entry.text.contains(text)),
+                "opening an archive hit must load the full {kind:?} record"
+            );
+            app.archive_detail_entry = None;
         }
 
         let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn search_matches_a_phrase_split_across_live_stream_chunks_once() {
+    fn archive_search_matches_a_phrase_split_across_live_stream_chunks_once() {
         use crate::storage::{Entry, EntryKind};
 
         let (mut app, path) = test_app();
@@ -3350,27 +3490,29 @@ mod tests {
         first.conversation_id = Some("stream-search-session".to_string());
         first.turn_id = Some("stream-turn".to_string());
         first.iteration = Some(0);
-        let first_index = app.journal.entries.len();
         app.journal.append(first).expect("append first stream chunk");
 
         let mut second = Entry::with_kind(EntryKind::HermesStreamDelta, "needle is present".to_string());
         second.conversation_id = Some("stream-search-session".to_string());
         second.turn_id = Some("stream-turn".to_string());
         second.iteration = Some(0);
-        let second_index = app.journal.entries.len();
         app.journal.append(second).expect("append second stream chunk");
 
         app.search("cross-chunk-needle");
-        assert_eq!(app.matches, vec![first_index]);
-        assert!(!app.is_match(second_index));
-        assert_eq!(app.conversation_focus_entry, Some(first_index));
-        assert!(matches!(app.conversation_view, Some(ConversationView::Thread { .. })));
+        wait_for_archive_search(&mut app);
+        assert_eq!(app.search_hits.len(), 1);
+        assert_eq!(app.archive_search_hits[0].line_number, 2);
+        app.open_active_search_result();
+        assert_eq!(
+            app.archive_detail_entry.as_ref().map(|entry| entry.text.as_str()),
+            Some("cross-chunk-needle is present")
+        );
 
         let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn search_navigation_switches_between_full_threads_and_normal_journal_rows() {
+    fn archive_search_navigation_is_newest_first_and_covers_all_entry_kinds() {
         use crate::storage::{Entry, EntryKind};
 
         let (mut app, path) = test_app();
@@ -3393,27 +3535,29 @@ mod tests {
             .expect("append terminal output");
 
         app.search("needle");
-        assert_eq!(app.matches, vec![0, 1, 2, 3]);
-        assert_eq!(app.active_match, Some(3));
-        assert_eq!(app.conversation_view, None);
+        wait_for_archive_search(&mut app);
+        assert_eq!(app.search_hits.len(), 4);
+        assert_eq!(app.matches, vec![3, 2, 1, 0]);
+        assert_eq!(app.active_match, Some(0));
+        assert_eq!(app.selected_row, Some(3));
+
+        app.next_match();
+        assert_eq!(app.active_match, Some(1));
+        assert_eq!(app.selected_row, Some(2));
+
+        app.next_match();
+        assert_eq!(app.active_match, Some(2));
+        assert_eq!(app.selected_row, Some(1));
 
         app.previous_match();
-        assert_eq!(app.matches[app.active_match.unwrap()], 2);
-        assert!(matches!(app.conversation_view, Some(ConversationView::Thread { .. })));
-
-        app.previous_match();
-        assert_eq!(app.matches[app.active_match.unwrap()], 1);
-        assert!(matches!(app.conversation_view, Some(ConversationView::Thread { .. })));
-
-        app.previous_match();
-        assert_eq!(app.matches[app.active_match.unwrap()], 0);
-        assert_eq!(app.conversation_view, None);
+        assert_eq!(app.active_match, Some(1));
+        assert_eq!(app.selected_row, Some(2));
 
         let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn search_and_n_previous_navigate_select_the_matching_transcript_row() {
+    fn archive_search_and_n_previous_navigate_hot_transcript_rows() {
         use crate::storage::{Entry, EntryKind};
 
         let (mut app, path) = test_app();
@@ -3430,26 +3574,25 @@ mod tests {
         app.feed_viewport_height = 2;
 
         app.search("needle");
-        assert_eq!(app.active_match, Some(1));
+        wait_for_archive_search(&mut app);
+        assert_eq!(app.active_match, Some(0));
         assert_eq!(app.selected_row, Some(3));
-        assert!(app.is_active_match(3));
+        assert_eq!(app.search_total, 2);
 
         app.next_match();
-        assert_eq!(app.active_match, Some(0));
+        assert_eq!(app.active_match, Some(1));
         assert_eq!(app.selected_row, Some(0));
-        assert!(app.is_active_match(0));
 
         app.previous_match();
-        assert_eq!(app.active_match, Some(1));
+        assert_eq!(app.active_match, Some(0));
         assert_eq!(app.selected_row, Some(3));
-        assert!(app.is_active_match(3));
 
         let _ = fs::remove_file(path);
     }
 
 
     #[test]
-    fn postgres_search_workspace_retains_remote_hits_without_local_rows() {
+    fn remote_postgres_search_hit_requests_full_record_from_the_database() {
         let (mut app, path) = test_app();
         app.search_view = true;
         app.search_total = 1;
@@ -3468,7 +3611,8 @@ mod tests {
         assert!(app.selected_row.is_none());
         assert_eq!(app.search_hits[0].snippet, "remote journal result");
         app.open_active_search_result();
-        assert!(app.status.contains("another live terminal"));
+        assert!(app.status.contains("PostgreSQL archive is not configured"));
+        assert!(app.archive_detail_entry.is_none());
         let _ = fs::remove_file(path);
     }
 
@@ -3494,6 +3638,44 @@ mod tests {
         assert!(app.matches.is_empty());
         assert!(app.follow_tail);
         assert_eq!(app.current_top(), 1);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn hot_cache_expiry_preserves_full_archive_search_and_open_historical_detail() {
+        use crate::storage::{Entry, EntryKind, HOT_WINDOW_DAYS};
+        use chrono::{Duration, Utc};
+
+        let (mut app, path) = test_app();
+        let entry = Entry::with_kind(
+            EntryKind::Note,
+            "historical needle preserved after cache expiry".to_string(),
+        );
+        let record_id = entry.record_id.clone().expect("record ID");
+        app.journal.append(entry).expect("append searchable entry");
+
+        app.search("historical needle");
+        wait_for_archive_search(&mut app);
+        assert!(app.search_view);
+        assert_eq!(app.search_hits.len(), 1);
+        app.open_active_search_result();
+        assert!(app.archive_detail_entry.is_some());
+
+        let expired = Utc::now() - Duration::days(HOT_WINDOW_DAYS + 1);
+        app.journal.entries[0].timestamp = expired.to_rfc3339();
+        app.journal.set_hot_record_timestamp_for_test(record_id, expired);
+
+        assert_eq!(app.prune_hot_cache(), 1);
+        assert!(app.journal.entries.is_empty());
+        assert!(app.search_view, "archive search must remain open");
+        assert_eq!(app.search_hits.len(), 1, "archive search results must survive pruning");
+        assert_eq!(app.search_hit_entry_indices, vec![None]);
+        assert!(
+            app.archive_detail_entry.as_ref()
+                .is_some_and(|entry| entry.text.contains("historical needle")),
+            "the selected historical record must stay open after hot-cache expiry"
+        );
+
         let _ = fs::remove_file(path);
     }
 

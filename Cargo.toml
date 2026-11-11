@@ -2,7 +2,7 @@
 name = "operator"
 version = "0.1.0"
 edition = "2021"
-description = "An unwrapped, append-only terminal note stream with full-cache search"
+description = "A terminal workspace with a rolling 30-day transcript and full-archive search"
 license = "CC0-1.0"
 
 [dependencies]

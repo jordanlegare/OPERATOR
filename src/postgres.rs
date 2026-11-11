@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     fmt,
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, BufRead, BufReader, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -13,20 +13,21 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};
 use sqlx::{
     postgres::{PgConnection, PgListener, PgPool, PgPoolOptions},
     Row,
 };
 use tokio::sync::mpsc as tokio_mpsc;
 
-use crate::storage::{Entry, EntryKind};
+use crate::storage::{sanitize_entry_text, Entry, EntryKind};
 
 const SCHEMA: &str = include_str!("../migrations/0001_postgres_journal.sql");
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const FETCH_BATCH: i64 = 5_000;
+const HOT_WINDOW_DAYS: i64 = 30;
 
 #[derive(Debug, Clone)]
 pub struct SearchHit {
@@ -52,6 +53,7 @@ pub struct SearchResult {
 pub enum Update {
     ExternalEntries(Vec<Entry>),
     SearchResult(SearchResult),
+    ArchiveRecord { request_id: u64, result: Result<Entry, String> },
     Error(String),
 }
 
@@ -59,6 +61,7 @@ enum Command {
     Append(Entry),
     AppendBatch(Vec<Entry>),
     Search { request_id: u64, query: String },
+    FetchRecord { request_id: u64, record_id: String },
     Flush(Sender<Result<(), String>>),
     ExportJsonl { path: PathBuf, reply: Sender<Result<(), String>> },
     Shutdown,
@@ -86,7 +89,7 @@ impl PostgresJournal {
     /// Database work after startup is handled by a dedicated Tokio worker thread.
     pub fn connect(
         database_url: String,
-        legacy_entries: Vec<Entry>,
+        legacy_path: Option<PathBuf>,
     ) -> io::Result<(Self, Vec<Entry>, usize)> {
         let (ready_tx, ready_rx) = mpsc::channel();
         let (commands_tx, commands_rx) = tokio_mpsc::unbounded_channel();
@@ -110,7 +113,7 @@ impl PostgresJournal {
                 };
 
                 runtime.block_on(async move {
-                    let initialized = initialize_database(&database_url, legacy_entries).await;
+                    let initialized = initialize_database(&database_url, legacy_path).await;
                     let (pool, entries, imported_count, mut last_seen_id) = match initialized {
                         Ok(value) => value,
                         Err(error) => {
@@ -229,6 +232,17 @@ impl PostgresJournal {
         Ok(request_id)
     }
 
+    /// Fetch one complete historical entry on demand; only the selected
+    /// payload is materialized, never the complete archive.
+    pub fn fetch_record(&mut self, record_id: String) -> io::Result<u64> {
+        let request_id = self.next_search_id;
+        self.next_search_id = self.next_search_id.wrapping_add(1).max(1);
+        self.commands
+            .send(Command::FetchRecord { request_id, record_id })
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "PostgreSQL worker is not available"))?;
+        Ok(request_id)
+    }
+
     pub fn drain_updates(&self) -> Vec<Update> {
         self.updates.try_iter().collect()
     }
@@ -271,7 +285,7 @@ impl Drop for PostgresJournal {
 
 async fn initialize_database(
     database_url: &str,
-    mut legacy_entries: Vec<Entry>,
+    legacy_path: Option<PathBuf>,
 ) -> Result<(PgPool, Vec<Entry>, usize, i64), String> {
     let pool = PgPoolOptions::new()
         .max_connections(8)
@@ -301,7 +315,7 @@ async fn initialize_database(
         .map_err(|error| format!("commit PostgreSQL schema migration: {error}"))?;
 
     let mut imported_count = 0usize;
-    if !legacy_entries.is_empty() {
+    if let Some(path) = legacy_path.filter(|path| path.is_file()) {
         let mut transaction = pool
             .begin()
             .await
@@ -320,9 +334,22 @@ async fn initialize_database(
         .map_err(|error| format!("count PostgreSQL journal entries: {error}"))?;
 
         if existing == 0 {
-            for entry in &mut legacy_entries {
+            // Stream legacy JSONL one record at a time. Import memory is bounded
+            // by one line rather than by the size of the complete archive.
+            let file = fs::File::open(&path)
+                .map_err(|error| format!("open legacy JSONL archive: {error}"))?;
+            let reader = BufReader::new(file);
+            for line in reader.lines() {
+                let line = line.map_err(|error| format!("read legacy JSONL archive: {error}"))?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let Ok(mut entry) = serde_json::from_str::<Entry>(&line) else {
+                    continue;
+                };
+                entry.text = sanitize_entry_text(entry.kind, &entry.text);
                 entry.ensure_record_id();
-                if insert_entry(&mut transaction, entry)
+                if insert_entry(&mut transaction, &entry)
                     .await
                     .map_err(|error| format!("import JSONL record: {error}"))?
                     .is_some()
@@ -344,11 +371,9 @@ async fn initialize_database(
             .map_err(|error| format!("commit JSONL import: {error}"))?;
     }
 
-    // Load the initial rows and cursor in one statement snapshot. A separate
-    // MAX(id) query could advance past a concurrent commit not present in the
-    // loaded cache, causing that record to be missed by the catch-up poll.
+    // Capture the complete database cursor and the hot rows in one statement
+    // snapshot. Historical rows are not materialized in the transcript cache.
     let (entries, last_seen_id) = load_entries(&pool).await?;
-
     Ok((pool, entries, imported_count, last_seen_id))
 }
 
@@ -487,25 +512,40 @@ async fn upsert_search_document(
 }
 
 async fn load_entries(pool: &PgPool) -> Result<(Vec<Entry>, i64), String> {
+    let cutoff = Utc::now() - ChronoDuration::days(HOT_WINDOW_DAYS);
     let rows = sqlx::query(
-        "SELECT id, payload::text AS payload FROM operator_journal_entries ORDER BY id",
+        r#"WITH cursor AS (
+               SELECT COALESCE(MAX(id), 0) AS max_id FROM operator_journal_entries
+           ),
+           recent AS (
+               SELECT id, payload::text AS payload
+               FROM operator_journal_entries
+               WHERE occurred_at >= $1
+           )
+           SELECT cursor.max_id, recent.id, recent.payload
+           FROM cursor LEFT JOIN recent ON TRUE
+           ORDER BY recent.id NULLS LAST"#,
     )
+    .bind(cutoff)
     .fetch_all(pool)
     .await
-    .map_err(|error| format!("load PostgreSQL journal: {error}"))?;
+    .map_err(|error| format!("load recent PostgreSQL journal: {error}"))?;
 
     let mut entries = Vec::with_capacity(rows.len());
     let mut last_seen_id = 0i64;
     for row in rows {
-        let id: i64 = row
+        last_seen_id = row
+            .try_get("max_id")
+            .map_err(|error| format!("read PostgreSQL journal cursor: {error}"))?;
+        let id: Option<i64> = row
             .try_get("id")
             .map_err(|error| format!("read PostgreSQL journal ID: {error}"))?;
+        let Some(_id) = id else { continue; };
         let payload: String = row
             .try_get("payload")
             .map_err(|error| format!("read PostgreSQL journal payload: {error}"))?;
         let entry = serde_json::from_str::<Entry>(&payload)
             .map_err(|error| format!("decode PostgreSQL journal payload: {error}"))?;
-        last_seen_id = last_seen_id.max(id);
         entries.push(entry);
     }
     Ok((entries, last_seen_id))
@@ -517,9 +557,10 @@ async fn fetch_new_entries(
     updates: &Sender<Update>,
 ) -> Result<usize, String> {
     let mut total = 0usize;
+    let cutoff = Utc::now() - ChronoDuration::days(HOT_WINDOW_DAYS);
     loop {
         let rows = sqlx::query(
-            r#"SELECT id, payload::text AS payload
+            r#"SELECT id, occurred_at, payload::text AS payload
                FROM operator_journal_entries
                WHERE id > $1
                ORDER BY id
@@ -540,17 +581,23 @@ async fn fetch_new_entries(
             let id: i64 = row
                 .try_get("id")
                 .map_err(|error| format!("read PostgreSQL journal ID: {error}"))?;
+            *last_seen_id = (*last_seen_id).max(id);
+            let occurred_at: DateTime<Utc> = row
+                .try_get("occurred_at")
+                .map_err(|error| format!("read PostgreSQL journal timestamp: {error}"))?;
+            if occurred_at < cutoff {
+                continue;
+            }
             let payload: String = row
                 .try_get("payload")
                 .map_err(|error| format!("read PostgreSQL journal payload: {error}"))?;
             let entry = serde_json::from_str::<Entry>(&payload)
                 .map_err(|error| format!("decode PostgreSQL journal payload: {error}"))?;
-            *last_seen_id = (*last_seen_id).max(id);
             entries.push(entry);
         }
 
         total += entries.len();
-        if updates.send(Update::ExternalEntries(entries)).is_err() {
+        if !entries.is_empty() && updates.send(Update::ExternalEntries(entries)).is_err() {
             break;
         }
         if rows.len() < FETCH_BATCH as usize {
@@ -566,9 +613,10 @@ async fn fetch_new_entries_locked(
     updates: &Sender<Update>,
 ) -> Result<usize, String> {
     let mut total = 0usize;
+    let cutoff = Utc::now() - ChronoDuration::days(HOT_WINDOW_DAYS);
     loop {
         let rows = sqlx::query(
-            r#"SELECT id, payload::text AS payload
+            r#"SELECT id, occurred_at, payload::text AS payload
                FROM operator_journal_entries
                WHERE id > $1
                ORDER BY id
@@ -589,17 +637,23 @@ async fn fetch_new_entries_locked(
             let id: i64 = row
                 .try_get("id")
                 .map_err(|error| format!("read PostgreSQL journal ID: {error}"))?;
+            *last_seen_id = (*last_seen_id).max(id);
+            let occurred_at: DateTime<Utc> = row
+                .try_get("occurred_at")
+                .map_err(|error| format!("read PostgreSQL journal timestamp: {error}"))?;
+            if occurred_at < cutoff {
+                continue;
+            }
             let payload: String = row
                 .try_get("payload")
                 .map_err(|error| format!("read PostgreSQL journal payload: {error}"))?;
             let entry = serde_json::from_str::<Entry>(&payload)
                 .map_err(|error| format!("decode PostgreSQL journal payload: {error}"))?;
-            *last_seen_id = (*last_seen_id).max(id);
             entries.push(entry);
         }
 
         total += entries.len();
-        if updates.send(Update::ExternalEntries(entries)).is_err() {
+        if !entries.is_empty() && updates.send(Update::ExternalEntries(entries)).is_err() {
             break;
         }
         if rows.len() < FETCH_BATCH as usize {
@@ -1019,6 +1073,54 @@ async fn run_worker(
                         let result = search_records(&pool, &query, request_id).await;
                         let _ = updates.send(Update::SearchResult(result));
                     }
+                    Some(Command::FetchRecord { request_id, record_id }) => {
+                        let result = async {
+                            let row = sqlx::query(
+                                r#"SELECT e.payload::text AS payload,
+                                          d.body AS indexed_body,
+                                          d.kind AS indexed_kind,
+                                          d.occurred_at AS indexed_at
+                                   FROM operator_journal_entries e
+                                   LEFT JOIN operator_journal_search_documents d
+                                     ON d.record_id = e.record_id
+                                   WHERE e.record_id = $1
+                                   LIMIT 1"#
+                            )
+                            .bind(&record_id)
+                            .fetch_optional(&pool)
+                            .await
+                            .map_err(|error| format!("fetch historical PostgreSQL record: {error}"))?
+                            .ok_or_else(|| format!("archive record {record_id} no longer exists"))?;
+
+                            let payload: String = row.try_get("payload")
+                                .map_err(|error| format!("read historical PostgreSQL payload: {error}"))?;
+                            let mut entry = serde_json::from_str::<Entry>(&payload)
+                                .map_err(|error| format!("decode historical PostgreSQL record: {error}"))?;
+
+                            // A Hermes stream's search document is its logical,
+                            // reconstructed message. Use that body for the
+                            // selected archive result instead of returning only
+                            // the first token-delta row.
+                            let indexed_body: Option<String> = row.try_get("indexed_body")
+                                .map_err(|error| format!("read indexed historical body: {error}"))?;
+                            if let Some(body) = indexed_body {
+                                entry.text = body;
+                            }
+                            entry.text = sanitize_entry_text(entry.kind, &entry.text);
+                            let indexed_kind: Option<String> = row.try_get("indexed_kind")
+                                .map_err(|error| format!("read indexed historical kind: {error}"))?;
+                            if let Some(kind) = indexed_kind.as_deref().and_then(entry_kind_from_name) {
+                                entry.kind = kind;
+                            }
+                            let indexed_at: Option<DateTime<Utc>> = row.try_get("indexed_at")
+                                .map_err(|error| format!("read indexed historical timestamp: {error}"))?;
+                            if let Some(timestamp) = indexed_at {
+                                entry.timestamp = timestamp.to_rfc3339();
+                            }
+                            Ok(entry)
+                        }.await;
+                        let _ = updates.send(Update::ArchiveRecord { request_id, result });
+                    }
                     Some(Command::Flush(reply)) => {
                         let result = retry_pending(&pool, &mut pending, last_seen_id, &pending_count, &updates).await;
                         let _ = reply.send(result);
@@ -1057,13 +1159,6 @@ async fn run_worker(
 }
 
 async fn export_jsonl_from_database(pool: &PgPool, destination: &Path) -> Result<(), String> {
-    let rows = sqlx::query(
-        "SELECT payload::text AS payload FROM operator_journal_entries ORDER BY id",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|error| format!("read journal for JSONL export: {error}"))?;
-
     let parent = destination
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -1086,15 +1181,42 @@ async fn export_jsonl_from_database(pool: &PgPool, destination: &Path) -> Result
         .open(&temporary)
         .map_err(|error| format!("create JSONL export: {error}"))?;
 
-    for row in rows {
-        let payload: String = row
-            .try_get("payload")
-            .map_err(|error| format!("read JSONL payload: {error}"))?;
-        output
-            .write_all(payload.as_bytes())
-            .and_then(|_| output.write_all(b"\n"))
-            .map_err(|error| format!("write JSONL export: {error}"))?;
+    // Page through the complete archive; never fetch every payload into RAM.
+    let mut last_id = 0i64;
+    loop {
+        let rows = sqlx::query(
+            r#"SELECT id, payload::text AS payload
+               FROM operator_journal_entries
+               WHERE id > $1
+               ORDER BY id
+               LIMIT $2"#,
+        )
+        .bind(last_id)
+        .bind(FETCH_BATCH)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("read journal for JSONL export: {error}"))?;
+
+        if rows.is_empty() {
+            break;
+        }
+        for row in &rows {
+            last_id = row
+                .try_get("id")
+                .map_err(|error| format!("read JSONL export cursor: {error}"))?;
+            let payload: String = row
+                .try_get("payload")
+                .map_err(|error| format!("read JSONL payload: {error}"))?;
+            output
+                .write_all(payload.as_bytes())
+                .and_then(|_| output.write_all(b"\n"))
+                .map_err(|error| format!("write JSONL export: {error}"))?;
+        }
+        if rows.len() < FETCH_BATCH as usize {
+            break;
+        }
     }
+
     output
         .sync_all()
         .map_err(|error| format!("sync JSONL export: {error}"))?;
@@ -1104,6 +1226,26 @@ async fn export_jsonl_from_database(pool: &PgPool, destination: &Path) -> Result
         format!("publish JSONL export: {error}")
     })?;
     Ok(())
+}
+
+fn entry_kind_from_name(kind: &str) -> Option<EntryKind> {
+    Some(match kind {
+        "note" => EntryKind::Note,
+        "terminal_command" => EntryKind::TerminalCommand,
+        "terminal_output" => EntryKind::TerminalOutput,
+        "system" => EntryKind::System,
+        "hermes_user" => EntryKind::HermesUser,
+        "hermes_assistant" => EntryKind::HermesAssistant,
+        "hermes_tool_call" => EntryKind::HermesToolCall,
+        "hermes_tool_result" => EntryKind::HermesToolResult,
+        "hermes_stream_start" => EntryKind::HermesStreamStart,
+        "hermes_stream_delta" => EntryKind::HermesStreamDelta,
+        "hermes_stream_end" => EntryKind::HermesStreamEnd,
+        "hermes_history" => EntryKind::HermesHistory,
+        "hermes_interim" => EntryKind::HermesInterim,
+        "hermes_session" => EntryKind::HermesSession,
+        _ => return None,
+    })
 }
 
 fn entry_kind_name(kind: EntryKind) -> &'static str {
@@ -1146,9 +1288,9 @@ mod tests {
         let entry = Entry::with_kind(EntryKind::Note, searchable_text.clone());
         let record_id = entry.record_id.clone().expect("new entry record ID");
 
-        let (writer, _, _) = PostgresJournal::connect(database_url.clone(), Vec::new())
+        let (writer, _, _) = PostgresJournal::connect(database_url.clone(), None)
             .expect("connect PostgreSQL writer");
-        let (mut reader, _, _) = PostgresJournal::connect(database_url, Vec::new())
+        let (mut reader, _, _) = PostgresJournal::connect(database_url, None)
             .expect("connect PostgreSQL reader");
 
         writer.enqueue(entry).expect("queue PostgreSQL note");
@@ -1323,6 +1465,68 @@ mod tests {
             }
         }
         assert!(found_split_stream, "PostgreSQL search did not reconstruct Hermes stream deltas");
+
+        // The indexed logical body is also what the historical record viewer
+        // retrieves; it must not return only the first raw delta payload.
+        let request_id = reader
+            .fetch_record(first_delta_record.clone())
+            .expect("request reconstructed Hermes archive record");
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        let mut loaded_stream = false;
+        while std::time::Instant::now() < deadline && !loaded_stream {
+            for update in reader.drain_updates() {
+                if let Update::ArchiveRecord { request_id: result_id, result } = update {
+                    if result_id == request_id {
+                        let entry = result.expect("fetch reconstructed Hermes record");
+                        assert_eq!(entry.record_id.as_deref(), Some(first_delta_record.as_str()));
+                        assert_eq!(entry.text, "multi-part-search-token-crosses-boundary");
+                        loaded_stream = true;
+                    }
+                }
+            }
+            if !loaded_stream {
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+        assert!(loaded_stream, "reconstructed PostgreSQL record fetch timed out");
+    }
+
+    #[test]
+    fn postgres_fetches_full_archive_record_on_demand() {
+        let Ok(database_url) = std::env::var("OPERATOR_TEST_DATABASE_URL") else {
+            return;
+        };
+
+        let text = format!("historical full-record payload {}", std::process::id());
+        let entry = Entry::with_kind(EntryKind::Note, text.clone());
+        let record_id = entry.record_id.clone().expect("record ID");
+        let (writer, _, _) = PostgresJournal::connect(database_url.clone(), None)
+            .expect("connect PostgreSQL writer");
+        let (mut reader, _, _) = PostgresJournal::connect(database_url, None)
+            .expect("connect PostgreSQL reader");
+
+        writer.enqueue(entry).expect("queue historical record");
+        writer.flush().expect("commit historical record");
+        let request_id = reader.fetch_record(record_id.clone()).expect("request full record");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        let mut loaded = false;
+        while std::time::Instant::now() < deadline && !loaded {
+            for update in reader.drain_updates() {
+                if let Update::ArchiveRecord { request_id: result_id, result } = update {
+                    if result_id == request_id {
+                        let entry = result.expect("fetch historical record");
+                        assert_eq!(entry.record_id.as_deref(), Some(record_id.as_str()));
+                        assert_eq!(entry.text, text);
+                        loaded = true;
+                    }
+                }
+            }
+            if !loaded {
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+        assert!(loaded, "full PostgreSQL archive record fetch timed out");
     }
 
     #[test]

@@ -45,6 +45,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             draw_hermes_message(frame, entry, index, app.message_view_scroll, theme);
         }
     }
+    if let Some(entry) = app.archive_detail_entry.as_ref() {
+        draw_hermes_message(
+            frame,
+            entry,
+            app.archive_detail_line_number.saturating_sub(1),
+            app.message_view_scroll,
+            theme,
+        );
+    }
     if let Some(view) = app.conversation_view.clone() {
         match view {
             ConversationView::List => draw_conversation_list(frame, app, theme),
@@ -945,7 +954,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         Span::styled(mode, Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
         Span::styled(
             format!(
-                "  {}{}  ·  theme {}/9: {}  ·  {} entries  ·  {} B cached  ·  {} {} active  ·  {} {}  │  ",
+                "  {}{}  ·  theme {}/9: {}  ·  {} 30d rows  ·  {} B hot cache  ·  {} {} active  ·  {} {}  │  ",
                 app.input_mode.label(),
                 privacy_hint,
                 app.theme_index,
@@ -971,7 +980,7 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     }
 
     let title = format!(
-        " TRANSCRIPT  ·  {} RECORDS  ·  {}  ·  SEARCHABLE ",
+        " TRANSCRIPT  ·  {} ROWS  ·  30-DAY WINDOW  ·  {}  ·  SEARCHABLE ",
         app.visible_transcript_count(),
         if app.wrap_transcript { "WORD WRAP" } else { "UNWRAPPED" }
     );
@@ -1072,7 +1081,7 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
         )));
     } else if app.pending_postgres_search_is_pending() {
         lines.push(Line::from(Span::styled(
-            format!("  Searching PostgreSQL: {query}"),
+            format!("  Searching {}: {query}", app.search_mode_label),
             Style::default().fg(theme.info),
         )));
     } else if app.search_hits.is_empty() {
@@ -1106,9 +1115,15 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
                 "hermes_session" => "HERMES SESSION",
                 other => other,
             };
-            let row_label = index
-                .map(|row| format!("[ROW {}]", row + 1))
+            let row_label = app.archive_search_hits.get(position)
+                .map(|archive_hit| format!("[ARCHIVE LINE {}]", archive_hit.line_number))
+                .or_else(|| index.map(|row| format!("[ROW {}]", row + 1)))
                 .unwrap_or_else(|| format!("[DB {}]", hit.record_id.chars().take(10).collect::<String>()));
+            let score_label = if app.archive_search_hits.is_empty() {
+                format!(" score:{:.3}", hit.rank)
+            } else {
+                String::new()
+            };
             let preview = hit.snippet.split_whitespace().collect::<Vec<_>>().join(" ");
             let preview = preview.chars().take(320).collect::<String>();
             lines.push(Line::from(vec![
@@ -1125,7 +1140,7 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
                     Style::default().fg(theme.info).add_modifier(Modifier::BOLD).patch(row_style),
                 ),
                 Span::styled(
-                    format!("  {row_label}  score:{:.3}", hit.rank),
+                    format!("  {row_label}{score_label}"),
                     Style::default().fg(theme.muted).patch(row_style),
                 ),
             ]));
