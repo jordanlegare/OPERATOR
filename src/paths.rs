@@ -66,7 +66,7 @@ pub fn migrate_legacy_path(path: &Path) -> PathBuf {
     let components: Vec<_> = path.components().collect();
     let Some(index) = components
         .iter()
-        .position(|component| component.as_os_str() == LEGACY_APP_DIR_NAME)
+        .position(|component| component.as_os_str() == std::ffi::OsStr::new(LEGACY_APP_DIR_NAME))
     else {
         return path.to_path_buf();
     };
@@ -122,6 +122,31 @@ mod tests {
         #[cfg(unix)]
         assert!(std::fs::symlink_metadata(&legacy)
             .expect("read legacy compatibility link")
+            .file_type()
+            .is_symlink());
+
+        fs::remove_dir_all(&base).expect("clean temporary directory");
+    }
+
+    #[test]
+    fn rewrites_legacy_socket_path_to_operator_directory() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("operator-path-remap-{nonce}"));
+        let legacy = base.join("streenote");
+        let operator = base.join("operator");
+        fs::create_dir_all(&legacy).expect("create legacy runtime directory");
+        fs::write(legacy.join("review.sock"), b"placeholder")
+            .expect("write placeholder socket file");
+
+        let rewritten = super::migrate_legacy_path(&legacy.join("review.sock"));
+        assert_eq!(rewritten, operator.join("review.sock"));
+        assert!(rewritten.exists());
+        #[cfg(unix)]
+        assert!(std::fs::symlink_metadata(&legacy)
+            .expect("read compatibility link")
             .file_type()
             .is_symlink());
 
