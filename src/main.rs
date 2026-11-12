@@ -1340,10 +1340,10 @@ fn run(
                 _ => {}
             },
             Event::Paste(text) => {
-                if app.search_export_dialog_open {
-                    app.search_export_insert_text(&text);
-                } else if app.pending_review.is_some() {
+                if app.pending_review.is_some() {
                     insert_review_terminal_paste(app, &text);
+                } else if app.search_export_dialog_open {
+                    app.search_export_insert_text(&text);
                 } else {
                     paste_clipboard_text(app, &text, "terminal paste event");
                 }
