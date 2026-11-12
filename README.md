@@ -92,7 +92,7 @@ systemctl --user enable --now operator-sessiond
 sudo loginctl enable-linger "$USER"
 ```
 
-Lingering keeps the user service running after the last SSH login ends. When no systemd user service is active, the first interactive SSH login can start a detached per-user daemon automatically. The daemon socket is stored under `$XDG_RUNTIME_DIR/operator/sessiond.sock` (or `~/.local/share/operator/run/sessiond.sock` when no runtime directory is available) with user-only directory and socket permissions. On Linux, the daemon also verifies the connecting process UID with `SO_PEERCRED`.
+Lingering keeps the user service running after the last SSH login ends. When no systemd user service is active, the first interactive SSH login can start a detached per-user daemon automatically. The daemon socket is stored under `~/.local/share/operator/run/sessiond.sock` with user-only directory and socket permissions, so removing `$XDG_RUNTIME_DIR` at logout cannot orphan the daemon socket. On Linux, the daemon also verifies the connecting process UID with `SO_PEERCRED`. For reliable survival after the final SSH login closes, use the systemd user service and enable lingering; detached auto-start is best-effort on systems whose logind policy keeps user processes alive after logout.
 
 ### Session persistence boundaries
 
