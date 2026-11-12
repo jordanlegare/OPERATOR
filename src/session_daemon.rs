@@ -1090,6 +1090,72 @@ trap "__operator_audit_capture" EXIT
         }
 
         #[test]
+        fn shell_and_output_survive_controller_detach_and_reattach() {
+            use super::{OutputPacket, SessionManager};
+            use std::time::{Duration, Instant};
+
+            let manager = SessionManager::default();
+            let session = manager.create("primary".into(), 80, 24, false, None)
+                .expect("create daemon-owned shell");
+            let (first_controller, _, first_receiver) = session.subscribe(false)
+                .expect("attach initial controller");
+
+            session.write_input(b"printf 'operator-daemon-first-marker\\n'\\r")
+                .expect("send first shell command");
+            let first_deadline = Instant::now() + Duration::from_secs(5);
+            let mut first_output = Vec::new();
+            while Instant::now() < first_deadline {
+                match first_receiver.recv_timeout(Duration::from_millis(50)) {
+                    Ok(OutputPacket::Data(bytes)) => {
+                        first_output.extend_from_slice(&bytes);
+                        if String::from_utf8_lossy(&first_output)
+                            .contains("operator-daemon-first-marker")
+                        {
+                            break;
+                        }
+                    }
+                    Ok(OutputPacket::Exit) => panic!("shell exited before first command output"),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(error) => panic!("shell output channel closed: {error}"),
+                }
+            }
+            assert!(
+                String::from_utf8_lossy(&first_output).contains("operator-daemon-first-marker"),
+                "first shell command did not produce output: {:?}",
+                String::from_utf8_lossy(&first_output)
+            );
+
+            // The controller goes away but the daemon-owned PTY and shell stay
+            // alive. A command submitted while detached must still execute.
+            session.unsubscribe(first_controller);
+            session.write_input(b"printf 'operator-daemon-detached-marker\\n'\\r")
+                .expect("send command while detached");
+
+            let detached_deadline = Instant::now() + Duration::from_secs(5);
+            let mut detached_output_seen = false;
+            while Instant::now() < detached_deadline {
+                let output = session.output.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let bytes = output.history.iter().copied().collect::<Vec<_>>();
+                drop(output);
+                if String::from_utf8_lossy(&bytes).contains("operator-daemon-detached-marker") {
+                    detached_output_seen = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(detached_output_seen, "shell did not continue producing output while detached");
+
+            let (second_controller, replay, _second_receiver) = session.subscribe(true)
+                .expect("reattach controller to same shell");
+            assert!(
+                String::from_utf8_lossy(&replay).contains("operator-daemon-detached-marker"),
+                "reattachment did not replay output produced while detached"
+            );
+            session.unsubscribe(second_controller);
+        }
+
+        #[test]
         fn daemon_frame_protocol_round_trips_binary_payloads() {
             use super::{read_frame, write_frame};
             use std::io::Cursor;
