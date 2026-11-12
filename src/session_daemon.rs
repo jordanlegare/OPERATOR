@@ -13,7 +13,7 @@ mod unix_impl {
         io::{self, Read, Write},
         os::fd::AsRawFd,
         os::unix::{
-            fs::{FileTypeExt, MetadataExt, PermissionsExt},
+            fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
             net::{UnixListener, UnixStream},
         },
         path::PathBuf,
@@ -49,6 +49,7 @@ mod unix_impl {
         pub attached: bool,
         pub exited: bool,
         pub audit_file_path: Option<String>,
+        pub origin: HashMap<String, String>,
     }
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -100,6 +101,7 @@ mod unix_impl {
         shell: PathBuf,
         pid: Option<u32>,
         audit_file_path: Option<PathBuf>,
+        origin: HashMap<String, String>,
         created_unix_ms: u128,
         writer: Mutex<Box<dyn Write + Send>>,
         master: Mutex<Box<dyn MasterPty + Send>>,
@@ -121,6 +123,7 @@ mod unix_impl {
                 attached: output.controller.is_some(),
                 exited,
                 audit_file_path: self.audit_file_path.as_ref().map(|path| path.display().to_string()),
+                origin: self.origin.clone(),
             }
         }
 
@@ -236,11 +239,19 @@ mod unix_impl {
             }).map_err(|error| io::Error::other(error.to_string()))?;
 
             let shell = resolve_shell_program();
+            let id = new_session_id();
+            let supports_bash_audit = shell.file_name()
+                .is_some_and(|name| name.to_string_lossy().to_ascii_lowercase().contains("bash"));
+            let audit_file_path = if role.starts_with("workspace:") && supports_bash_audit {
+                Some(create_workspace_audit_files(&id)?)
+            } else {
+                None
+            };
+            let audit_rcfile_path = audit_file_path.as_ref().map(|path| path.with_extension("bashrc"));
             if !echo {
                 set_input_echo(&*pair.master, false)?;
             }
 
-            let id = new_session_id();
             let mut command = CommandBuilder::new(&shell);
             command.arg("-i");
             command.env("SHELL", &shell);
@@ -249,16 +260,29 @@ mod unix_impl {
             command.env_remove("OPERATOR_DATABASE_URL");
             command.env("OPERATOR_SESSION_ID", &id);
 
-            if let Some(origin) = origin {
-                for (key, value) in origin {
-                    if is_allowed_origin_variable(&key) {
-                        command.env(key, value);
-                    }
+            let origin = origin.unwrap_or_default();
+            for (key, value) in &origin {
+                if is_allowed_origin_variable(key) {
+                    command.env(key, value);
                 }
             }
 
-            let child = pair.slave.spawn_command(command)
-                .map_err(|error| io::Error::other(error.to_string()))?;
+            if let Some(path) = audit_file_path.as_ref() {
+                command.env("OPERATOR_AUDIT_COMMAND_FILE", path);
+                if let Some(rcfile) = audit_rcfile_path.as_ref() {
+                    command.arg("--rcfile");
+                    command.arg(rcfile);
+                }
+            }
+
+            let child = match pair.slave.spawn_command(command) {
+                Ok(child) => child,
+                Err(error) => {
+                    if let Some(path) = audit_file_path.as_ref() { let _ = fs::remove_file(path); }
+                    if let Some(path) = audit_rcfile_path.as_ref() { let _ = fs::remove_file(path); }
+                    return Err(io::Error::other(error.to_string()));
+                }
+            };
             drop(pair.slave);
 
             let pid = child.process_id();
@@ -273,7 +297,8 @@ mod unix_impl {
                 role,
                 shell: shell.clone(),
                 pid,
-                audit_file_path: None,
+                audit_file_path,
+                origin,
                 created_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH)
                     .unwrap_or_default().as_millis(),
                 writer: Mutex::new(writer),
@@ -838,6 +863,54 @@ mod unix_impl {
                 | "OPERATOR_HERMES_INBOX"
                 | "STREENOTE_HERMES_INBOX"
         )
+    }
+
+    fn create_workspace_audit_files(session_id: &str) -> io::Result<PathBuf> {
+        let home = env::var_os("HOME").map(PathBuf::from)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set for audit spool"))?;
+        let directory = home.join(".local/share/operator/sessions");
+        fs::create_dir_all(&directory)?;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+        let path = directory.join(format!("{session_id}.nul"));
+        let rcfile_path = path.with_extension("bashrc");
+
+        let mut audit_options = fs::OpenOptions::new();
+        audit_options.create_new(true).read(true).write(true).mode(0o600);
+        audit_options.open(&path)?;
+
+        let rc_source = r#"
+if [[ -r "$HOME/.bashrc" ]]; then
+  source "$HOME/.bashrc"
+elif [[ -r /etc/bash.bashrc ]]; then
+  source /etc/bash.bashrc
+fi
+__operator_audit_capture() {
+  local current
+  current="$HISTCMD"
+  if [[ -z "$current" ]]; then current=0; fi
+  if [[ ! -v __OPERATOR_AUDIT_LAST_HISTCMD ]]; then
+    __OPERATOR_AUDIT_LAST_HISTCMD="$current"
+    return
+  fi
+  if [[ "$current" != "$__OPERATOR_AUDIT_LAST_HISTCMD" ]]; then
+    fc -ln -1 -1 >> "$OPERATOR_AUDIT_COMMAND_FILE" 2>/dev/null
+    printf "\\0" >> "$OPERATOR_AUDIT_COMMAND_FILE"
+    __OPERATOR_AUDIT_LAST_HISTCMD="$current"
+  fi
+}
+__operator_previous_prompt_command="$PROMPT_COMMAND"
+PROMPT_COMMAND="__operator_audit_capture"
+if [[ -n "$__operator_previous_prompt_command" ]]; then
+  PROMPT_COMMAND+=";$__operator_previous_prompt_command"
+fi
+trap "__operator_audit_capture" EXIT
+"#;
+        let mut rc_options = fs::OpenOptions::new();
+        rc_options.create_new(true).write(true).mode(0o600);
+        let mut rcfile = rc_options.open(&rcfile_path)?;
+        rcfile.write_all(rc_source.as_bytes())?;
+        rcfile.sync_all()?;
+        Ok(path)
     }
 
     fn resolve_shell_program() -> PathBuf {
