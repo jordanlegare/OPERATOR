@@ -599,7 +599,7 @@ mod tests {
         let mut bytes = Vec::new();
         for entry in [&first, &heartbeat, &second, &unrelated] {
             bytes.extend(serde_json::to_vec(entry).expect("serialize audit record"));
-            bytes.push(b'\\n');
+            bytes.push(b'\n');
         }
         fs::write(&path, bytes).expect("write audit archive");
 
