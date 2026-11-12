@@ -314,7 +314,7 @@ Switch palettes directly with the unmodified **F2** through **F10** keys. Each k
 | `F9` | 8 | Arctic Blue |
 | `F10` | 9 | Monochrome Max |
 
-The palettes are built into OPERATOR and require no external theme package or configuration download. F1 opens a full-screen interactive terminal workspace with a separate PTY and shell process; press F1 again to return. The primary OPERATOR shell continues running independently. F12 shows or hides the animated, full-screen credits splash.
+The palettes are built into OPERATOR and require no external theme package or configuration download. F1 opens a full-screen interactive terminal workspace with a separate PTY and shell process. Press F1 again or type `exit` in Bash to return to the OPERATOR transcript. Each new F1 workspace clears the visible terminal screen before its fresh shell starts, while preserving the terminal's scrollback. The primary OPERATOR shell continues running independently. F12 shows or hides the animated, full-screen credits splash.
 
 ## Commands
 
