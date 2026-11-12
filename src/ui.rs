@@ -337,6 +337,11 @@ fn draw_hermes_message(
             index + 1,
             format_timestamp(&entry.timestamp)
         ),
+        EntryKind::OperatorSessionStart => format!(" OPERATOR SESSION START · ROW {} · {} ", index + 1, format_timestamp(&entry.timestamp)),
+        EntryKind::OperatorSessionHeartbeat => format!(" OPERATOR SESSION HEARTBEAT · ROW {} · {} ", index + 1, format_timestamp(&entry.timestamp)),
+        EntryKind::OperatorSessionEnd => format!(" OPERATOR SESSION END · ROW {} · {} ", index + 1, format_timestamp(&entry.timestamp)),
+        EntryKind::OperatorWorkspaceStart => format!(" F1 WORKSPACE START · ROW {} · {} ", index + 1, format_timestamp(&entry.timestamp)),
+        EntryKind::OperatorWorkspaceEnd => format!(" F1 WORKSPACE END · ROW {} · {} ", index + 1, format_timestamp(&entry.timestamp)),
         _ => " HERMES MESSAGE ".to_string(),
     };
     let block = Block::default()
@@ -470,6 +475,11 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
                 EntryKind::HermesHistory => ("PRIOR CONTEXT", theme.info),
                 EntryKind::HermesInterim => ("INTERIM MESSAGE", theme.primary),
                 EntryKind::HermesSession => ("SESSION EVENT", theme.muted),
+                EntryKind::OperatorSessionStart => ("OPERATOR SESSION START", theme.success),
+                EntryKind::OperatorSessionHeartbeat => ("OPERATOR SESSION HEARTBEAT", theme.muted),
+                EntryKind::OperatorSessionEnd => ("OPERATOR SESSION END", theme.success),
+                EntryKind::OperatorWorkspaceStart => ("F1 WORKSPACE START", theme.info),
+                EntryKind::OperatorWorkspaceEnd => ("F1 WORKSPACE END", theme.info),
                 EntryKind::HermesStreamDelta => ("ASSISTANT - LIVE STREAM", theme.primary),
                 _ => ("HERMES", theme.muted),
             };
@@ -1077,6 +1087,7 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
     frame.render_widget(block, area);
 
     let mut lines = Vec::new();
+    let mut previous_audit_session: Option<String> = None;
     if let Some(error) = app.search_error.as_deref() {
         lines.push(Line::from(Span::styled(
             format!("  Search error: {error}"),
@@ -1094,6 +1105,20 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
         )));
     } else {
         for (position, hit) in app.search_hits.iter().enumerate() {
+            if let Some(session_id) = hit.operator_session_id.as_deref() {
+                if previous_audit_session.as_deref() != Some(session_id) {
+                    let username = hit.ssh_username.as_deref().unwrap_or("unknown");
+                    let ip = hit.ssh_client_ip.as_deref().unwrap_or("local / unknown IP");
+                    let short_id = session_id.chars().take(18).collect::<String>();
+                    lines.push(Line::from(Span::styled(
+                        format!("  ── OPERATOR SESSION {short_id} · {username}@{ip} · UID {} ──", hit.unix_uid.map(|uid| uid.to_string()).unwrap_or_else(|| "?".to_string())),
+                        Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
+                    )));
+                    previous_audit_session = Some(session_id.to_string());
+                }
+            } else if previous_audit_session.is_some() {
+                previous_audit_session = None;
+            }
             let index = app.search_hit_entry_indices.get(position).copied().flatten();
             let selected = app.active_match == Some(position);
             let row_style = if selected {
@@ -1116,16 +1141,30 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
                 "hermes_history" => "HERMES HISTORY",
                 "hermes_interim" => "HERMES INTERIM",
                 "hermes_session" => "HERMES SESSION",
+                "operator_session_start" => "SESSION START",
+                "operator_session_heartbeat" => "SESSION PULSE",
+                "operator_session_end" => "SESSION END",
+                "operator_workspace_start" => "WORKSPACE START",
+                "operator_workspace_end" => "WORKSPACE END",
                 other => other,
             };
             let row_label = app.archive_search_hits.get(position)
                 .map(|archive_hit| format!("[ARCHIVE LINE {}]", archive_hit.line_number))
                 .or_else(|| index.map(|row| format!("[ROW {}]", row + 1)))
                 .unwrap_or_else(|| format!("[DB {}]", hit.record_id.chars().take(10).collect::<String>()));
-            let score_label = if app.archive_search_hits.is_empty() {
+            let score_label = if app.archive_search_hits.is_empty() && hit.operator_session_id.is_none() {
                 format!(" score:{:.3}", hit.rank)
             } else {
                 String::new()
+            };
+            let attribution = if hit.operator_session_id.is_some() {
+                format!(
+                    "  {} · {}",
+                    hit.operator_surface.as_deref().unwrap_or("transcript"),
+                    hit.operator_session_id.as_deref().unwrap_or("")
+                )
+            } else {
+                "  UNATTRIBUTED / LEGACY".to_string()
             };
             let preview = hit.snippet.split_whitespace().collect::<Vec<_>>().join(" ");
             let preview = preview.chars().take(320).collect::<String>();
@@ -1143,7 +1182,7 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
                     Style::default().fg(theme.info).add_modifier(Modifier::BOLD).patch(row_style),
                 ),
                 Span::styled(
-                    format!("  {row_label}{score_label}"),
+                    format!("  {row_label}{score_label}{attribution}"),
                     Style::default().fg(theme.muted).patch(row_style),
                 ),
             ]));
@@ -1311,6 +1350,11 @@ fn entry_line(entry: &Entry, index: usize, app: &App, theme: Theme) -> Line<'sta
         EntryKind::HermesHistory => ("HCTX", theme.info),
         EntryKind::HermesInterim => ("HINT", theme.primary),
         EntryKind::HermesSession => ("HSES", theme.muted),
+        EntryKind::OperatorSessionStart => ("OPST", theme.success),
+        EntryKind::OperatorSessionHeartbeat => ("OPHB", theme.muted),
+        EntryKind::OperatorSessionEnd => ("OPEN", theme.success),
+        EntryKind::OperatorWorkspaceStart => ("WKST", theme.info),
+        EntryKind::OperatorWorkspaceEnd => ("WKED", theme.info),
     };
 
     let mut spans = vec![
@@ -1679,6 +1723,10 @@ fn help_lines(theme: Theme) -> Vec<Line<'static>> {
             Span::styled("SAVE KEYS ", Style::default().fg(theme.success).add_modifier(Modifier::BOLD)),
             Span::raw("Enter exports full records from the displayed page; Esc cancels. Type or paste a filename; arrows/Home/End move, Backspace/Delete edit, Ctrl+U clears, Ctrl+A/E jump to either end."),
         ]),
+        Line::from(vec![
+            Span::styled("AUDIT     ", Style::default().fg(theme.success).add_modifier(Modifier::BOLD)),
+            Span::raw("Each login has a distinct OPERATOR session ID. SSH IP, account, UID, ports, TTY, reviewer instance, and activity origin are attached to new local journal entries."),
+        ]),
         Line::from(""),
         Line::from(vec![Span::styled("LOCAL COMMANDS", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD))]),
         Line::from(vec![Span::styled("/search WORDS", Style::default().fg(theme.warning)), Span::raw("  Web search; quotes, OR alternatives and -excluded terms; Esc returns LIVE.")]),
@@ -1686,7 +1734,9 @@ fn help_lines(theme: Theme) -> Vec<Line<'static>> {
         Line::from(vec![Span::styled("/search --phrase TEXT", Style::default().fg(theme.warning)), Span::raw("  PostgreSQL phrase search using phraseto_tsquery.")]),
         Line::from(vec![Span::styled("/search --tsquery QUERY", Style::default().fg(theme.warning)), Span::raw("  Advanced PostgreSQL syntax: &, |, !, <-> and :*.")]),
         Line::from(vec![Span::styled("/search --fuzzy TEXT", Style::default().fg(theme.warning)), Span::raw("  Trigram similarity search, ranked by similarity().")]),
-        Line::from(vec![Span::styled("Search filters", Style::default().fg(theme.warning)), Span::raw("  kind:, session:, conversation:, after:, before:, limit:, offset:.")]),
+        Line::from(vec![Span::styled("/audit FILTERS", Style::default().fg(theme.warning)), Span::raw("  Search every SSH/OPERATOR session by IP, login, UID, or session ID; results are grouped by session.")]),
+        Line::from(vec![Span::styled("Audit filters", Style::default().fg(theme.warning)), Span::raw("  ip:, user:, uid:, key:, operator_session:, kind:, limit:, offset:; PostgreSQL also supports after: and before:.")]),
+        Line::from(vec![Span::styled("Search filters", Style::default().fg(theme.warning)), Span::raw("  PostgreSQL also supports session: (Hermes), conversation:, after:, before:, limit: and offset:.")]),
         Line::from(vec![Span::styled("/review on|off|status", Style::default().fg(theme.warning)), Span::raw("  Hold Hermes final answers for operator review before delivery.")]),
         Line::from(vec![Span::styled("/view", Style::default().fg(theme.warning)), Span::raw("           Open the full Markdown body of a selected Hermes event.")]),
         Line::from(vec![Span::styled("/threads", Style::default().fg(theme.warning)), Span::raw("        Browse conversations; Enter or Ctrl+C expands the selected thread.")]),
@@ -1706,6 +1756,7 @@ fn help_lines(theme: Theme) -> Vec<Line<'static>> {
         Line::from("Click a CMD row to load its command into input; drag to select text across any rows."),
         Line::from("Ctrl+C copies a selection; on a highlighted HUSR row it opens the Hermes thread."),
         Line::from("Each transcript row displays the full local date, time, seconds and UTC offset."),
+        Line::from("F1 Bash workspace commands are captured from shell history; raw keystrokes and hidden password input are never logged."),
         Line::from("Tab completes shell commands and paths · four spaces in Notes mode"),
         Line::from(format!("F2–F10 switches high-contrast palettes (F2 = 1, F10 = 9) · active: {}", theme.name)),
         Line::from("Ctrl+W toggles transcript word wrap · Alt+←/→ horizontal pan · Ctrl+P/N history · Ctrl+S save / search SAVE AS · Ctrl+T mode"),

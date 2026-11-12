@@ -1,4 +1,5 @@
 mod app;
+mod audit;
 mod archive;
 mod paths;
 mod postgres;
@@ -42,10 +43,11 @@ use ratatui::{
 };
 
 use app::{App, ConversationView, InputMode};
+use audit::OperatorSessionContext;
 use hermes_bridge::{HermesBridge, HERMES_INBOX_ENV};
 use hermes_review::HermesReviewServer;
 use shell::ShellSession;
-use storage::Journal;
+use storage::{EntryKind, Journal};
 
 #[derive(Debug, Parser)]
 #[command(name = "operator", version, about = "A live Debian shell transcript and unwrapped note stream")]
@@ -156,6 +158,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let audit_context = OperatorSessionContext::from_environment(
+        review_server.instance_id().map(str::to_string),
+    );
+    paths::set_compatible_env("OPERATOR_SESSION_ID", &audit_context.operator_session_id);
+    paths::set_compatible_env("STREENOTE_OPERATOR_SESSION_ID", &audit_context.operator_session_id);
+    set_optional_compatible_env("OPERATOR_INSTANCE_ID", audit_context.operator_instance_id.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_USERNAME", audit_context.ssh_username.as_deref());
+    let uid = audit_context.unix_uid.map(|value| value.to_string());
+    set_optional_compatible_env("OPERATOR_UNIX_UID", uid.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_CLIENT_IP", audit_context.ssh.client_ip.as_deref());
+    let client_port = audit_context.ssh.client_port.map(|value| value.to_string());
+    set_optional_compatible_env("OPERATOR_SSH_CLIENT_PORT", client_port.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_SERVER_IP", audit_context.ssh.server_ip.as_deref());
+    let server_port = audit_context.ssh.server_port.map(|value| value.to_string());
+    set_optional_compatible_env("OPERATOR_SSH_SERVER_PORT", server_port.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_TTY", audit_context.ssh.tty.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_AUTH_METHOD", audit_context.ssh.auth_method.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_KEY_FINGERPRINT", audit_context.ssh.key_fingerprint.as_deref());
+
     let shell_rows = size.height.saturating_sub(12).max(8);
     let mut shell = match ShellSession::spawn(size.width, shell_rows) {
         Ok(session) => Some(session),
@@ -166,14 +187,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut app = App::new(journal, startup_message);
+    app.journal.set_operator_session_context(audit_context.clone());
+    app.record_operator_session_event(
+        EntryKind::OperatorSessionStart,
+        format!(
+            "OPERATOR session started · {} · session {}",
+            audit_context.connection_summary(),
+            audit_context.operator_session_id
+        ),
+    );
     match shell.as_ref() {
         Some(session) => {
-            let client = ssh_client_ip()
-                .map(|ip| format!("Client {ip} connected · "))
-                .unwrap_or_default();
             app.record_system(format!(
-                "{client}Connected to interactive shell ({}) · commands are recorded once; PTY input echo is disabled.",
-                session.shell_program().display()
+                "{} connected to interactive shell ({}) · OPERATOR session {} · commands are recorded once; PTY input echo is disabled.",
+                audit_context.connection_summary(),
+                session.shell_program().display(),
+                audit_context.operator_session_id
             ));
         }
         None => {
@@ -197,7 +226,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(error) = drain_shared_journal_updates(&mut app, &mut hermes_bridge) {
         app.status = format!("Hermes journal import pending: {error}");
     }
-    drain_shell(&mut app, &mut shell)?;
+    if let Err(error) = drain_shell(&mut app, &mut shell) {
+        app.record_system(format!("Final shell drain failed: {error}"));
+    }
+    app.record_operator_session_event(
+        EntryKind::OperatorSessionEnd,
+        if result.is_ok() {
+            "OPERATOR session ended cleanly".to_string()
+        } else {
+            "OPERATOR session terminated with an application error".to_string()
+        },
+    );
     let save_result = app.journal.save_pending();
     drop(shell);
     drop(terminal);
@@ -990,6 +1029,17 @@ enum FileTransferRequest {
     LegacyScp,
 }
 
+fn set_optional_compatible_env(name: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        paths::set_compatible_env(name, value);
+        return;
+    }
+    std::env::remove_var(name);
+    if let Some(suffix) = name.strip_prefix("OPERATOR_") {
+        std::env::remove_var(format!("STREENOTE_{suffix}"));
+    }
+}
+
 /// Return the peer address supplied by OpenSSH for this login session.
 /// SSH_CONNECTION contains: client_ip client_port server_ip server_port.
 /// SSH_CLIENT is retained as a compatibility fallback.
@@ -1233,8 +1283,13 @@ fn run(
     app.active_reviewer_count = review_server.active_reviewer_count();
     let mut last_reviewer_count_refresh = Instant::now();
     let mut last_hot_cache_prune = Instant::now();
+    let mut last_session_heartbeat = Instant::now();
 
     loop {
+        if last_session_heartbeat.elapsed() >= Duration::from_secs(300) {
+            app.record_operator_session_heartbeat();
+            last_session_heartbeat = Instant::now();
+        }
         if last_hot_cache_prune.elapsed() >= Duration::from_secs(60) {
             app.prune_hot_cache();
             last_hot_cache_prune = Instant::now();
@@ -1277,8 +1332,15 @@ fn run(
                     app.show_help = false;
                 } else if key.kind == KeyEventKind::Press && key.code == KeyCode::F(1) {
                     let size = terminal.size()?;
-                    match ShellSession::spawn(size.width, size.height) {
+                    match ShellSession::spawn_with_command_audit(size.width, size.height) {
                         Ok(mut workspace_session) => {
+                            app.record_operator_session_event(
+                                EntryKind::OperatorWorkspaceStart,
+                                "Entered F1 interactive terminal workspace".to_string(),
+                            );
+                            if !workspace_session.supports_command_audit() {
+                                app.record_system("F1 workspace command history capture is available only when the configured nested shell is Bash.".to_string());
+                            }
                             run_terminal_workspace(
                                 terminal,
                                 app,
@@ -1286,6 +1348,14 @@ fn run(
                                 hermes_bridge,
                                 review_server,
                             )?;
+                            match workspace_session.drain_audited_commands() {
+                                Ok(commands) => app.capture_workspace_commands(commands),
+                                Err(error) => app.record_system(format!("Final F1 command audit drain failed: {error}")),
+                            }
+                            app.record_operator_session_event(
+                                EntryKind::OperatorWorkspaceEnd,
+                                "Exited F1 interactive terminal workspace".to_string(),
+                            );
                             // Dropping this session closes only the workspace shell.
                             // OPERATOR's primary transcript shell remains untouched.
                             terminal.clear()?;
@@ -1430,6 +1500,8 @@ fn run_terminal_workspace_loop(
     let mut pending_escape = Vec::with_capacity(8);
     let mut pending_since: Option<Instant> = None;
     let mut last_hot_cache_prune = Instant::now();
+    let mut last_session_heartbeat = Instant::now();
+    let mut audit_read_error_reported = false;
     let mut last_resize_check = Instant::now();
     let mut last_size = terminal.size()?;
 
@@ -1437,6 +1509,18 @@ fn run_terminal_workspace_loop(
         if last_hot_cache_prune.elapsed() >= Duration::from_secs(60) {
             app.prune_hot_cache();
             last_hot_cache_prune = Instant::now();
+        }
+        if last_session_heartbeat.elapsed() >= Duration::from_secs(300) {
+            app.record_operator_session_heartbeat();
+            last_session_heartbeat = Instant::now();
+        }
+        match session.drain_audited_commands() {
+            Ok(commands) => app.capture_workspace_commands(commands),
+            Err(error) if !audit_read_error_reported => {
+                app.record_system(format!("F1 command history audit read failed: {error}"));
+                audit_read_error_reported = true;
+            }
+            Err(_) => {}
         }
         app.expire_hermes_review_if_needed();
         review_server.set_enabled(app.review_hermes_responses);

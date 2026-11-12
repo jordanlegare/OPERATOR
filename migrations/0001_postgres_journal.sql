@@ -49,3 +49,34 @@ CREATE INDEX IF NOT EXISTS operator_journal_search_entry_idx
 -- Supports loading a full historical search result by its stable record ID.
 CREATE INDEX IF NOT EXISTS operator_journal_search_record_idx
     ON operator_journal_search_documents (record_id);
+
+-- Structured OPERATOR SSH/session attribution. Existing JSONB payloads remain
+-- backward compatible, and these columns support indexed filters across reviewers.
+ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS operator_session_id TEXT;
+ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS operator_instance_id TEXT;
+ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS ssh_username TEXT;
+ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS unix_uid BIGINT;
+ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS ssh_client_ip TEXT;
+ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS ssh_client_port INTEGER;
+ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS ssh_server_ip TEXT;
+ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS ssh_server_port INTEGER;
+ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS ssh_tty TEXT;
+ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS ssh_auth_method TEXT;
+ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS ssh_key_fingerprint TEXT;
+ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS operator_surface TEXT;
+
+CREATE INDEX IF NOT EXISTS operator_journal_operator_session_idx
+    ON operator_journal_entries (operator_session_id, occurred_at, id)
+    WHERE operator_session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS operator_journal_ssh_client_ip_idx
+    ON operator_journal_entries (ssh_client_ip, occurred_at, id)
+    WHERE ssh_client_ip IS NOT NULL;
+CREATE INDEX IF NOT EXISTS operator_journal_ssh_username_idx
+    ON operator_journal_entries (ssh_username, occurred_at, id)
+    WHERE ssh_username IS NOT NULL;
+CREATE INDEX IF NOT EXISTS operator_journal_unix_uid_idx
+    ON operator_journal_entries (unix_uid, occurred_at, id)
+    WHERE unix_uid IS NOT NULL;
+CREATE INDEX IF NOT EXISTS operator_journal_ssh_fingerprint_idx
+    ON operator_journal_entries (ssh_key_fingerprint, occurred_at, id)
+    WHERE ssh_key_fingerprint IS NOT NULL;

@@ -38,6 +38,43 @@ def env_value(name: str, default=None):
                     value = str(rewritten)
     return default if value is None else value
 
+def operator_origin_metadata() -> dict:
+    """Carry the originating OPERATOR login across Hermes inbox fan-out."""
+    fields = {
+        "operator_session_id": "OPERATOR_SESSION_ID",
+        "operator_instance_id": "OPERATOR_INSTANCE_ID",
+        "ssh_username": "OPERATOR_SSH_USERNAME",
+        "ssh_client_ip": "OPERATOR_SSH_CLIENT_IP",
+        "ssh_server_ip": "OPERATOR_SSH_SERVER_IP",
+        "ssh_tty": "OPERATOR_SSH_TTY",
+        "ssh_auth_method": "OPERATOR_SSH_AUTH_METHOD",
+        "ssh_key_fingerprint": "OPERATOR_SSH_KEY_FINGERPRINT",
+    }
+    result = {
+        key: str(value)[:512]
+        for key, name in fields.items()
+        if (value := env_value(name)) not in (None, "")
+    }
+    numeric_fields = {
+        "unix_uid": "OPERATOR_UNIX_UID",
+        "ssh_client_port": "OPERATOR_SSH_CLIENT_PORT",
+        "ssh_server_port": "OPERATOR_SSH_SERVER_PORT",
+    }
+    for key, name in numeric_fields.items():
+        value = env_value(name)
+        if value is None:
+            continue
+        try:
+            number = int(value)
+            maximum = 65535 if key.endswith("_port") else 0xFFFFFFFF
+            if 0 <= number <= maximum:
+                result[key] = number
+        except (TypeError, ValueError):
+            pass
+    if result.get("operator_session_id"):
+        result["operator_surface"] = "hermes"
+    return result
+
 SENSITIVE_KEY = re.compile(
     r"(?i)(password|passwd|secret|token|api[_-]?key|authorization|credential|private[_-]?key)"
 )
@@ -519,6 +556,7 @@ def write_history_snapshot(
         "turn_id": None,
         "tool_call_id": None,
         "iteration": None,
+        **operator_origin_metadata(),
     }
     # Stage the durable event before setting the marker. A crash before the
     # marker only causes a retry of the same deduplicated event ID.
@@ -736,6 +774,7 @@ def main() -> int:
             "turn_id": turn_id,
             "tool_call_id": tool_call_id,
             "iteration": iteration,
+            **operator_origin_metadata(),
         }
 
         inbox = Path(inbox_value).expanduser()

@@ -43,6 +43,10 @@ jobs:
 
       - name: Test bounded-memory JSONL archive search
         run: cargo test archive::tests
+      - name: Test SSH session identity and Bash workspace command audit
+        run: |
+          cargo test audit::tests
+          cargo test shell::tests
 
       - name: Test 30-day journal hot window
         run: cargo test storage::hot_window_tests

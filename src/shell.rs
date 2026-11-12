@@ -1,7 +1,7 @@
 use std::{
     env,
-    fs,
-    io::{self, Read, Write},
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
@@ -25,6 +25,10 @@ pub struct ShellSession {
     exited: bool,
     reader_closed: bool,
     shell_program: PathBuf,
+    audit_file_path: Option<PathBuf>,
+    audit_rcfile_path: Option<PathBuf>,
+    audit_file_cursor: u64,
+    audit_file_pending: Vec<u8>,
 }
 
 impl std::fmt::Debug for ShellSession {
@@ -38,6 +42,29 @@ impl std::fmt::Debug for ShellSession {
 
 impl ShellSession {
     pub fn spawn(cols: u16, rows: u16) -> io::Result<Self> {
+        Self::spawn_internal(cols, rows, None)
+    }
+
+    /// Spawn an independent Bash workspace with a PROMPT_COMMAND hook that
+    /// appends completed history entries to a private NUL-delimited file.
+    /// No raw terminal bytes or secret prompt input are observed.
+    pub fn spawn_with_command_audit(cols: u16, rows: u16) -> io::Result<Self> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = env::temp_dir().join(format!(
+            "operator-audit-{}-{nanos:x}.nul",
+            std::process::id()
+        ));
+        Self::spawn_internal(cols, rows, Some(path))
+    }
+
+    fn spawn_internal(
+        cols: u16,
+        rows: u16,
+        requested_audit_path: Option<PathBuf>,
+    ) -> io::Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -59,6 +86,54 @@ impl ShellSession {
         // OPERATOR_SHELL is the explicit override; otherwise use $SHELL only
         // when it does not resolve to this executable.
         let shell = resolve_shell_program();
+        let supports_bash_audit = shell.file_name()
+            .is_some_and(|name| name.to_string_lossy().to_ascii_lowercase().contains("bash"));
+        let audit_file_path = requested_audit_path.filter(|_| supports_bash_audit);
+        let audit_rcfile_path = audit_file_path.as_ref().map(|path| path.with_extension("bashrc"));
+        if let Some(path) = audit_file_path.as_ref() {
+            let mut options = OpenOptions::new();
+            options.create_new(true).read(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            options.open(path)?;
+        }
+        if let (Some(command_path), Some(rcfile_path)) = (audit_file_path.as_ref(), audit_rcfile_path.as_ref()) {
+            let rc_source = r#"
+if [[ -r "$HOME/.bashrc" ]]; then
+  source "$HOME/.bashrc"
+elif [[ -r /etc/bash.bashrc ]]; then
+  source /etc/bash.bashrc
+fi
+__operator_audit_capture() {
+  local current line
+  current="${HISTCMD:-0}"
+  if [[ "$current" != "${__OPERATOR_AUDIT_LAST_HISTCMD:-}" ]]; then
+    line="$(fc -ln -1 2>/dev/null)"
+    line="${line#"${line%%[![:space:]]*}"}"
+    if [[ -n "$line" ]]; then
+      printf '%s\0' "$line" >> "$OPERATOR_AUDIT_COMMAND_FILE"
+    fi
+    __OPERATOR_AUDIT_LAST_HISTCMD="$current"
+  fi
+}
+PROMPT_COMMAND="__operator_audit_capture${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+trap '__operator_audit_capture' EXIT
+"#;
+            let mut options = OpenOptions::new();
+            options.create_new(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut rcfile = options.open(rcfile_path)?;
+            rcfile.write_all(rc_source.as_bytes())?;
+            rcfile.sync_all()?;
+            let _ = command_path;
+        }
         let mut command = CommandBuilder::new(&shell);
         // Keep PostgreSQL credentials in the OPERATOR process only; do not
         // leak the connection URL into the interactive shell's environment.
@@ -82,6 +157,13 @@ impl ShellSession {
         // Keep subprocesses and shell startup files pointed at the real shell,
         // not at OPERATOR when it is the account's configured login shell.
         command.env("SHELL", &shell);
+        if let Some(path) = audit_file_path.as_ref() {
+            command.env("OPERATOR_AUDIT_COMMAND_FILE", path);
+            if let Some(rcfile) = audit_rcfile_path.as_ref() {
+                command.arg("--rcfile");
+                command.arg(rcfile);
+            }
+        }
 
         // Start the configured interactive shell normally so Debian's shell
         // startup files, aliases, prompt, PATH, and environment are honored.
@@ -90,10 +172,18 @@ impl ShellSession {
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
 
-        let child = pair
-            .slave
-            .spawn_command(command)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+        let child = match pair.slave.spawn_command(command) {
+            Ok(child) => child,
+            Err(error) => {
+                if let Some(path) = audit_file_path.as_ref() {
+                    let _ = fs::remove_file(path);
+                }
+                if let Some(path) = audit_rcfile_path.as_ref() {
+                    let _ = fs::remove_file(path);
+                }
+                return Err(io::Error::other(error.to_string()));
+            }
+        };
         drop(pair.slave);
 
         let mut reader = pair
@@ -137,6 +227,10 @@ impl ShellSession {
             exited: false,
             reader_closed: false,
             shell_program: shell,
+            audit_file_path,
+            audit_rcfile_path,
+            audit_file_cursor: 0,
+            audit_file_pending: Vec::new(),
         })
     }
 
@@ -152,6 +246,44 @@ impl ShellSession {
             .and_then(|pid| fs::read_link(format!("/proc/{pid}/cwd")).ok())
             .or_else(|| env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    pub fn supports_command_audit(&self) -> bool {
+        self.audit_file_path.is_some()
+    }
+
+    /// Drain newly completed, NUL-delimited Bash history records.
+    pub fn drain_audited_commands(&mut self) -> io::Result<Vec<String>> {
+        let Some(path) = self.audit_file_path.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let mut file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let length = file.metadata()?.len();
+        if length <= self.audit_file_cursor {
+            return Ok(Vec::new());
+        }
+        file.seek(SeekFrom::Start(self.audit_file_cursor))?;
+        let bytes_to_read = length.saturating_sub(self.audit_file_cursor).min(1024 * 1024) as usize;
+        let mut buffer = vec![0u8; bytes_to_read];
+        file.read_exact(&mut buffer)?;
+        self.audit_file_cursor = self.audit_file_cursor.saturating_add(bytes_to_read as u64);
+        self.audit_file_pending.extend_from_slice(&buffer);
+
+        let mut commands = Vec::new();
+        while let Some(end) = self.audit_file_pending.iter().position(|byte| *byte == 0) {
+            let record: Vec<u8> = self.audit_file_pending.drain(..=end).collect();
+            let command = String::from_utf8_lossy(&record[..record.len().saturating_sub(1)])
+                .trim()
+                .to_string();
+            if !command.is_empty() {
+                commands.push(command);
+            }
+        }
+        Ok(commands)
     }
 
     /// Build the footer prompt from the real shell process identity and cwd.
@@ -479,6 +611,12 @@ impl Drop for ShellSession {
         if !self.exited {
             let _ = self.child.kill();
         }
+        if let Some(path) = self.audit_file_path.take() {
+            let _ = fs::remove_file(path);
+        }
+        if let Some(path) = self.audit_rcfile_path.take() {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 
@@ -672,6 +810,45 @@ mod tests {
     use super::TranscriptParser;
 
     #[test]
+    fn bash_workspace_audit_captures_submitted_history_commands() {
+        use super::ShellSession;
+        use std::time::{Duration, Instant};
+
+        let Ok(mut session) = ShellSession::spawn_with_command_audit(80, 24) else {
+            // Shell integration is optional on platforms without a usable PTY.
+            return;
+        };
+        if !session.supports_command_audit() {
+            return;
+        }
+
+        // Let Bash source its normal interactive startup files and install the
+        // post-startup history hook before submitting the test command.
+        let startup_deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < startup_deadline {
+            let _ = session.drain_output();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        session.send_line("printf 'operator-audit-shell-test\\n'")
+            .expect("submit Bash audit fixture");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut captured = Vec::new();
+        while Instant::now() < deadline {
+            let _ = session.drain_output();
+            captured.extend(session.drain_audited_commands().expect("read Bash audit spool"));
+            if captured.iter().any(|command| command.contains("operator-audit-shell-test")) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            captured.iter().any(|command| command.contains("operator-audit-shell-test")),
+            "Bash history hook did not record the submitted command: {captured:?}"
+        );
+    }
+
+    #[test]
     fn transcript_removes_ansi_and_preserves_crlf() {
         let mut parser = TranscriptParser::default();
         let lines = parser.feed(b"\x1b[32mgreen\x1b[0m\r\nnext\r\x1b[Kdone\n");
@@ -701,9 +878,9 @@ mod tests {
     #[test]
     fn alternate_screen_redraws_are_not_added_to_transcript() {
         let mut parser = TranscriptParser::default();
-        assert!(parser.feed(b"before\\n\\x1b[?1049hscreen contents\\nmore screen").len() == 1);
+        assert!(parser.feed(b"before\n\x1b[?1049hscreen contents\nmore screen").len() == 1);
         assert!(parser.flush_partial().is_none());
-        let lines = parser.feed(b"\\x1b[?1049lafter\\n");
+        let lines = parser.feed(b"\x1b[?1049lafter\n");
         assert_eq!(lines, vec!["after".to_string()]);
     }
 

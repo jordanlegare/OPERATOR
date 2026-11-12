@@ -26,6 +26,12 @@ pub struct ArchiveSearchHit {
     pub occurred_at: String,
     pub snippet: String,
     pub line_number: usize,
+    pub operator_session_id: Option<String>,
+    pub operator_instance_id: Option<String>,
+    pub ssh_username: Option<String>,
+    pub unix_uid: Option<u32>,
+    pub ssh_client_ip: Option<String>,
+    pub operator_surface: Option<String>,
     pub start_offset: u64,
     pub end_offset: u64,
 }
@@ -44,6 +50,36 @@ pub struct ArchiveSearchResult {
 struct SearchRequest {
     request_id: u64,
     query: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ArchiveSearchSpec {
+    needle: String,
+    offset: usize,
+    limit: usize,
+    kind: Option<String>,
+    operator_session: Option<String>,
+    client_ip: Option<String>,
+    ssh_user: Option<String>,
+    unix_uid: Option<u32>,
+    ssh_key_fingerprint: Option<String>,
+}
+
+impl ArchiveSearchSpec {
+    fn has_audit_filter(&self) -> bool {
+        self.operator_session.is_some() || self.client_ip.is_some()
+            || self.ssh_user.is_some() || self.unix_uid.is_some()
+            || self.ssh_key_fingerprint.is_some()
+    }
+
+    fn matches(&self, entry: &Entry) -> bool {
+        self.kind.as_deref().map_or(true, |kind| entry_kind_name(entry.kind) == kind)
+            && self.operator_session.as_deref().map_or(true, |id| entry.operator_session_id.as_deref() == Some(id))
+            && self.client_ip.as_deref().map_or(true, |ip| entry.ssh_client_ip.as_deref() == Some(ip))
+            && self.ssh_user.as_deref().map_or(true, |user| entry.ssh_username.as_deref() == Some(user))
+            && self.unix_uid.map_or(true, |uid| entry.unix_uid == Some(uid))
+            && self.ssh_key_fingerprint.as_deref().map_or(true, |key| entry.ssh_key_fingerprint.as_deref() == Some(key))
+    }
 }
 
 #[derive(Debug)]
@@ -220,7 +256,7 @@ impl ArchiveSearcher {
 }
 
 fn search_file(path: &Path, request_id: u64, raw_query: &str) -> ArchiveSearchResult {
-    let (needle, offset, limit) = match parse_query(raw_query) {
+    let spec = match parse_query(raw_query) {
         Ok(parsed) => parsed,
         Err(error) => return ArchiveSearchResult {
             request_id,
@@ -233,15 +269,12 @@ fn search_file(path: &Path, request_id: u64, raw_query: &str) -> ArchiveSearchRe
         },
     };
 
-    // Normalize once before both archive passes so counting and page capture
-    // use exactly the same case-insensitive literal match.
-    let normalized_needle = needle.to_lowercase();
     let mut result = ArchiveSearchResult {
         request_id,
-        query: needle.clone(),
+        query: if spec.needle.is_empty() { raw_query.to_string() } else { spec.needle.clone() },
         total: 0,
-        offset,
-        limit,
+        offset: spec.offset,
+        limit: spec.limit,
         hits: Vec::new(),
         error: None,
     };
@@ -257,16 +290,16 @@ fn search_file(path: &Path, request_id: u64, raw_query: &str) -> ArchiveSearchRe
     // First pass counts the full result set without retaining hit records.
     // Second pass captures only the requested page, so even offset:100000000
     // consumes O(limit) result memory rather than O(offset + limit).
-    let total = match scan_archive(path, archive_len, &normalized_needle, None) {
+    let total = match scan_archive(path, archive_len, &spec, None) {
         Ok((total, _)) => total,
         Err(error) => {
             result.error = Some(error);
             return result;
         }
     };
-    let page_start = total.saturating_sub(offset.saturating_add(limit));
-    let page_end = total.saturating_sub(offset);
-    let (_, mut hits) = match scan_archive(path, archive_len, &normalized_needle, Some((page_start, page_end))) {
+    let page_start = total.saturating_sub(spec.offset.saturating_add(spec.limit));
+    let page_end = total.saturating_sub(spec.offset);
+    let (_, mut hits) = match scan_archive(path, archive_len, &spec, Some((page_start, page_end))) {
         Ok(scanned) => scanned,
         Err(error) => {
             result.error = Some(error);
@@ -276,6 +309,9 @@ fn search_file(path: &Path, request_id: u64, raw_query: &str) -> ArchiveSearchRe
 
     result.total = total;
     result.hits = hits.drain(..).rev().collect();
+    if spec.has_audit_filter() {
+        result.hits.sort_by(|left, right| left.operator_session_id.cmp(&right.operator_session_id).then_with(|| left.occurred_at.cmp(&right.occurred_at)));
+    }
     result
 }
 
@@ -284,7 +320,7 @@ fn search_file(path: &Path, request_id: u64, raw_query: &str) -> ArchiveSearchRe
 fn scan_archive(
     path: &Path,
     archive_len: u64,
-    needle: &str,
+    spec: &ArchiveSearchSpec,
     capture_range: Option<(usize, usize)>,
 ) -> Result<(usize, Vec<ArchiveSearchHit>), String> {
     let file = File::open(path).map_err(|error| format!("open JSONL archive: {error}"))?;
@@ -327,7 +363,7 @@ fn scan_archive(
                 _ => {
                     if let Some((previous, start, end, first_line)) = pending_delta.take() {
                         collect_match(
-                            previous, start, end, first_line, needle,
+                            previous, start, end, first_line, spec,
                             capture_range, &mut matched_count, &mut hits,
                         );
                     }
@@ -339,14 +375,14 @@ fn scan_archive(
 
         if let Some((previous, start, end, first_line)) = pending_delta.take() {
             collect_match(
-                previous, start, end, first_line, needle,
+                previous, start, end, first_line, spec,
                 capture_range, &mut matched_count, &mut hits,
             );
         }
 
         if !matches!(entry.kind, EntryKind::HermesStreamStart | EntryKind::HermesStreamEnd) {
             collect_match(
-                entry, start_offset, byte_offset, line_number, needle,
+                entry, start_offset, byte_offset, line_number, spec,
                 capture_range, &mut matched_count, &mut hits,
             );
         }
@@ -354,7 +390,7 @@ fn scan_archive(
 
     if let Some((previous, start, end, first_line)) = pending_delta {
         collect_match(
-            previous, start, end, first_line, needle,
+            previous, start, end, first_line, spec,
             capture_range, &mut matched_count, &mut hits,
         );
     }
@@ -367,12 +403,19 @@ fn collect_match(
     start_offset: u64,
     end_offset: u64,
     line_number: usize,
-    needle: &str,
+    spec: &ArchiveSearchSpec,
     capture_range: Option<(usize, usize)>,
     matched_count: &mut usize,
     hits: &mut Vec<ArchiveSearchHit>,
 ) {
-    if !entry.text.to_lowercase().contains(needle) {
+    if entry.kind == EntryKind::OperatorSessionHeartbeat
+        && spec.kind.as_deref() != Some("operator_session_heartbeat")
+    {
+        return;
+    }
+    if !spec.matches(&entry)
+        || (!spec.needle.is_empty() && !entry.text.to_lowercase().contains(&spec.needle.to_lowercase()))
+    {
         return;
     }
 
@@ -391,48 +434,58 @@ fn collect_match(
         line_number,
         start_offset,
         end_offset,
+        operator_session_id: entry.operator_session_id,
+        operator_instance_id: entry.operator_instance_id,
+        ssh_username: entry.ssh_username,
+        unix_uid: entry.unix_uid,
+        ssh_client_ip: entry.ssh_client_ip,
+        operator_surface: entry.operator_surface,
     });
 }
 
-fn parse_query(raw_query: &str) -> Result<(String, usize, usize), String> {
+fn parse_query(raw_query: &str) -> Result<ArchiveSearchSpec, String> {
+    let mut spec = ArchiveSearchSpec { limit: DEFAULT_PAGE_LIMIT, ..ArchiveSearchSpec::default() };
     let mut terms = Vec::new();
-    let mut limit = DEFAULT_PAGE_LIMIT;
-    let mut offset = 0usize;
-
     for token in raw_query.split_whitespace() {
         match token {
             "--literal" => continue,
             "--web" | "--phrase" | "--tsquery" | "--fuzzy" => {
-                return Err(format!(
-                    "{token} search mode requires the PostgreSQL backend; local JSONL archive search supports literal substrings"
-                ));
+                return Err(format!("{token} search mode requires PostgreSQL; JSONL supports literal and audit filters"));
             }
             _ => {}
         }
         if let Some(value) = token.strip_prefix("limit:") {
             let parsed = value.parse::<usize>().map_err(|_| format!("invalid limit {value:?}"))?;
-            if parsed == 0 {
-                return Err("limit must be between 1 and 500".to_string());
-            }
-            limit = parsed.min(MAX_PAGE_LIMIT);
+            if parsed == 0 { return Err("limit must be between 1 and 500".to_string()); }
+            spec.limit = parsed.min(MAX_PAGE_LIMIT);
         } else if let Some(value) = token.strip_prefix("offset:") {
-            offset = value.parse::<usize>().map_err(|_| format!("invalid offset {value:?}"))?;
-        } else if token.split_once(':').is_some_and(|(key, _)| {
-            matches!(key, "kind" | "session" | "conversation" | "after" | "before")
-        }) {
-            return Err(format!(
-                "filter {token:?} requires the PostgreSQL backend; remove the filter for a full literal archive scan"
-            ));
+            spec.offset = value.parse::<usize>().map_err(|_| format!("invalid offset {value:?}"))?;
+        } else if let Some(value) = token.strip_prefix("operator_session:").or_else(|| token.strip_prefix("op_session:")) {
+            if value.is_empty() { return Err("operator_session: requires an OPERATOR session ID".to_string()); }
+            spec.operator_session = Some(value.to_string());
+        } else if let Some(value) = token.strip_prefix("ip:") {
+            spec.client_ip = Some(value.parse::<std::net::IpAddr>().map_err(|_| format!("invalid ip address {value:?}"))?.to_string());
+        } else if let Some(value) = token.strip_prefix("user:") {
+            if value.is_empty() { return Err("user: requires an SSH login name".to_string()); }
+            spec.ssh_user = Some(value.to_string());
+        } else if let Some(value) = token.strip_prefix("uid:") {
+            spec.unix_uid = Some(value.parse::<u32>().map_err(|_| format!("invalid uid {value:?}"))?);
+        } else if let Some(value) = token.strip_prefix("key:") {
+            if value.is_empty() { return Err("key: requires an SSH public-key fingerprint".to_string()); }
+            spec.ssh_key_fingerprint = Some(value.to_string());
+        } else if let Some(value) = token.strip_prefix("kind:") {
+            spec.kind = Some(value.to_ascii_lowercase());
+        } else if token.split_once(':').is_some_and(|(key, _)| matches!(key, "session" | "conversation" | "after" | "before")) {
+            return Err(format!("filter {token:?} requires PostgreSQL; JSONL audit search supports ip:, user:, uid:, key:, operator_session:, kind:, limit: and offset:"));
         } else {
             terms.push(token);
         }
     }
-
-    let needle = terms.join(" ").trim_matches('"').trim_matches('\'').to_string();
-    if needle.is_empty() {
-        return Err("enter search terms; local archive search supports literal substrings".to_string());
+    spec.needle = terms.join(" ").trim_matches('"').trim_matches('\'').to_string();
+    if spec.needle.is_empty() && !spec.has_audit_filter() {
+        return Err("enter search terms or an audit filter such as ip:203.0.113.42".to_string());
     }
-    Ok((needle, offset, limit))
+    Ok(spec)
 }
 
 fn can_merge_stream_delta(previous: &Entry, next: &Entry) -> bool {
@@ -441,6 +494,7 @@ fn can_merge_stream_delta(previous: &Entry, next: &Entry) -> bool {
         && previous.conversation_id == next.conversation_id
         && previous.turn_id == next.turn_id
         && previous.iteration == next.iteration
+        && previous.operator_session_id == next.operator_session_id
 }
 
 fn entry_kind_name(kind: EntryKind) -> &'static str {
@@ -459,6 +513,11 @@ fn entry_kind_name(kind: EntryKind) -> &'static str {
         EntryKind::HermesHistory => "hermes_history",
         EntryKind::HermesInterim => "hermes_interim",
         EntryKind::HermesSession => "hermes_session",
+        EntryKind::OperatorSessionStart => "operator_session_start",
+        EntryKind::OperatorSessionHeartbeat => "operator_session_heartbeat",
+        EntryKind::OperatorSessionEnd => "operator_session_end",
+        EntryKind::OperatorWorkspaceStart => "operator_workspace_start",
+        EntryKind::OperatorWorkspaceEnd => "operator_workspace_end",
     }
 }
 
@@ -513,6 +572,47 @@ mod tests {
         assert!(result.hits[0].line_number == 1);
         let loaded = searcher.read_hit(&result.hits[0]).expect("read selected archive entry");
         assert_eq!(loaded.text, old.text);
+
+        drop(searcher);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn filters_complete_archive_by_client_ip_and_groups_originating_sessions() {
+        let path = test_path();
+        let mut first = Entry::with_kind(EntryKind::TerminalCommand, "systemctl status ssh".to_string());
+        first.operator_session_id = Some("op-session-a".to_string());
+        first.ssh_client_ip = Some("203.0.113.42".to_string());
+        first.ssh_username = Some("deploy".to_string());
+        first.unix_uid = Some(1204);
+        let mut heartbeat = Entry::with_kind(EntryKind::OperatorSessionHeartbeat, "heartbeat".to_string());
+        heartbeat.operator_session_id = first.operator_session_id.clone();
+        heartbeat.ssh_client_ip = first.ssh_client_ip.clone();
+        let mut second = Entry::with_kind(EntryKind::TerminalCommand, "journalctl -u ssh".to_string());
+        second.operator_session_id = Some("op-session-b".to_string());
+        second.ssh_client_ip = Some("203.0.113.42".to_string());
+        second.ssh_username = Some("deploy".to_string());
+        let mut unrelated = Entry::with_kind(EntryKind::TerminalCommand, "uname -a".to_string());
+        unrelated.operator_session_id = Some("op-session-c".to_string());
+        unrelated.ssh_client_ip = Some("198.51.100.9".to_string());
+
+        let mut bytes = Vec::new();
+        for entry in [&first, &heartbeat, &second, &unrelated] {
+            bytes.extend(serde_json::to_vec(entry).expect("serialize audit record"));
+            bytes.push(b'\n');
+        }
+        fs::write(&path, bytes).expect("write audit archive");
+
+        let searcher = ArchiveSearcher::new(path.clone()).expect("start archive search");
+        searcher.search(44, "ip:203.0.113.42 user:deploy".to_string())
+            .expect("queue IP audit search");
+        let result = wait_for_result(&searcher, 44);
+        assert!(result.error.is_none(), "audit search error: {:?}", result.error);
+        assert_eq!(result.total, 2, "heartbeats and other IPs are excluded by default");
+        assert_eq!(result.hits.len(), 2);
+        assert_eq!(result.hits[0].operator_session_id.as_deref(), Some("op-session-a"));
+        assert_eq!(result.hits[1].operator_session_id.as_deref(), Some("op-session-b"));
+        assert_eq!(result.hits[0].ssh_client_ip.as_deref(), Some("203.0.113.42"));
 
         drop(searcher);
         let _ = fs::remove_file(path);

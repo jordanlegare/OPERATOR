@@ -10,6 +10,7 @@ use std::{
 use chrono::{DateTime, Duration as ChronoDuration, Local, SecondsFormat, Utc};
 
 use crate::{
+    audit::OperatorSessionContext,
     archive::{ArchiveSearchHit, ArchiveSearchResult, ArchiveSearcher},
     postgres::{PostgresJournal, SearchHit as PostgresSearchHit, SearchResult as PostgresSearchResult, Update as PostgresUpdate},
 };
@@ -35,6 +36,11 @@ pub enum EntryKind {
     HermesHistory,
     HermesInterim,
     HermesSession,
+    OperatorSessionStart,
+    OperatorSessionHeartbeat,
+    OperatorSessionEnd,
+    OperatorWorkspaceStart,
+    OperatorWorkspaceEnd,
 }
 
 impl Default for EntryKind {
@@ -73,6 +79,32 @@ pub struct Entry {
     /// Provider iteration within a turn; stream hooks may fire more than once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iteration: Option<u32>,
+    /// OPERATOR login identity; deliberately distinct from Hermes session_id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_instance_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unix_uid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_client_ip: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_client_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_server_ip: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_server_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_tty: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_auth_method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_key_fingerprint: Option<String>,
+    /// "transcript" for the normal OPERATOR input or "f1_workspace" for Bash history capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_surface: Option<String>,
 }
 
 fn new_record_id() -> String {
@@ -102,6 +134,18 @@ impl Entry {
             turn_id: None,
             tool_call_id: None,
             iteration: None,
+            operator_session_id: None,
+            operator_instance_id: None,
+            ssh_username: None,
+            unix_uid: None,
+            ssh_client_ip: None,
+            ssh_client_port: None,
+            ssh_server_ip: None,
+            ssh_server_port: None,
+            ssh_tty: None,
+            ssh_auth_method: None,
+            ssh_key_fingerprint: None,
+            operator_surface: None,
         }
     }
 
@@ -137,6 +181,18 @@ impl Entry {
             turn_id,
             tool_call_id,
             iteration,
+            operator_session_id: None,
+            operator_instance_id: None,
+            ssh_username: None,
+            unix_uid: None,
+            ssh_client_ip: None,
+            ssh_client_port: None,
+            ssh_server_ip: None,
+            ssh_server_port: None,
+            ssh_tty: None,
+            ssh_auth_method: None,
+            ssh_key_fingerprint: None,
+            operator_surface: None,
         }
     }
 }
@@ -167,6 +223,8 @@ pub struct Journal {
     /// Byte offset through the shared JSONL file already checked for external
     /// rows. Each SSH process advances this while holding JournalFileLock.
     journal_scan_offset: u64,
+    /// Immutable origin metadata for records created by this OPERATOR process.
+    operator_session_context: Option<OperatorSessionContext>,
     /// PostgreSQL is authoritative when configured; path remains the JSONL import/export path.
     postgres: Option<PostgresJournal>,
     postgres_search_results: Vec<PostgresSearchResult>,
@@ -323,6 +381,7 @@ impl Journal {
             pending_record_ids: HashSet::new(),
             pending_event_ids: HashSet::new(),
             journal_scan_offset,
+            operator_session_context: None,
             postgres: None,
             postgres_search_results: Vec::new(),
             postgres_archive_results: Vec::new(),
@@ -353,6 +412,7 @@ impl Journal {
             cached_event_ids: HashSet::new(),
             pending_event_ids: HashSet::new(),
             journal_scan_offset: 0,
+            operator_session_context: None,
             postgres: Some(postgres),
             postgres_search_results: Vec::new(),
             postgres_archive_results: Vec::new(),
@@ -485,9 +545,40 @@ impl Journal {
         if self.postgres.is_some() { "PostgreSQL" } else { "JSONL" }
     }
 
+    pub fn set_operator_session_context(&mut self, context: OperatorSessionContext) {
+        self.operator_session_context = Some(context);
+    }
+
+    fn attach_operator_session(&self, entry: &mut Entry) {
+        // Imported Hermes events are fanned out to every live OPERATOR inbox.
+        // Do not claim they originated from whichever reviewer happens to import
+        // them first. Their Hermes session/conversation identity remains intact.
+        if entry.event_id.is_some() || entry.operator_session_id.is_some() {
+            return;
+        }
+        let Some(context) = self.operator_session_context.as_ref() else {
+            return;
+        };
+        entry.operator_session_id = Some(context.operator_session_id.clone());
+        entry.operator_instance_id = context.operator_instance_id.clone();
+        entry.ssh_username = context.ssh_username.clone();
+        entry.unix_uid = context.unix_uid;
+        entry.ssh_client_ip = context.ssh.client_ip.clone();
+        entry.ssh_client_port = context.ssh.client_port;
+        entry.ssh_server_ip = context.ssh.server_ip.clone();
+        entry.ssh_server_port = context.ssh.server_port;
+        entry.ssh_tty = context.ssh.tty.clone();
+        entry.ssh_auth_method = context.ssh.auth_method.clone();
+        entry.ssh_key_fingerprint = context.ssh.key_fingerprint.clone();
+        if entry.operator_surface.is_none() {
+            entry.operator_surface = Some("transcript".to_string());
+        }
+    }
+
     /// Adds to the in-memory cache first, then persists the record.
     /// No cache limit or truncation is applied. A failed disk write stays queued for retry.
     pub fn append(&mut self, mut entry: Entry) -> io::Result<()> {
+        self.attach_operator_session(&mut entry);
         if entry.kind == EntryKind::TerminalOutput
             && should_suppress_terminal_output(&entry.text)
         {
@@ -817,6 +908,10 @@ impl Journal {
         if entries.is_empty() {
             return Ok(());
         }
+        let entries: Vec<Entry> = entries.into_iter().map(|mut entry| {
+            self.attach_operator_session(&mut entry);
+            entry
+        }).collect();
 
         if self.postgres.is_some() {
             let refresh_error = self.refresh_external_entries().err();
@@ -1127,6 +1222,11 @@ pub fn entry_kind_label(kind: EntryKind) -> &'static str {
         EntryKind::HermesHistory => "HCTX",
         EntryKind::HermesInterim => "HINT",
         EntryKind::HermesSession => "HSES",
+        EntryKind::OperatorSessionStart => "OPST",
+        EntryKind::OperatorSessionHeartbeat => "OPHB",
+        EntryKind::OperatorSessionEnd => "OPEN",
+        EntryKind::OperatorWorkspaceStart => "WKST",
+        EntryKind::OperatorWorkspaceEnd => "WKED",
     }
 }
 
@@ -1313,6 +1413,7 @@ fn can_merge_stream_delta(previous: &Entry, next: &Entry) -> bool {
         && previous.conversation_id == next.conversation_id
         && previous.turn_id == next.turn_id
         && previous.iteration == next.iteration
+        && previous.operator_session_id == next.operator_session_id
 }
 
 fn append_jsonl(path: &Path, entry: &Entry) -> io::Result<()> {
@@ -1402,6 +1503,57 @@ mod hot_window_tests {
             "operator-hot-window-{}-{id}.jsonl",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn journal_attaches_operator_session_identity_but_not_to_fanned_external_events() {
+        use crate::audit::{OperatorSessionContext, SshConnectionInfo};
+
+        let path = test_path();
+        let context = OperatorSessionContext {
+            operator_session_id: "op-test-session-42".to_string(),
+            operator_instance_id: Some("review-instance-42".to_string()),
+            ssh_username: Some("deploy".to_string()),
+            unix_uid: Some(1204),
+            ssh: SshConnectionInfo {
+                client_ip: Some("203.0.113.42".to_string()),
+                client_port: Some(51234),
+                server_ip: Some("192.0.2.10".to_string()),
+                server_port: Some(22),
+                tty: Some("/dev/pts/4".to_string()),
+                auth_method: Some("publickey".to_string()),
+                key_fingerprint: Some("SHA256:test-fingerprint".to_string()),
+            },
+        };
+        let mut journal = Journal::open(path.clone()).expect("open test journal");
+        journal.set_operator_session_context(context);
+        journal.append(Entry::with_kind(EntryKind::TerminalCommand, "journalctl -u ssh".to_string()))
+            .expect("append local command");
+
+        let attributed = journal.entries.last().expect("attributed command");
+        assert_eq!(attributed.operator_session_id.as_deref(), Some("op-test-session-42"));
+        assert_eq!(attributed.operator_instance_id.as_deref(), Some("review-instance-42"));
+        assert_eq!(attributed.ssh_username.as_deref(), Some("deploy"));
+        assert_eq!(attributed.unix_uid, Some(1204));
+        assert_eq!(attributed.ssh_client_ip.as_deref(), Some("203.0.113.42"));
+        assert_eq!(attributed.ssh_key_fingerprint.as_deref(), Some("SHA256:test-fingerprint"));
+        assert_eq!(attributed.operator_surface.as_deref(), Some("transcript"));
+
+        let external = Entry::with_external_event(
+            EntryKind::HermesUser,
+            "originating Hermes prompt".to_string(),
+            attributed.timestamp.clone(),
+            "external-event-id".to_string(),
+            None, None, None, None, None, None,
+        );
+        journal.append(external).expect("append externally attributed Hermes event");
+        let imported = journal.entries.last().expect("external event");
+        assert_eq!(imported.event_id.as_deref(), Some("external-event-id"));
+        assert!(imported.operator_session_id.is_none(), "do not attribute an unknown external origin to the importing reviewer");
+
+        drop(journal);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(PathBuf::from(format!("{}.lock", path.display())));
     }
 
     #[test]

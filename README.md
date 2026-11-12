@@ -331,7 +331,11 @@ The palettes are built into OPERATOR and require no external theme package or co
 | `/search --phrase TEXT` | PostgreSQL phrase search |
 | `/search --tsquery QUERY` | Advanced PostgreSQL `tsquery` syntax |
 | `/search --fuzzy TEXT` | Trigram similarity search |
-| Search filters | PostgreSQL supports `kind:`, `session:`, `conversation:`, `after:`, `before:`; both backends support `limit:` and `offset:` |
+| `/audit ip:203.0.113.42` | Find every attributed OPERATOR SSH session and its recorded activity for a client IP |
+| `/audit ip:IP user:LOGIN` | Narrow an IP search to a Linux login |
+| `/audit operator_session:ID` | Retrieve one OPERATOR login's activity timeline |
+| `/audit key:SHA256:...` / `uid:NUMBER` | Search by captured SSH public-key fingerprint or Unix UID |
+| Search filters | Both backends support `ip:`, `user:`, `uid:`, `key:`, `operator_session:`, `kind:`, `limit:`, and `offset:`; PostgreSQL also supports Hermes `session:`, `conversation:`, `after:`, and `before:` filters |
 | `/view` | Open the full body of the selected Hermes event |
 | `/threads` | Browse expandable Hermes conversations and their complete tool/assistant timeline |
 | `n` / `N` | Next / previous search result |
@@ -406,6 +410,56 @@ OPERATOR separates the live transcript cache from the durable journal:
 - **Persistence:** new journal records are written immediately or queued for retry. PTY output is collected in the background and batched to avoid forcing an fsync for every line during large command output. `/save` retries pending writes and waits for PostgreSQL commits.
 
 The archive remains durable and searchable while the in-memory transcript stays bounded by recency. This is a rolling time window, not a record-count limit; exceptionally high activity during a 30-day period can still require substantial memory.
+
+## SSH session audit and attribution
+
+Every new OPERATOR process creates a unique `operator_session_id` that is separate from Hermes `session_id`. New local notes, submitted commands, captured terminal output, and OPERATOR session/workspace events carry this origin metadata:
+
+- Linux login name and effective Unix UID
+- SSH client IP and port, server IP and port, and SSH TTY when supplied by OpenSSH
+- OPERATOR session ID and reviewer-instance ID
+- Authentication method and public-key SHA256 fingerprint when OpenSSH exposes them
+- Activity surface (`transcript`, `f1_workspace`, or `hermes`)
+
+The journal is shared between OPERATOR instances through the configured JSONL file or PostgreSQL backend. Any reviewer with access to that same journal can run an IP/account search; results are grouped by originating OPERATOR session rather than by Hermes conversation.
+
+Examples:
+
+```text
+/audit ip:203.0.113.42
+/audit ip:203.0.113.42 user:deploy
+/audit ip:203.0.113.42 kind:terminal_command
+/audit operator_session:op-<session-id>
+/audit key:SHA256:<fingerprint>
+```
+
+The filters also work with `/search`, so a text query can be combined with an IP or account. PostgreSQL supports the complete audit filter set and date windows. The JSONL backend supports IP, account, UID, key, OPERATOR-session, kind, and pagination filters; its full-text matching remains case-insensitive literal search.
+
+### Capture SSH authentication details
+
+OpenSSH supplies `SSH_CONNECTION` (client address/port and server address/port), `SSH_CLIENT` as a compatibility fallback, and `SSH_TTY` when the login has a terminal. To make the server-verified authentication method and public-key fingerprint available, enable OpenSSH's authentication-info file:
+
+```text
+# /etc/ssh/sshd_config
+ExposeAuthInfo yes
+```
+
+Validate and reload the SSH daemon after changing its configuration:
+
+```bash
+sudo sshd -t && sudo systemctl reload ssh
+```
+
+When enabled, OPERATOR reads the authentication method and SHA256 fingerprint from the OpenSSH-provided `SSH_USER_AUTH` file. It stores the fingerprint, not private key material. Without this option, those fields remain unknown; IP, account, UID, ports, and TTY capture do not depend on it.
+
+### Coverage and attribution boundaries
+
+- The primary transcript records commands submitted in OPERATOR's terminal input, their captured PTY output, and notes. The F1 workspace records completed commands from Bash history when the configured nested shell is Bash; it does not capture raw keystrokes or full-screen application output. Other shells do not currently provide F1 command-history capture.
+- Hermes hook events carry their originating OPERATOR session when the hook process inherited that session's environment. A detached gateway that has no originating session environment leaves these events unbound rather than attributing them to whichever reviewer imports the inbox copy.
+- OPERATOR writes session-start, periodic heartbeat, workspace-start/end, and normal session-end events. A forced kill, power loss, or network interruption may prevent an end event; the last heartbeat helps identify a stale session.
+- Records created before this feature have no structured OPERATOR session identity and cannot be reliably backfilled to a specific login merely from a shared IP. The original free-text connection message may still be searchable, but old command rows remain unattributed.
+- An IP identifies the network peer observed by sshd, not a human. NAT, VPNs, bastions, shared Unix accounts, and forwarded connections can make multiple people appear under one address. Use individual Linux accounts and SSH keys/certificates, and correlate with sshd authentication logs for stronger attribution. Environment-derived metadata is an application audit trail, not tamper-proof forensic evidence.
+- OPERATOR does not journal recognized hidden password/passphrase input. F1 command capture uses Bash's command history instead of reading the raw terminal stream, but commands can still contain secrets in their arguments. Protect the shared journal and PostgreSQL credentials accordingly.
 
 ## Security and privacy
 
