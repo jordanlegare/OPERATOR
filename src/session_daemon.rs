@@ -979,7 +979,7 @@ trap "__operator_audit_capture" EXIT
             let resolves_to_self = current_exe.as_ref().is_some_and(|current| {
                 fs::canonicalize(&candidate).map(|resolved| resolved == *current).unwrap_or(false)
             });
-            if !resolves_to_self && candidate.is_file() {
+            if !resolves_to_self && !candidate.as_os_str().is_empty() {
                 return candidate;
             }
         }
