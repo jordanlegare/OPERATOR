@@ -809,6 +809,45 @@ mod tests {
     use super::TranscriptParser;
 
     #[test]
+    fn bash_workspace_audit_captures_submitted_history_commands() {
+        use super::ShellSession;
+        use std::time::{Duration, Instant};
+
+        let Ok(mut session) = ShellSession::spawn_with_command_audit(80, 24) else {
+            // Shell integration is optional on platforms without a usable PTY.
+            return;
+        };
+        if !session.supports_command_audit() {
+            return;
+        }
+
+        // Let Bash source its normal interactive startup files and install the
+        // post-startup history hook before submitting the test command.
+        let startup_deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < startup_deadline {
+            let _ = session.drain_output();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        session.send_line("printf 'operator-audit-shell-test\\n'")
+            .expect("submit Bash audit fixture");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut captured = Vec::new();
+        while Instant::now() < deadline {
+            let _ = session.drain_output();
+            captured.extend(session.drain_audited_commands().expect("read Bash audit spool"));
+            if captured.iter().any(|command| command.contains("operator-audit-shell-test")) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            captured.iter().any(|command| command.contains("operator-audit-shell-test")),
+            "Bash history hook did not record the submitted command: {captured:?}"
+        );
+    }
+
+    #[test]
     fn transcript_removes_ansi_and_preserves_crlf() {
         let mut parser = TranscriptParser::default();
         let lines = parser.feed(b"\x1b[32mgreen\x1b[0m\r\nnext\r\x1b[Kdone\n");
