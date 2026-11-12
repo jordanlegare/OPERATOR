@@ -1976,8 +1976,9 @@ mod shared_journal_tests {
             first.refresh_external_entries().expect("idempotent note poll"),
             0
         );
-        assert_eq!(first.entries.len(), 3);
-        assert_eq!(first.entries[2].text, "note written in terminal two");
+        assert_eq!(first.entries.len(), 4);
+        assert_eq!(first.entries[2].text, "journalctl -u ssh.service");
+        assert_eq!(first.entries[3].text, "note written in terminal two");
 
         // A repeated poll cannot duplicate the shared F1 command or notes.
         assert_eq!(
