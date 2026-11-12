@@ -1292,7 +1292,7 @@ fn run(
     let mut last_session_heartbeat = Instant::now();
 
     loop {
-        if last_session_heartbeat.elapsed() >= Duration::from_secs(60) {
+        if last_session_heartbeat.elapsed() >= Duration::from_secs(300) {
             app.record_operator_session_heartbeat();
             last_session_heartbeat = Instant::now();
         }
@@ -1516,7 +1516,7 @@ fn run_terminal_workspace_loop(
             app.prune_hot_cache();
             last_hot_cache_prune = Instant::now();
         }
-        if last_session_heartbeat.elapsed() >= Duration::from_secs(60) {
+        if last_session_heartbeat.elapsed() >= Duration::from_secs(300) {
             app.record_operator_session_heartbeat();
             last_session_heartbeat = Instant::now();
         }
