@@ -2,7 +2,7 @@ use std::{
     cell::{Ref, RefCell},
     collections::HashMap,
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -133,6 +133,8 @@ pub struct App {
     pub input_mode: InputMode,
     /// Current user@host:path prompt for the embedded shell input line.
     pub terminal_prompt: String,
+    /// Actual working directory represented by the live shell prompt.
+    pub terminal_working_directory: PathBuf,
     /// Currently selected built-in color palette (1 through 9).
     pub theme_index: usize,
     /// True while a recognized password/passphrase prompt is active.
@@ -197,6 +199,10 @@ impl App {
         self.terminal_prompt = prompt;
     }
 
+    pub fn set_terminal_working_directory(&mut self, working_directory: PathBuf) {
+        self.terminal_working_directory = working_directory;
+    }
+
     pub fn new(journal: Journal, status: String) -> Self {
         let settings = Settings::load();
         // Rehydrate editable command/note history from the persistent journal.
@@ -249,6 +255,8 @@ impl App {
             history_position: None,
             input_mode: InputMode::Terminal,
             terminal_prompt: "user@host:~$ ".to_string(),
+            terminal_working_directory: std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from(".")),
             theme_index: settings.theme_index.clamp(1, THEMES.len()),
             secret_input: false,
             secret_prompt_deadline: None,
@@ -1909,7 +1917,7 @@ impl App {
             return;
         }
 
-        self.search_export_path = default_search_export_path(&self.journal.path)
+        self.search_export_path = default_search_export_path(&self.terminal_working_directory)
             .to_string_lossy()
             .into_owned();
         self.search_export_cursor = self.search_export_path.len();
@@ -1994,7 +2002,12 @@ impl App {
             return;
         }
 
-        let destination = PathBuf::from(&self.search_export_path);
+        let requested_destination = PathBuf::from(&self.search_export_path);
+        let destination = if requested_destination.is_absolute() {
+            requested_destination
+        } else {
+            self.terminal_working_directory.join(requested_destination)
+        };
         let query = self.search_query.clone().unwrap_or_default();
         let mode = self.search_mode_label.clone();
         let total = self.search_total;
@@ -2586,8 +2599,8 @@ fn default_export_path(journal_path: &PathBuf) -> PathBuf {
     journal_path.with_file_name("operator-export.txt")
 }
 
-fn default_search_export_path(journal_path: &PathBuf) -> PathBuf {
-    journal_path.with_file_name("operator-search-results.txt")
+fn default_search_export_path(working_directory: &Path) -> PathBuf {
+    working_directory.join("operator-search-results.txt")
 }
 
 fn is_operator_command(line: &str) -> bool {
@@ -3889,6 +3902,12 @@ mod tests {
         use crate::storage::{Entry, EntryKind};
 
         let (mut app, journal_path) = test_app();
+        let working_directory = env::temp_dir().join(format!(
+            "operator-search-export-cwd-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&working_directory).expect("create test working directory");
+        app.set_terminal_working_directory(working_directory.clone());
         app.journal.append(Entry::with_kind(
             EntryKind::Note,
             "The uppercase needle should match.".to_string(),
@@ -3905,15 +3924,15 @@ mod tests {
 
         app.open_search_export_dialog();
         assert!(app.search_export_dialog_open);
-        assert!(app.search_export_path.ends_with("operator-search-results.txt"));
+        assert_eq!(
+            PathBuf::from(&app.search_export_path),
+            working_directory.join("operator-search-results.txt")
+        );
         app.cancel_search_export_dialog();
         assert!(!app.search_export_dialog_open);
 
-        let export_path = env::temp_dir().join(format!(
-            "operator-search-résultats-{}.txt",
-            std::process::id()
-        ));
-        let export_name = export_path.to_string_lossy().into_owned();
+        let export_name = "search-résultats.txt".to_string();
+        let export_path = working_directory.join(&export_name);
 
         app.open_search_export_dialog();
         app.search_export_clear_path();
@@ -3931,6 +3950,7 @@ mod tests {
         assert!(!exported.contains("This unrelated record must not be exported."));
 
         let _ = fs::remove_file(export_path);
+        let _ = fs::remove_dir_all(working_directory);
         let _ = fs::remove_file(journal_path);
     }
 }
