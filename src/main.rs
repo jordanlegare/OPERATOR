@@ -1354,8 +1354,9 @@ fn run(
                                 hermes_bridge,
                                 review_server,
                             )?;
-                            if let Ok(commands) = workspace_session.drain_audited_commands() {
-                                app.capture_workspace_commands(commands);
+                            match workspace_session.drain_audited_commands() {
+                                Ok(commands) => app.capture_workspace_commands(commands),
+                                Err(error) => app.record_system(format!("Final F1 command audit drain failed: {error}")),
                             }
                             app.record_operator_session_event(
                                 EntryKind::OperatorWorkspaceEnd,
@@ -1506,6 +1507,7 @@ fn run_terminal_workspace_loop(
     let mut pending_since: Option<Instant> = None;
     let mut last_hot_cache_prune = Instant::now();
     let mut last_session_heartbeat = Instant::now();
+    let mut audit_read_error_reported = false;
     let mut last_resize_check = Instant::now();
     let mut last_size = terminal.size()?;
 
@@ -1518,8 +1520,13 @@ fn run_terminal_workspace_loop(
             app.record_operator_session_heartbeat();
             last_session_heartbeat = Instant::now();
         }
-        if let Ok(commands) = session.drain_audited_commands() {
-            app.capture_workspace_commands(commands);
+        match session.drain_audited_commands() {
+            Ok(commands) => app.capture_workspace_commands(commands),
+            Err(error) if !audit_read_error_reported => {
+                app.record_system(format!("F1 command history audit read failed: {error}"));
+                audit_read_error_reported = true;
+            }
+            Err(_) => {}
         }
         app.expire_hermes_review_if_needed();
         review_server.set_enabled(app.review_hermes_responses);
