@@ -408,6 +408,11 @@ fn collect_match(
     matched_count: &mut usize,
     hits: &mut Vec<ArchiveSearchHit>,
 ) {
+    if entry.kind == EntryKind::OperatorSessionHeartbeat
+        && spec.kind.as_deref() != Some("operator_session_heartbeat")
+    {
+        return;
+    }
     if !spec.matches(&entry)
         || (!spec.needle.is_empty() && !entry.text.to_lowercase().contains(&spec.needle.to_lowercase()))
     {
