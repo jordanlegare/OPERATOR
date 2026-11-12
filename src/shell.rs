@@ -160,7 +160,8 @@ trap '__operator_audit_capture' EXIT
         if let Some(path) = audit_file_path.as_ref() {
             command.env("OPERATOR_AUDIT_COMMAND_FILE", path);
             if let Some(rcfile) = audit_rcfile_path.as_ref() {
-                command.arg("--rcfile").arg(rcfile);
+                command.arg("--rcfile");
+                command.arg(rcfile);
             }
         }
 
