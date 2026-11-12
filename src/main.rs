@@ -1305,6 +1305,7 @@ fn run(
                 }
             }
             Event::Mouse(_) if app.pending_review.is_some() => {}
+            Event::Mouse(_) if app.search_export_dialog_open => {}
             Event::Mouse(mouse) if app.search_view => match mouse.kind {
                 MouseEventKind::ScrollUp => app.scroll_up(if mouse.modifiers.contains(KeyModifiers::SHIFT) { 8 } else { 3 }),
                 MouseEventKind::ScrollDown => app.scroll_down(if mouse.modifiers.contains(KeyModifiers::SHIFT) { 8 } else { 3 }),
@@ -1339,7 +1340,9 @@ fn run(
                 _ => {}
             },
             Event::Paste(text) => {
-                if app.pending_review.is_some() {
+                if app.search_export_dialog_open {
+                    app.search_export_insert_text(&text);
+                } else if app.pending_review.is_some() {
                     insert_review_terminal_paste(app, &text);
                 } else {
                     paste_clipboard_text(app, &text, "terminal paste event");
@@ -1964,6 +1967,13 @@ fn handle_key(
         return Ok(false);
     }
 
+    // The SAVE AS overlay owns keyboard focus until Enter or Escape. Nothing
+    // typed here can leak into the embedded shell or journal input line.
+    if app.search_export_dialog_open {
+        handle_search_export_dialog_key(code, modifiers, app);
+        return Ok(false);
+    }
+
     if let Some(view) = app.conversation_view.clone() {
         match view {
             ConversationView::List => match code {
@@ -2033,6 +2043,7 @@ fn handle_key(
                     }
                 }
             }
+            KeyCode::Char('s' | 'S') if modifiers.contains(KeyModifiers::CONTROL) => app.open_search_export_dialog(),
             KeyCode::Esc => app.archive_detail_entry = None,
             KeyCode::Up => app.message_view_scroll = app.message_view_scroll.saturating_sub(1),
             KeyCode::Down => app.message_view_scroll = app.message_view_scroll.saturating_add(1),
@@ -2091,7 +2102,7 @@ fn handle_key(
     if app.search_view {
         match code {
             KeyCode::Char('q') if modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
-            KeyCode::Char('s') if modifiers.contains(KeyModifiers::CONTROL) => app.save(),
+            KeyCode::Char('s' | 'S') if modifiers.contains(KeyModifiers::CONTROL) => app.open_search_export_dialog(),
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                 let selected = app.active_match.and_then(|position| {
                     if let Some(hit) = app.archive_search_hits.get(position) {
@@ -2254,6 +2265,35 @@ fn handle_key(
         _ => {}
     }
     Ok(app.should_quit)
+}
+
+fn handle_search_export_dialog_key(code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
+    match code {
+        KeyCode::Esc => app.cancel_search_export_dialog(),
+        KeyCode::Enter => app.confirm_search_export(),
+        KeyCode::Left => app.search_export_cursor_left(),
+        KeyCode::Right => app.search_export_cursor_right(),
+        KeyCode::Home => app.search_export_cursor_start(),
+        KeyCode::End => app.search_export_cursor_end(),
+        KeyCode::Backspace => app.search_export_backspace(),
+        KeyCode::Delete => app.search_export_delete(),
+        KeyCode::Char('u' | 'U') if modifiers.contains(KeyModifiers::CONTROL) => {
+            app.search_export_clear_path();
+        }
+        KeyCode::Char('a' | 'A') if modifiers.contains(KeyModifiers::CONTROL) => {
+            app.search_export_cursor_start();
+        }
+        KeyCode::Char('e' | 'E') if modifiers.contains(KeyModifiers::CONTROL) => {
+            app.search_export_cursor_end();
+        }
+        KeyCode::Char(character)
+            if !modifiers.contains(KeyModifiers::CONTROL)
+                && !modifiers.contains(KeyModifiers::ALT) =>
+        {
+            app.search_export_insert_text(&character.to_string());
+        }
+        _ => {}
+    }
 }
 
 fn drain_shell(
