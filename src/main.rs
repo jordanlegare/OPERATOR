@@ -1536,7 +1536,21 @@ fn run(
                     app.show_help = false;
                 } else if key.kind == KeyEventKind::Press && key.code == KeyCode::F(1) {
                     let size = terminal.size()?;
-                    match ShellSession::spawn_with_command_audit(size.width, size.height) {
+                    let workspace_result = if let Some(primary_id) = daemon_session_id.as_deref() {
+                        let role = format!("workspace:{primary_id}");
+                        session_daemon::get_or_create_session(
+                            &role,
+                            size.width,
+                            size.height,
+                            true,
+                            session_origin_from_environment(),
+                        ).and_then(|session| {
+                            ShellSession::spawn_daemon_proxy(size.width, size.height, &session, true)
+                        })
+                    } else {
+                        ShellSession::spawn_with_command_audit(size.width, size.height)
+                    };
+                    match workspace_result {
                         Ok(mut workspace_session) => {
                             app.record_operator_session_event(
                                 EntryKind::OperatorWorkspaceStart,
@@ -1560,8 +1574,9 @@ fn run(
                                 EntryKind::OperatorWorkspaceEnd,
                                 "Exited F1 interactive terminal workspace".to_string(),
                             );
-                            // Dropping this session closes only the workspace shell.
-                            // OPERATOR's primary transcript shell remains untouched.
+                            // With the daemon enabled, dropping this proxy detaches
+                            // the F1 shell while the daemon keeps it running. Local
+                            // fallback workspaces retain their original close behavior.
                             terminal.clear()?;
                         }
                         Err(error) => {
