@@ -1150,29 +1150,37 @@ trap "__operator_audit_capture" EXIT
                 String::from_utf8_lossy(&startup_output)
             );
 
+            let first_marker = "operator-daemon-first-marker";
             session.write_input(b"printf 'operator-daemon-first-marker\\n'\n")
                 .expect("send first shell command");
             let first_deadline = Instant::now() + Duration::from_secs(5);
             let mut first_output = Vec::new();
             while Instant::now() < first_deadline {
+                let text = String::from_utf8_lossy(&first_output);
+                let prompt_after_command = text.find(first_marker)
+                    .map(|position| {
+                        let after = &text[position + first_marker.len()..];
+                        after.contains("$ ") || after.contains("# ")
+                    })
+                    .unwrap_or(false);
+                if prompt_after_command {
+                    break;
+                }
                 match first_receiver.recv_timeout(Duration::from_millis(50)) {
-                    Ok(OutputPacket::Data(bytes)) => {
-                        first_output.extend_from_slice(&bytes);
-                        if String::from_utf8_lossy(&first_output)
-                            .contains("operator-daemon-first-marker")
-                        {
-                            break;
-                        }
-                    }
+                    Ok(OutputPacket::Data(bytes)) => first_output.extend_from_slice(&bytes),
                     Ok(OutputPacket::Exit) => panic!("shell exited before first command output"),
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                     Err(error) => panic!("shell output channel closed: {error}"),
                 }
             }
+            let text = String::from_utf8_lossy(&first_output);
+            let marker_position = text.find(first_marker);
             assert!(
-                String::from_utf8_lossy(&first_output).contains("operator-daemon-first-marker"),
-                "first shell command did not produce output: {:?}",
-                String::from_utf8_lossy(&first_output)
+                marker_position.is_some_and(|position| {
+                    let after = &text[position + first_marker.len()..];
+                    after.contains("$ ") || after.contains("# ")
+                }),
+                "first shell command did not produce output and return to its prompt: {text:?}"
             );
 
             // The controller goes away but the daemon-owned PTY and shell stay
