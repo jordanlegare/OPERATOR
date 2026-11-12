@@ -1848,6 +1848,21 @@ mod tests {
         let fuzzy = parse_search_spec("--fuzzy opertor").expect("parse fuzzy search");
         assert_eq!(fuzzy.mode, SearchMode::Fuzzy);
         assert_eq!(fuzzy.query, "opertor");
+
+        let audit = parse_search_spec("ip:203.0.113.42 user:deploy uid:1204")
+            .expect("parse IP audit search");
+        assert_eq!(audit.mode, SearchMode::Audit);
+        assert!(audit.query.is_empty());
+        assert_eq!(audit.client_ip.as_deref(), Some("203.0.113.42"));
+        assert_eq!(audit.ssh_user.as_deref(), Some("deploy"));
+        assert_eq!(audit.unix_uid, Some(1204));
+
+        let key = parse_search_spec("key:SHA256:abc123 operator_session:op-42 kind:terminal_command")
+            .expect("parse key and OPERATOR session audit search");
+        assert_eq!(key.mode, SearchMode::Audit);
+        assert_eq!(key.operator_session.as_deref(), Some("op-42"));
+        assert_eq!(key.ssh_key_fingerprint.as_deref(), Some("SHA256:abc123"));
+        assert_eq!(key.kind.as_deref(), Some("terminal_command"));
     }
 
     #[test]
@@ -1857,6 +1872,8 @@ mod tests {
         assert!(parse_search_spec("needle after:not-a-date").is_err());
         assert!(parse_search_spec("needle after:2026-11-10 before:2026-11-01").is_err());
         assert!(parse_search_spec("needle limit:0").is_err());
+        assert!(parse_search_spec("ip:not-an-ip").is_err());
+        assert!(parse_search_spec("uid:not-a-number").is_err());
     }
 
     #[test]
