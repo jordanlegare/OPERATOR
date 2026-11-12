@@ -1492,6 +1492,11 @@ fn entry_kind_from_name(kind: &str) -> Option<EntryKind> {
         "hermes_history" => EntryKind::HermesHistory,
         "hermes_interim" => EntryKind::HermesInterim,
         "hermes_session" => EntryKind::HermesSession,
+        "operator_session_start" => EntryKind::OperatorSessionStart,
+        "operator_session_heartbeat" => EntryKind::OperatorSessionHeartbeat,
+        "operator_session_end" => EntryKind::OperatorSessionEnd,
+        "operator_workspace_start" => EntryKind::OperatorWorkspaceStart,
+        "operator_workspace_end" => EntryKind::OperatorWorkspaceEnd,
         _ => return None,
     })
 }
