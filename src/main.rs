@@ -30,7 +30,10 @@ use crossterm::{
         KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, Clear as ClearTerminal, ClearType,
+        EnterAlternateScreen, LeaveAlternateScreen,
+    },
 };
 use unicode_width::UnicodeWidthStr;
 use ratatui::{
@@ -1431,6 +1434,17 @@ fn run(
     Ok(())
 }
 
+/// Clear only the currently visible normal-screen contents before a new F1
+/// workspace starts. This deliberately preserves the terminal's scrollback.
+fn clear_workspace_screen(output: &mut impl Write) -> io::Result<()> {
+    execute!(
+        output,
+        ClearTerminal(ClearType::All),
+        crossterm::cursor::MoveTo(0, 0)
+    )?;
+    output.flush()
+}
+
 /// Temporarily hand the real terminal to the shell PTY for full-screen programs.
 /// F1 returns to the OPERATOR transcript workspace.
 fn run_terminal_workspace(
@@ -1455,7 +1469,11 @@ fn run_terminal_workspace(
         DisableMouseCapture,
         crossterm::cursor::Show
     )?;
-    out.flush()?;
+    // The normal screen buffer survives the OPERATOR alternate-screen
+    // transition. Clear its visible contents before starting a fresh F1 PTY,
+    // otherwise the previous workspace's last command/output remains under
+    // the new Bash prompt and looks like it was replayed into the new session.
+    clear_workspace_screen(&mut out)?;
 
     let result = run_terminal_workspace_loop(terminal, app, session, hermes_bridge, review_server);
     let echo_result = session.set_echo(false);
@@ -1965,6 +1983,15 @@ mod workspace_input_tests {
         assert!(!filter_workspace_input(&mut pending, input, &mut forwarded));
         assert!(pending.is_empty());
         assert_eq!(forwarded, input);
+    }
+
+    #[test]
+    fn workspace_start_clears_visible_old_screen_and_homes_cursor() {
+        let mut output = Vec::new();
+        super::clear_workspace_screen(&mut output).expect("clear workspace screen");
+        let output = String::from_utf8(output).expect("terminal control output is ASCII");
+        assert!(output.contains("\\u{1b}[2J"), "must clear the visible screen: {output:?}");
+        assert!(output.contains("\\u{1b}[1;1H"), "must home the cursor: {output:?}");
     }
 
     #[test]
