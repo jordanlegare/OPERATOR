@@ -1587,6 +1587,48 @@ mod tests {
         }
         assert!(found_record, "PostgreSQL trigram/full-text index did not return the record");
 
+        let mut audit_entry = Entry::with_kind(
+            EntryKind::TerminalCommand,
+            format!("operator audit query fixture {}", std::process::id()),
+        );
+        audit_entry.operator_session_id = Some(format!("op-pg-audit-{}", std::process::id()));
+        audit_entry.operator_instance_id = Some("pg-audit-reviewer".to_string());
+        audit_entry.ssh_username = Some("deploy".to_string());
+        audit_entry.unix_uid = Some(1204);
+        audit_entry.ssh_client_ip = Some("203.0.113.42".to_string());
+        audit_entry.ssh_client_port = Some(51234);
+        audit_entry.ssh_server_ip = Some("192.0.2.10".to_string());
+        audit_entry.ssh_server_port = Some(22);
+        audit_entry.ssh_key_fingerprint = Some("SHA256:pg-audit-key".to_string());
+        audit_entry.operator_surface = Some("transcript".to_string());
+        let audit_record_id = audit_entry.record_id.clone().expect("audit record ID");
+        let audit_session_id = audit_entry.operator_session_id.clone().expect("audit session ID");
+        writer.enqueue(audit_entry).expect("queue attributed audit record");
+        writer.flush().expect("commit attributed audit record");
+
+        let request_id = reader.search("ip:203.0.113.42 user:deploy uid:1204".to_string())
+            .expect("submit SSH IP audit search");
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        let mut found_audit_record = false;
+        while std::time::Instant::now() < deadline && !found_audit_record {
+            for update in reader.drain_updates() {
+                if let Update::SearchResult(result) = update {
+                    if result.request_id == request_id {
+                        assert!(result.error.is_none(), "IP audit search failed: {:?}", result.error);
+                        if let Some(hit) = result.hits.iter().find(|hit| hit.record_id == audit_record_id) {
+                            assert_eq!(hit.operator_session_id.as_deref(), Some(audit_session_id.as_str()));
+                            assert_eq!(hit.operator_instance_id.as_deref(), Some("pg-audit-reviewer"));
+                            assert_eq!(hit.ssh_username.as_deref(), Some("deploy"));
+                            assert_eq!(hit.unix_uid, Some(1204));
+                            assert_eq!(hit.ssh_client_ip.as_deref(), Some("203.0.113.42"));
+                            found_audit_record = true;
+                        }
+                    }
+                }
+            }
+            if !found_audit_record { thread::sleep(Duration::from_millis(20)); }
+        }
+        assert!(found_audit_record, "PostgreSQL IP audit search did not return attributed session records");
 
         // An empty page beyond the end must still report the real total.
         let request_id = reader
