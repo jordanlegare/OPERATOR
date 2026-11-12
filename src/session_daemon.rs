@@ -450,6 +450,19 @@ mod unix_impl {
         let log = log_options.open(&log_path)?;
         let executable = env::current_exe()?;
         let mut command = process::Command::new(executable);
+        command.env_remove("OPERATOR_DATABASE_URL");
+        for variable in [
+            "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "SSH_USER_AUTH",
+            "SSH_ORIGINAL_COMMAND", "OPERATOR_SESSION_ID",
+            "STREENOTE_OPERATOR_SESSION_ID", "OPERATOR_INSTANCE_ID",
+            "OPERATOR_SSH_USERNAME", "OPERATOR_UNIX_UID",
+            "OPERATOR_SSH_CLIENT_IP", "OPERATOR_SSH_CLIENT_PORT",
+            "OPERATOR_SSH_SERVER_IP", "OPERATOR_SSH_SERVER_PORT",
+            "OPERATOR_SSH_TTY", "OPERATOR_SSH_AUTH_METHOD",
+            "OPERATOR_SSH_KEY_FINGERPRINT",
+        ] {
+            command.env_remove(variable);
+        }
         command.arg("daemon")
             .stdin(process::Stdio::null())
             .stdout(process::Stdio::from(log.try_clone()?))
