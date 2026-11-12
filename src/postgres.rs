@@ -1656,6 +1656,21 @@ mod tests {
             }
         }
         assert!(loaded_stream, "reconstructed PostgreSQL record fetch timed out");
+
+        let stream_export_path = std::env::temp_dir()
+            .join(format!("operator-stream-search-export-{}.txt", std::process::id()));
+        reader.export_search_results(
+            &stream_export_path,
+            vec![first_delta_record],
+            "search-token-crosses".to_string(),
+            "LITERAL".to_string(),
+            0,
+            1,
+        ).expect("export reconstructed Hermes search result");
+        let exported_stream = std::fs::read_to_string(&stream_export_path)
+            .expect("read reconstructed Hermes search export");
+        assert!(exported_stream.contains("multi-part-search-token-crosses-boundary"));
+        let _ = std::fs::remove_file(stream_export_path);
     }
 
     #[test]
