@@ -1060,7 +1060,7 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
 fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     let query = app.search_query.as_deref().unwrap_or("");
     let title = format!(
-        " {} · {} RESULT(S) · OFFSET {} · LIMIT {} · ESC RETURNS LIVE ",
+        " {} · {} RESULTS · OFF {} / LIM {} · CTRL+S SAVE AS · ESC LIVE ",
         app.search_mode_label,
         app.search_total,
         app.search_page_offset,
@@ -1670,6 +1670,14 @@ fn help_lines(theme: Theme) -> Vec<Line<'static>> {
         Line::from(vec![
             Span::styled("SEARCH    ", Style::default().fg(theme.success).add_modifier(Modifier::BOLD)),
             Span::raw("/search runs indexed PostgreSQL full-text, phrase, tsquery, literal and trigram searches; Esc returns LIVE."),
+        ]),
+        Line::from(vec![
+            Span::styled("SAVE AS   ", Style::default().fg(theme.success).add_modifier(Modifier::BOLD)),
+            Span::raw("Ctrl+S in search results opens the centered filename dialog; its default is operator-search-results.txt in the live shell cwd shown in the input prompt."),
+        ]),
+        Line::from(vec![
+            Span::styled("SAVE KEYS ", Style::default().fg(theme.success).add_modifier(Modifier::BOLD)),
+            Span::raw("Enter exports full records from the displayed page; Esc cancels. Type or paste a filename; arrows/Home/End move, Backspace/Delete edit, Ctrl+U clears, Ctrl+A/E jump to either end."),
         ]),
         Line::from(""),
         Line::from(vec![Span::styled("LOCAL COMMANDS", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD))]),
