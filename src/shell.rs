@@ -30,6 +30,7 @@ pub struct ShellSession {
     audit_rcfile_path: Option<PathBuf>,
     audit_offset_path: Option<PathBuf>,
     audit_file_cursor: u64,
+    audit_persisted_cursor: u64,
     audit_file_pending: Vec<u8>,
     cleanup_audit_files: bool,
     remote_pid: Option<u32>,
@@ -296,6 +297,12 @@ trap '__operator_audit_capture' EXIT
                 }
             })?;
 
+        let persisted_audit_cursor = proxy.as_ref()
+            .and_then(|proxy| proxy.audit_file_path.as_ref())
+            .and_then(|path| fs::read_to_string(path.with_extension("offset")).ok())
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(0);
+
         Ok(Self {
             writer,
             child,
@@ -309,11 +316,8 @@ trap '__operator_audit_capture' EXIT
             audit_file_path: proxy.as_ref().and_then(|proxy| proxy.audit_file_path.clone()).or(audit_file_path),
             audit_rcfile_path,
             audit_offset_path: proxy.as_ref().and_then(|proxy| proxy.audit_file_path.as_ref().map(|path| path.with_extension("offset"))),
-            audit_file_cursor: proxy.as_ref()
-                .and_then(|proxy| proxy.audit_file_path.as_ref())
-                .and_then(|path| fs::read_to_string(path.with_extension("offset")).ok())
-                .and_then(|value| value.trim().parse().ok())
-                .unwrap_or(0),
+            audit_file_cursor: persisted_audit_cursor,
+            audit_persisted_cursor: persisted_audit_cursor,
             audit_file_pending: Vec::new(),
             cleanup_audit_files: proxy.is_none() && cleanup_audit_files,
             remote_pid: proxy.as_ref().and_then(|proxy| proxy.pid),
@@ -356,11 +360,6 @@ trap '__operator_audit_capture' EXIT
         let mut buffer = vec![0u8; bytes_to_read];
         file.read_exact(&mut buffer)?;
         self.audit_file_cursor = self.audit_file_cursor.saturating_add(bytes_to_read as u64);
-        if let Some(offset_path) = self.audit_offset_path.as_ref() {
-            let temporary = offset_path.with_extension(format!("offset.tmp.{}", std::process::id()));
-            fs::write(&temporary, self.audit_file_cursor.to_string())?;
-            fs::rename(&temporary, offset_path)?;
-        }
         self.audit_file_pending.extend_from_slice(&buffer);
 
         let mut commands = Vec::new();
@@ -372,6 +371,20 @@ trap '__operator_audit_capture' EXIT
             if !command.is_empty() {
                 commands.push(command);
             }
+        }
+
+        // Persist only through the last complete NUL-delimited record. If a
+        // command and its trailing NUL arrive in separate reads, a reconnect
+        // must re-read the incomplete tail instead of skipping it.
+        let committed_cursor = self.audit_file_cursor
+            .saturating_sub(self.audit_file_pending.len() as u64);
+        if committed_cursor > self.audit_persisted_cursor {
+            if let Some(offset_path) = self.audit_offset_path.as_ref() {
+                let temporary = offset_path.with_extension(format!("offset.tmp.{}", std::process::id()));
+                fs::write(&temporary, committed_cursor.to_string())?;
+                fs::rename(&temporary, offset_path)?;
+            }
+            self.audit_persisted_cursor = committed_cursor;
         }
         Ok(commands)
     }
