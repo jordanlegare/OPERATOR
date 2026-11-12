@@ -52,8 +52,8 @@ class CapturePromptFanoutTests(unittest.TestCase):
             listener.close()
         self.tempdir.cleanup()
 
-    def _run_hook(self, payload, *, include_inbox_env=True):
-        environment = {}
+    def _run_hook(self, payload, *, include_inbox_env=True, extra_environment=None):
+        environment = dict(extra_environment or {})
         if include_inbox_env:
             environment["OPERATOR_HERMES_INBOX"] = str(self.inboxes["a1"])
 
@@ -83,6 +83,48 @@ class CapturePromptFanoutTests(unittest.TestCase):
             json.loads(path.read_text(encoding="utf-8"))
             for path in sorted(ready.glob("*.json"))
         ]
+
+    def test_operator_origin_metadata_is_fanned_out_without_reviewer_reassignment(self):
+        self._run_hook(
+            {
+                "hook_event_name": "pre_llm_call",
+                "user_message": "Inspect the log rotation schedule.",
+                "session_id": "hermes-session-audit",
+                "turn_id": "turn-audit-1",
+            },
+            extra_environment={
+                "OPERATOR_SESSION_ID": "op-source-session-42",
+                "OPERATOR_INSTANCE_ID": "source-instance-42",
+                "OPERATOR_SSH_USERNAME": "deploy",
+                "OPERATOR_UNIX_UID": "1204",
+                "OPERATOR_SSH_CLIENT_IP": "203.0.113.42",
+                "OPERATOR_SSH_CLIENT_PORT": "51234",
+                "OPERATOR_SSH_SERVER_IP": "192.0.2.10",
+                "OPERATOR_SSH_SERVER_PORT": "22",
+                "OPERATOR_SSH_TTY": "/dev/pts/4",
+                "OPERATOR_SSH_AUTH_METHOD": "publickey",
+                "OPERATOR_SSH_KEY_FINGERPRINT": "SHA256:source-fingerprint",
+            },
+        )
+
+        copies = [self._events(inbox) for inbox in self.inboxes.values()]
+        self.assertEqual([len(events) for events in copies], [1, 1])
+        for events in copies:
+            event = events[0]
+            self.assertEqual(event["operator_session_id"], "op-source-session-42")
+            self.assertEqual(event["operator_instance_id"], "source-instance-42")
+            self.assertEqual(event["ssh_client_ip"], "203.0.113.42")
+            self.assertEqual(event["ssh_username"], "deploy")
+            self.assertEqual(event["unix_uid"], 1204)
+            self.assertEqual(event["ssh_client_port"], 51234)
+            self.assertEqual(event["ssh_server_ip"], "192.0.2.10")
+            self.assertEqual(event["ssh_server_port"], 22)
+            self.assertEqual(event["ssh_tty"], "/dev/pts/4")
+            self.assertEqual(event["ssh_auth_method"], "publickey")
+            self.assertEqual(event["ssh_key_fingerprint"], "SHA256:source-fingerprint")
+            self.assertEqual(event["operator_surface"], "hermes")
+
+        self.assertEqual(copies[0][0]["event_id"], copies[1][0]["event_id"])
 
     def test_legacy_environment_alias_is_still_accepted(self):
         with patch.dict(os.environ, {"STREENOTE_HERMES_INBOX": "/tmp/legacy-inbox"}, clear=True):
