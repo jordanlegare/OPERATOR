@@ -42,11 +42,13 @@ mod unix_impl {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct SessionInfo {
         pub id: String,
+        pub role: String,
         pub shell: String,
         pub pid: Option<u32>,
         pub created_unix_ms: u128,
         pub attached: bool,
         pub exited: bool,
+        pub audit_file_path: Option<String>,
     }
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -56,6 +58,8 @@ mod unix_impl {
         cols: Option<u16>,
         rows: Option<u16>,
         echo: Option<bool>,
+        role: Option<String>,
+        replay: Option<bool>,
         origin: Option<HashMap<String, String>>,
     }
 
@@ -92,8 +96,10 @@ mod unix_impl {
 
     struct ManagedSession {
         id: String,
+        role: String,
         shell: PathBuf,
         pid: Option<u32>,
+        audit_file_path: Option<PathBuf>,
         created_unix_ms: u128,
         writer: Mutex<Box<dyn Write + Send>>,
         master: Mutex<Box<dyn MasterPty + Send>>,
@@ -108,11 +114,13 @@ mod unix_impl {
             let output = self.output.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             SessionInfo {
                 id: self.id.clone(),
+                role: self.role.clone(),
                 shell: self.shell.display().to_string(),
                 pid: self.pid,
                 created_unix_ms: self.created_unix_ms,
                 attached: output.controller.is_some(),
                 exited,
+                audit_file_path: self.audit_file_path.as_ref().map(|path| path.display().to_string()),
             }
         }
 
@@ -150,7 +158,7 @@ mod unix_impl {
             });
         }
 
-        fn subscribe(&self) -> io::Result<(u64, Vec<u8>, Receiver<OutputPacket>)> {
+        fn subscribe(&self, replay_enabled: bool) -> io::Result<(u64, Vec<u8>, Receiver<OutputPacket>)> {
             let client_id = self.next_client_id.fetch_add(1, Ordering::Relaxed);
             let (sender, receiver) = mpsc::channel();
             let mut output = self.output.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -163,7 +171,7 @@ mod unix_impl {
                     "session already has an attached controller",
                 ));
             }
-            let replay = output.history.iter().copied().collect();
+            let replay = if replay_enabled { output.history.iter().copied().collect() } else { Vec::new() };
             output.controller = Some(client_id);
             output.clients.insert(client_id, sender);
             Ok((client_id, replay, receiver))
@@ -218,7 +226,7 @@ mod unix_impl {
     }
 
     impl SessionManager {
-        fn create(&self, cols: u16, rows: u16, echo: bool, origin: Option<HashMap<String, String>>) -> io::Result<Arc<ManagedSession>> {
+        fn create(&self, role: String, cols: u16, rows: u16, echo: bool, origin: Option<HashMap<String, String>>) -> io::Result<Arc<ManagedSession>> {
             let pty_system = native_pty_system();
             let pair = pty_system.openpty(PtySize {
                 rows: rows.max(8),
@@ -262,8 +270,10 @@ mod unix_impl {
 
             let session = Arc::new(ManagedSession {
                 id: id.clone(),
+                role,
                 shell: shell.clone(),
                 pid,
+                audit_file_path: None,
                 created_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH)
                     .unwrap_or_default().as_millis(),
                 writer: Mutex::new(writer),
@@ -303,6 +313,27 @@ mod unix_impl {
                 .map_err(|_| io::Error::other("session registry lock poisoned"))?
                 .insert(id, Arc::clone(&session));
             Ok(session)
+        }
+
+        fn get_or_create(&self, role: &str, cols: u16, rows: u16, echo: bool, origin: Option<HashMap<String, String>>) -> io::Result<Arc<ManagedSession>> {
+            let existing = {
+                let sessions = self.sessions.lock()
+                    .map_err(|_| io::Error::other("session registry lock poisoned"))?;
+                sessions.values()
+                    .filter(|session| session.role == role)
+                    .filter(|session| !session.is_exited())
+                    .filter(|session| {
+                        let output = session.output.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        output.controller.is_none()
+                    })
+                    .max_by_key(|session| session.created_unix_ms)
+                    .cloned()
+            };
+            if let Some(session) = existing {
+                return Ok(session);
+            }
+            self.create(role.to_string(), cols, rows, echo, origin)
         }
 
         fn get(&self, id: &str) -> io::Result<Arc<ManagedSession>> {
@@ -402,7 +433,21 @@ mod unix_impl {
             "create" => {
                 let cols = request.cols.unwrap_or(80);
                 let rows = request.rows.unwrap_or(24);
-                match manager.create(cols, rows, request.echo.unwrap_or(true), request.origin) {
+                let role = request.role.unwrap_or_else(|| "standalone".to_string());
+                match manager.create(role, cols, rows, request.echo.unwrap_or(true), request.origin) {
+                    Ok(session) => {
+                        let mut response = Response::ok();
+                        response.session = Some(session.info());
+                        write_response(&mut stream, response)
+                    }
+                    Err(error) => write_response(&mut stream, Response::error(error.to_string())),
+                }
+            }
+            "get_or_create" => {
+                let cols = request.cols.unwrap_or(80);
+                let rows = request.rows.unwrap_or(24);
+                let role = request.role.unwrap_or_else(|| "primary".to_string());
+                match manager.get_or_create(&role, cols, rows, request.echo.unwrap_or(false), request.origin) {
                     Ok(session) => {
                         let mut response = Response::ok();
                         response.session = Some(session.info());
@@ -428,14 +473,14 @@ mod unix_impl {
                     Ok(session) => session,
                     Err(error) => return write_response(&mut stream, Response::error(error.to_string())),
                 };
-                attach_client(&mut stream, session)
+                attach_client(&mut stream, session, request.replay.unwrap_or(true))
             }
             _ => write_response(&mut stream, Response::error("unknown daemon operation")),
         }
     }
 
-    fn attach_client(stream: &mut UnixStream, session: Arc<ManagedSession>) -> io::Result<()> {
-        let (client_id, replay, receiver) = match session.subscribe() {
+    fn attach_client(stream: &mut UnixStream, session: Arc<ManagedSession>, replay_enabled: bool) -> io::Result<()> {
+        let (client_id, replay, receiver) = match session.subscribe(replay_enabled) {
             Ok(subscription) => subscription,
             Err(error) => return write_response(stream, Response::error(error.to_string())),
         };
@@ -529,30 +574,41 @@ mod unix_impl {
 
     pub fn list_sessions() -> io::Result<Vec<SessionInfo>> {
         Ok(request_response(&Request {
-            op: "list".into(), session_id: None, cols: None, rows: None, echo: None, origin: None,
+            op: "list".into(), session_id: None, cols: None, rows: None, echo: None, role: None, replay: None, origin: None,
         })?.sessions.unwrap_or_default())
     }
 
     pub fn create_session(cols: u16, rows: u16, echo: bool, origin: HashMap<String, String>) -> io::Result<SessionInfo> {
         request_response(&Request {
             op: "create".into(), session_id: None, cols: Some(cols), rows: Some(rows),
-            echo: Some(echo), origin: Some(origin),
+            echo: Some(echo), role: Some("standalone".into()), replay: None, origin: Some(origin),
         })?.session.ok_or_else(|| io::Error::other("daemon did not return the created session"))
+    }
+
+    pub fn get_or_create_session(role: &str, cols: u16, rows: u16, echo: bool, origin: HashMap<String, String>) -> io::Result<SessionInfo> {
+        request_response(&Request {
+            op: "get_or_create".into(), session_id: None, cols: Some(cols), rows: Some(rows),
+            echo: Some(echo), role: Some(role.to_string()), replay: None, origin: Some(origin),
+        })?.session.ok_or_else(|| io::Error::other("daemon did not return a session"))
     }
 
     pub fn terminate_session(id: &str) -> io::Result<()> {
         request_response(&Request {
             op: "terminate".into(), session_id: Some(id.to_string()),
-            cols: None, rows: None, echo: None, origin: None,
+            cols: None, rows: None, echo: None, role: None, replay: None, origin: None,
         }).map(|_| ())
     }
 
     pub fn attach_session(id: &str) -> io::Result<()> {
+        attach_session_with_replay(id, true)
+    }
+
+    pub fn attach_session_with_replay(id: &str, replay: bool) -> io::Result<()> {
         let path = socket_path();
         let mut stream = UnixStream::connect(&path)?;
         let request = Request {
             op: "attach".into(), session_id: Some(id.to_string()),
-            cols: None, rows: None, echo: None, origin: None,
+            cols: None, rows: None, echo: None, role: None, replay: Some(replay), origin: None,
         };
         serde_json::to_writer(&mut stream, &request)
             .map_err(|error| io::Error::other(error.to_string()))?;
@@ -794,7 +850,7 @@ mod unix_impl {
 }
 
 #[cfg(unix)]
-pub use unix_impl::{attach_session, create_session, list_sessions, run_daemon, socket_path, terminate_session, SessionInfo};
+pub use unix_impl::{attach_session, attach_session_with_replay, create_session, get_or_create_session, list_sessions, run_daemon, socket_path, terminate_session, SessionInfo};
 
 #[cfg(not(unix))]
 compile_error!("OPERATOR's persistent session daemon currently requires a Unix platform.");
