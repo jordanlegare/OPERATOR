@@ -3885,7 +3885,7 @@ mod tests {
         let _ = fs::remove_file(path);
     }
     #[test]
-    fn search_ctrl_s_save_as_edits_and_exports_only_the_visible_page() {
+    fn archive_search_ctrl_s_save_as_edits_and_exports_only_the_visible_page() {
         use crate::storage::{Entry, EntryKind};
 
         let (mut app, journal_path) = test_app();
