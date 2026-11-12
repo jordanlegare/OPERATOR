@@ -158,9 +158,6 @@ fn adopt_daemon_session_origin(
     context.ssh = audit::SshConnectionInfo::default();
     context.ssh_username = origin.get("OPERATOR_SSH_USERNAME").cloned();
     context.unix_uid = None;
-    if let Some(value) = origin.get("OPERATOR_SSH_USERNAME") {
-        context.ssh_username = Some(value.clone());
-    }
     if let Some(value) = origin.get("OPERATOR_UNIX_UID").and_then(|value| value.parse().ok()) {
         context.unix_uid = Some(value);
     }
