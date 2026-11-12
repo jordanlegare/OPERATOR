@@ -1506,6 +1506,57 @@ mod hot_window_tests {
     }
 
     #[test]
+    fn journal_attaches_operator_session_identity_but_not_to_fanned_external_events() {
+        use crate::audit::{OperatorSessionContext, SshConnectionInfo};
+
+        let path = test_path();
+        let context = OperatorSessionContext {
+            operator_session_id: "op-test-session-42".to_string(),
+            operator_instance_id: Some("review-instance-42".to_string()),
+            ssh_username: Some("deploy".to_string()),
+            unix_uid: Some(1204),
+            ssh: SshConnectionInfo {
+                client_ip: Some("203.0.113.42".to_string()),
+                client_port: Some(51234),
+                server_ip: Some("192.0.2.10".to_string()),
+                server_port: Some(22),
+                tty: Some("/dev/pts/4".to_string()),
+                auth_method: Some("publickey".to_string()),
+                key_fingerprint: Some("SHA256:test-fingerprint".to_string()),
+            },
+        };
+        let mut journal = Journal::open(path.clone()).expect("open test journal");
+        journal.set_operator_session_context(context);
+        journal.append(Entry::with_kind(EntryKind::TerminalCommand, "journalctl -u ssh".to_string()))
+            .expect("append local command");
+
+        let attributed = journal.entries.last().expect("attributed command");
+        assert_eq!(attributed.operator_session_id.as_deref(), Some("op-test-session-42"));
+        assert_eq!(attributed.operator_instance_id.as_deref(), Some("review-instance-42"));
+        assert_eq!(attributed.ssh_username.as_deref(), Some("deploy"));
+        assert_eq!(attributed.unix_uid, Some(1204));
+        assert_eq!(attributed.ssh_client_ip.as_deref(), Some("203.0.113.42"));
+        assert_eq!(attributed.ssh_key_fingerprint.as_deref(), Some("SHA256:test-fingerprint"));
+        assert_eq!(attributed.operator_surface.as_deref(), Some("transcript"));
+
+        let external = Entry::with_external_event(
+            EntryKind::HermesUser,
+            "originating Hermes prompt".to_string(),
+            attributed.timestamp.clone(),
+            "external-event-id".to_string(),
+            None, None, None, None, None, None,
+        );
+        journal.append(external).expect("append externally attributed Hermes event");
+        let imported = journal.entries.last().expect("external event");
+        assert_eq!(imported.event_id.as_deref(), Some("external-event-id"));
+        assert!(imported.operator_session_id.is_none(), "do not attribute an unknown external origin to the importing reviewer");
+
+        drop(journal);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(PathBuf::from(format!("{}.lock", path.display())));
+    }
+
+    #[test]
     fn startup_keeps_only_thirty_days_but_searches_the_complete_archive() {
         let path = test_path();
         let mut old = Entry::with_kind(
