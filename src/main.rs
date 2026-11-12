@@ -103,7 +103,7 @@ fn run_operator_command(command: OperatorCommand) -> io::Result<()> {
             if sessions.is_empty() {
                 println!("No persistent OPERATOR sessions.");
             } else {
-                println!("{:<38} {:<8} {:<7} {:<10} SHELL", "SESSION ID", "STATE", "PID", "AGE");
+                println!("{:<38} {:<18} {:<8} {:<7} {:<10} SHELL", "SESSION ID", "ROLE", "STATE", "PID", "AGE");
                 for session in sessions {
                     let state = if session.exited {
                         "EXITED"
@@ -116,8 +116,9 @@ fn run_operator_command(command: OperatorCommand) -> io::Result<()> {
                         .saturating_sub(session.created_unix_ms.min(i64::MAX as u128) as i64)
                         .max(0) / 1000;
                     println!(
-                        "{:<38} {:<8} {:<7} {:<10} {}",
+                        "{:<38} {:<18} {:<8} {:<7} {:<10} {}",
                         session.id,
+                        session.role,
                         state,
                         session.pid.map(|pid| pid.to_string()).unwrap_or_else(|| "-".to_string()),
                         format!("{age_seconds}s"),
@@ -154,6 +155,9 @@ fn adopt_daemon_session_origin(
 ) {
     context.operator_session_id = session.id.clone();
     let origin = &session.origin;
+    context.ssh = audit::SshConnectionInfo::default();
+    context.ssh_username = origin.get("OPERATOR_SSH_USERNAME").cloned();
+    context.unix_uid = None;
     if let Some(value) = origin.get("OPERATOR_SSH_USERNAME") {
         context.ssh_username = Some(value.clone());
     }
@@ -196,6 +200,7 @@ fn session_origin_from_environment() -> std::collections::HashMap<String, String
         "OPERATOR_SSH_KEY_FINGERPRINT",
         "OPERATOR_SESSION_ID",
         "STREENOTE_OPERATOR_SESSION_ID",
+        "OPERATOR_SHELL",
         "OPERATOR_HERMES_REVIEW_SESSION_DIR",
         "OPERATOR_HERMES_INBOX",
         "STREENOTE_HERMES_INBOX",
@@ -395,7 +400,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.record_operator_session_event(
         EntryKind::OperatorSessionStart,
         format!(
-            "OPERATOR session started · {} · session {}",
+            "{} · {} · session {}",
+            if daemon_session_id.is_some() {
+                "OPERATOR client attached to persistent shell"
+            } else {
+                "OPERATOR session started"
+            },
             audit_context.connection_summary(),
             audit_context.operator_session_id
         ),
@@ -436,7 +446,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     app.record_operator_session_event(
         EntryKind::OperatorSessionEnd,
-        if result.is_ok() {
+        if daemon_session_id.is_some() {
+            "OPERATOR client detached; daemon-owned shell remains available".to_string()
+        } else if result.is_ok() {
             "OPERATOR session ended cleanly".to_string()
         } else {
             "OPERATOR session terminated with an application error".to_string()
