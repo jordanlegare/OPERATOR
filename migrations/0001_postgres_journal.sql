@@ -56,9 +56,9 @@ ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS operator_session_i
 ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS operator_instance_id TEXT;
 ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS ssh_username TEXT;
 ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS unix_uid BIGINT;
-ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS ssh_client_ip INET;
+ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS ssh_client_ip TEXT;
 ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS ssh_client_port INTEGER;
-ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS ssh_server_ip INET;
+ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS ssh_server_ip TEXT;
 ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS ssh_server_port INTEGER;
 ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS ssh_tty TEXT;
 ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS ssh_auth_method TEXT;
