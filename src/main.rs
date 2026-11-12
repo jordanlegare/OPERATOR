@@ -1690,7 +1690,9 @@ fn run_terminal_workspace(
     let mut out = stdout();
     let size = terminal.size()?;
     session.resize(size.width, size.height)?;
-    session.set_echo(true)?;
+    if !session.is_daemon_proxy() {
+        session.set_echo(true)?;
+    }
 
     // Stop Crossterm's enhanced-key parser from consuming terminal replies
     // while the child PTY owns input. The raw Unix pump below forwards every
