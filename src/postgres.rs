@@ -36,6 +36,12 @@ pub struct SearchHit {
     pub occurred_at: String,
     pub snippet: String,
     pub rank: f32,
+    pub operator_session_id: Option<String>,
+    pub operator_instance_id: Option<String>,
+    pub ssh_username: Option<String>,
+    pub unix_uid: Option<u32>,
+    pub ssh_client_ip: Option<String>,
+    pub operator_surface: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -437,11 +443,17 @@ async fn insert_entry(
         .unwrap_or_else(|_| Utc::now());
     let iteration = entry.iteration.map(|value| i32::try_from(value).unwrap_or(i32::MAX));
 
+    let uid = entry.unix_uid.map(i64::from);
     let row = sqlx::query(
         r#"INSERT INTO operator_journal_entries
            (record_id, event_id, occurred_at, kind, body, conversation_id,
-            session_id, related_session_id, turn_id, tool_call_id, iteration, payload)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
+            session_id, related_session_id, turn_id, tool_call_id, iteration, payload,
+            operator_session_id, operator_instance_id, ssh_username, unix_uid,
+            ssh_client_ip, ssh_client_port, ssh_server_ip, ssh_server_port, ssh_tty,
+            ssh_auth_method, ssh_key_fingerprint, operator_surface)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
+                   $13, $14, $15, $16, $17::inet, $18, $19::inet, $20, $21,
+                   $22, $23, $24)
            ON CONFLICT DO NOTHING
            RETURNING id"#,
     )
@@ -457,6 +469,18 @@ async fn insert_entry(
     .bind(entry.tool_call_id.as_deref())
     .bind(iteration)
     .bind(payload)
+    .bind(entry.operator_session_id.as_deref())
+    .bind(entry.operator_instance_id.as_deref())
+    .bind(entry.ssh_username.as_deref())
+    .bind(uid)
+    .bind(entry.ssh_client_ip.as_deref())
+    .bind(entry.ssh_client_port.map(i32::from))
+    .bind(entry.ssh_server_ip.as_deref())
+    .bind(entry.ssh_server_port.map(i32::from))
+    .bind(entry.ssh_tty.as_deref())
+    .bind(entry.ssh_auth_method.as_deref())
+    .bind(entry.ssh_key_fingerprint.as_deref())
+    .bind(entry.operator_surface.as_deref())
     .fetch_optional(&mut **transaction)
     .await?;
 
@@ -702,7 +726,7 @@ async fn fetch_new_entries_locked(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SearchMode { Web, Literal, Phrase, TsQuery, Fuzzy }
+enum SearchMode { Web, Literal, Phrase, TsQuery, Fuzzy, Audit }
 
 impl SearchMode {
     fn label(self) -> &'static str {
@@ -712,6 +736,7 @@ impl SearchMode {
             Self::Phrase => "EXACT PHRASE",
             Self::TsQuery => "POSTGRESQL TSQUERY",
             Self::Fuzzy => "TRIGRAM FUZZY",
+            Self::Audit => "AUDIT SESSION SEARCH",
         }
     }
 }
@@ -723,6 +748,11 @@ struct SearchSpec {
     kind: Option<String>,
     session: Option<String>,
     conversation: Option<String>,
+    operator_session: Option<String>,
+    client_ip: Option<String>,
+    ssh_user: Option<String>,
+    unix_uid: Option<i64>,
+    ssh_key_fingerprint: Option<String>,
     after: Option<DateTime<Utc>>,
     before: Option<DateTime<Utc>>,
     limit: usize,
@@ -763,6 +793,11 @@ fn parse_search_spec(raw: &str) -> Result<SearchSpec, String> {
     let mut kind = None;
     let mut session = None;
     let mut conversation = None;
+    let mut operator_session = None;
+    let mut client_ip = None;
+    let mut ssh_user = None;
+    let mut unix_uid = None;
+    let mut ssh_key_fingerprint = None;
     let mut after = None;
     let mut before = None;
     let mut limit = 200usize;
@@ -775,15 +810,32 @@ fn parse_search_spec(raw: &str) -> Result<SearchSpec, String> {
                 "hermes_assistant", "hermes_tool_call", "hermes_tool_result",
                 "hermes_stream_start", "hermes_stream_delta", "hermes_stream_end",
                 "hermes_history", "hermes_interim", "hermes_session",
+                "operator_session_start", "operator_session_heartbeat", "operator_session_end",
+                "operator_workspace_start", "operator_workspace_end",
             ];
             if !allowed.contains(&value.as_str()) { return Err(format!("unknown kind filter {value:?}")); }
             kind = Some(value);
         } else if let Some(value) = token.strip_prefix("session:") {
-            if value.is_empty() { return Err("session: requires an ID".to_string()); }
+            if value.is_empty() { return Err("session: requires a Hermes session ID".to_string()); }
             session = Some(value.to_string());
         } else if let Some(value) = token.strip_prefix("conversation:") {
             if value.is_empty() { return Err("conversation: requires an ID".to_string()); }
             conversation = Some(value.to_string());
+        } else if let Some(value) = token.strip_prefix("operator_session:").or_else(|| token.strip_prefix("op_session:")) {
+            if value.is_empty() { return Err("operator_session: requires an OPERATOR session ID".to_string()); }
+            operator_session = Some(value.to_string());
+        } else if let Some(value) = token.strip_prefix("ip:") {
+            let address = value.parse::<std::net::IpAddr>()
+                .map_err(|_| format!("invalid ip address {value:?}"))?;
+            client_ip = Some(address.to_string());
+        } else if let Some(value) = token.strip_prefix("user:") {
+            if value.is_empty() { return Err("user: requires an SSH login name".to_string()); }
+            ssh_user = Some(value.to_string());
+        } else if let Some(value) = token.strip_prefix("uid:") {
+            unix_uid = Some(value.parse::<i64>().map_err(|_| format!("invalid uid {value:?}"))?);
+        } else if let Some(value) = token.strip_prefix("key:") {
+            if value.is_empty() { return Err("key: requires an SSH public-key fingerprint".to_string()); }
+            ssh_key_fingerprint = Some(value.to_string());
         } else if let Some(value) = token.strip_prefix("after:") {
             after = Some(parse_search_date(value, false)?);
         } else if let Some(value) = token.strip_prefix("before:") {
@@ -808,13 +860,21 @@ fn parse_search_spec(raw: &str) -> Result<SearchSpec, String> {
     {
         query = query[1..query.len() - 1].to_string();
     }
+    let has_audit_filter = operator_session.is_some() || client_ip.is_some()
+        || ssh_user.is_some() || unix_uid.is_some() || ssh_key_fingerprint.is_some();
     if query.trim().is_empty() {
-        return Err("search query is empty; use /search WORDS or /search --literal WORDS".to_string());
+        if !has_audit_filter {
+            return Err("enter search terms or an audit filter such as ip:203.0.113.42".to_string());
+        }
+        mode = SearchMode::Audit;
     }
     if let (Some(start), Some(end)) = (after.as_ref(), before.as_ref()) {
         if start >= end { return Err("after: must be earlier than before:".to_string()); }
     }
-    Ok(SearchSpec { mode, query, kind, session, conversation, after, before, limit, offset })
+    Ok(SearchSpec {
+        mode, query, kind, session, conversation, operator_session, client_ip,
+        ssh_user, unix_uid, ssh_key_fingerprint, after, before, limit, offset
+    })
 }
 
 async fn search_records(pool: &PgPool, raw_query: &str, request_id: u64) -> SearchResult {
@@ -830,71 +890,93 @@ async fn search_records(pool: &PgPool, raw_query: &str, request_id: u64) -> Sear
     let pattern = like_pattern(query);
     let common_filters = r#"
         AND ($3::text IS NULL OR d.kind = $3)
-        AND ($4::text IS NULL OR EXISTS (
-            SELECT 1 FROM operator_journal_entries e
-            WHERE e.id = d.entry_id AND (e.session_id = $4 OR e.related_session_id = $4)
-        ))
-        AND ($5::text IS NULL OR EXISTS (
-            SELECT 1 FROM operator_journal_entries e
-            WHERE e.id = d.entry_id AND e.conversation_id = $5
-        ))
+        AND ($4::text IS NULL OR (e.session_id = $4 OR e.related_session_id = $4))
+        AND ($5::text IS NULL OR e.conversation_id = $5)
         AND ($6::timestamptz IS NULL OR d.occurred_at >= $6)
         AND ($7::timestamptz IS NULL OR d.occurred_at < $7)
+        AND ($8::text IS NULL OR e.operator_session_id = $8)
+        AND ($9::inet IS NULL OR e.ssh_client_ip = $9::inet)
+        AND ($10::text IS NULL OR e.ssh_username = $10)
+        AND ($11::bigint IS NULL OR e.unix_uid = $11)
+        AND ($12::text IS NULL OR e.ssh_key_fingerprint = $12)
     "#;
+    let grouped_order = if spec.operator_session.is_some() || spec.client_ip.is_some()
+        || spec.ssh_user.is_some() || spec.unix_uid.is_some() || spec.ssh_key_fingerprint.is_some()
+    {
+        "COALESCE(e.operator_session_id, '') ASC, d.entry_id ASC"
+    } else {
+        "rank DESC, d.entry_id DESC"
+    };
     let (predicate, rank_expr, snippet_expr, order) = match spec.mode {
         SearchMode::Web => (
             "lower(d.body) LIKE lower($2) ESCAPE '\\' OR d.search_vector @@ websearch_to_tsquery('simple', $1)",
             "CASE WHEN d.search_vector @@ websearch_to_tsquery('simple', $1) THEN ts_rank_cd(d.search_vector, websearch_to_tsquery('simple', $1)) ELSE 0 END",
             "CASE WHEN d.search_vector @@ websearch_to_tsquery('simple', $1) THEN ts_headline('simple', d.body, websearch_to_tsquery('simple', $1), 'StartSel=‹,StopSel=›,MaxFragments=2,MaxWords=28,MinWords=8') ELSE substring(d.body from greatest(position(lower($1) in lower(d.body)) - 100, 1) for 260) END",
-            "rank DESC, d.entry_id DESC",
+            grouped_order,
         ),
         SearchMode::Literal => (
             "lower(d.body) LIKE lower($2) ESCAPE '\\'",
             "1.0::real",
             "substring(d.body from greatest(position(lower($1) in lower(d.body)) - 100, 1) for 260)",
-            "d.entry_id DESC",
+            grouped_order,
         ),
         SearchMode::Phrase => (
             "d.search_vector @@ phraseto_tsquery('simple', $1)",
             "ts_rank_cd(d.search_vector, phraseto_tsquery('simple', $1))",
             "ts_headline('simple', d.body, phraseto_tsquery('simple', $1), 'StartSel=‹,StopSel=›,MaxFragments=2,MaxWords=28,MinWords=8')",
-            "rank DESC, d.entry_id DESC",
+            grouped_order,
         ),
         SearchMode::TsQuery => (
             "d.search_vector @@ to_tsquery('simple', $1)",
             "ts_rank_cd(d.search_vector, to_tsquery('simple', $1))",
             "ts_headline('simple', d.body, to_tsquery('simple', $1), 'StartSel=‹,StopSel=›,MaxFragments=2,MaxWords=28,MinWords=8')",
-            "rank DESC, d.entry_id DESC",
+            grouped_order,
         ),
         SearchMode::Fuzzy => (
-            // Compare the query against word-sized extents of the document.
-            // Whole-document similarity (%/similarity) penalizes long journal
-            // entries even when one word is an excellent typo-tolerant match.
             "lower($1) <% lower(d.body)",
             "word_similarity(lower($1), lower(d.body))",
             "substring(d.body from greatest(position(lower($1) in lower(d.body)) - 100, 1) for 260)",
-            "rank DESC, d.entry_id DESC",
+            grouped_order,
+        ),
+        SearchMode::Audit => (
+            "TRUE",
+            "0.0::real",
+            "substring(d.body from 1 for 260)",
+            "COALESCE(e.operator_session_id, '') ASC, d.entry_id ASC",
         ),
     };
     let sql = format!(
         r#"SELECT d.record_id, d.kind, d.occurred_at,
                   ({rank_expr})::real AS rank, {snippet_expr} AS snippet,
+                  e.operator_session_id, e.operator_instance_id, e.ssh_username,
+                  e.unix_uid, host(e.ssh_client_ip) AS ssh_client_ip, e.operator_surface,
                   COUNT(*) OVER()::bigint AS total_count
            FROM operator_journal_search_documents d
+           JOIN operator_journal_entries e ON e.id = d.entry_id
            WHERE ({predicate}) {common_filters}
-           ORDER BY {order} LIMIT $8 OFFSET $9"#
+           ORDER BY {order} LIMIT $13 OFFSET $14"#
     );
     let count_sql = format!(
-        "SELECT COUNT(*)::bigint FROM operator_journal_search_documents d WHERE ({predicate}) {common_filters}"
+        "SELECT COUNT(*)::bigint FROM operator_journal_search_documents d
+         JOIN operator_journal_entries e ON e.id = d.entry_id
+         WHERE ({predicate}) {common_filters}"
     );
-    let rows = match sqlx::query(&sql)
-        .bind(query)
-        .bind(&pattern)
-        .bind(spec.kind.as_deref())
-        .bind(spec.session.as_deref())
-        .bind(spec.conversation.as_deref())
-        .bind(spec.after.clone())
-        .bind(spec.before.clone())
+    let bind_filters = |query_builder: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>| {
+        query_builder
+            .bind(query)
+            .bind(&pattern)
+            .bind(spec.kind.as_deref())
+            .bind(spec.session.as_deref())
+            .bind(spec.conversation.as_deref())
+            .bind(spec.after.clone())
+            .bind(spec.before.clone())
+            .bind(spec.operator_session.as_deref())
+            .bind(spec.client_ip.as_deref())
+            .bind(spec.ssh_user.as_deref())
+            .bind(spec.unix_uid)
+            .bind(spec.ssh_key_fingerprint.as_deref())
+    };
+    let rows = match bind_filters(sqlx::query(&sql))
         .bind(spec.limit as i64)
         .bind(spec.offset as i64)
         .fetch_all(pool)
@@ -908,20 +990,10 @@ async fn search_records(pool: &PgPool, raw_query: &str, request_id: u64) -> Sear
         },
     };
 
-    // COUNT(*) OVER() has no row to carry the total when OFFSET is beyond
-    // the final result. Run a filtered count in that case so paging metadata
-    // remains correct even for an empty out-of-range page.
     let total = if let Some(row) = rows.first() {
         row.try_get::<i64, _>("total_count").unwrap_or(0).max(0) as usize
-    } else if spec.offset > 0 {
-        match sqlx::query_scalar::<_, i64>(&count_sql)
-            .bind(query)
-            .bind(&pattern)
-            .bind(spec.kind.as_deref())
-            .bind(spec.session.as_deref())
-            .bind(spec.conversation.as_deref())
-            .bind(spec.after.clone())
-            .bind(spec.before.clone())
+    } else {
+        match bind_filters(sqlx::query_scalar::<_, i64>(&count_sql))
             .fetch_one(pool)
             .await
         {
@@ -932,19 +1004,24 @@ async fn search_records(pool: &PgPool, raw_query: &str, request_id: u64) -> Sear
                 error: Some(format!("count PostgreSQL search results: {error}")),
             },
         }
-    } else {
-        0
     };
     let mut hits = Vec::with_capacity(rows.len());
     for row in rows {
         let decoded = (|| -> Result<SearchHit, sqlx::Error> {
             let occurred_at: DateTime<Utc> = row.try_get("occurred_at")?;
+            let unix_uid: Option<i64> = row.try_get("unix_uid")?;
             Ok(SearchHit {
                 record_id: row.try_get("record_id")?,
                 kind: row.try_get("kind")?,
                 occurred_at: occurred_at.to_rfc3339(),
                 snippet: row.try_get("snippet")?,
                 rank: row.try_get("rank")?,
+                operator_session_id: row.try_get("operator_session_id")?,
+                operator_instance_id: row.try_get("operator_instance_id")?,
+                ssh_username: row.try_get("ssh_username")?,
+                unix_uid: unix_uid.and_then(|uid| u32::try_from(uid).ok()),
+                ssh_client_ip: row.try_get("ssh_client_ip")?,
+                operator_surface: row.try_get("operator_surface")?,
             })
         })();
         match decoded {
@@ -961,6 +1038,7 @@ async fn search_records(pool: &PgPool, raw_query: &str, request_id: u64) -> Sear
         query: spec.query, mode: spec.mode.label().to_string(), error: None,
     }
 }
+
 fn like_pattern(query: &str) -> String {
     let mut pattern = String::with_capacity(query.len() + 2);
     pattern.push('%');
