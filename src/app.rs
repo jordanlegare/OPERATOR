@@ -3829,7 +3829,13 @@ mod tests {
             occurred_at: "2026-11-11T12:00:00Z".to_string(),
             snippet: "remote journal result".to_string(),
             rank: 0.4,
-        }];
+            operator_session_id: None,
+            operator_instance_id: None,
+            ssh_username: None,
+            unix_uid: None,
+            ssh_client_ip: None,
+            operator_surface: None,
+        ];
         app.search_hit_entry_indices = vec![None];
 
         app.select_search_result(0);
@@ -3922,21 +3928,39 @@ mod tests {
                 occurred_at: app.journal.entries[2].timestamp.clone(),
                 snippet: "result two".to_string(),
                 rank: 0.9,
-            },
+                operator_session_id: None,
+                operator_instance_id: None,
+                ssh_username: None,
+                unix_uid: None,
+                ssh_client_ip: None,
+                operator_surface: None,
+            ,
             crate::postgres::SearchHit {
                 record_id: app.journal.entries[0].record_id.clone().unwrap(),
                 kind: "note".to_string(),
                 occurred_at: app.journal.entries[0].timestamp.clone(),
                 snippet: "result zero".to_string(),
                 rank: 0.8,
-            },
+                operator_session_id: None,
+                operator_instance_id: None,
+                ssh_username: None,
+                unix_uid: None,
+                ssh_client_ip: None,
+                operator_surface: None,
+            ,
             crate::postgres::SearchHit {
                 record_id: app.journal.entries[1].record_id.clone().unwrap(),
                 kind: "note".to_string(),
                 occurred_at: app.journal.entries[1].timestamp.clone(),
                 snippet: "result one".to_string(),
                 rank: 0.7,
-            },
+                operator_session_id: None,
+                operator_instance_id: None,
+                ssh_username: None,
+                unix_uid: None,
+                ssh_client_ip: None,
+                operator_surface: None,
+            ,
         ];
         app.search_hit_entry_indices = vec![Some(2), Some(0), Some(1)];
         app.matches = vec![2, 0, 1];
