@@ -878,9 +878,9 @@ mod tests {
     #[test]
     fn alternate_screen_redraws_are_not_added_to_transcript() {
         let mut parser = TranscriptParser::default();
-        assert!(parser.feed(b"before\\n\\x1b[?1049hscreen contents\\nmore screen").len() == 1);
+        assert!(parser.feed(b"before\n\x1b[?1049hscreen contents\nmore screen").len() == 1);
         assert!(parser.flush_partial().is_none());
-        let lines = parser.feed(b"\\x1b[?1049lafter\\n");
+        let lines = parser.feed(b"\x1b[?1049lafter\n");
         assert_eq!(lines, vec!["after".to_string()]);
     }
 
