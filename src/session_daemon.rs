@@ -268,17 +268,19 @@ mod unix_impl {
             ] {
                 command.env_remove(variable);
             }
+            for (key, value) in &origin {
+                if is_allowed_origin_variable(key) {
+                    command.env(key, value);
+                }
+            }
+            // Use the stable per-user inbox, not the first TUI's
+            // per-instance inbox path. Detached shell workers outlive clients.
             command.env(
                 crate::hermes_bridge::HERMES_INBOX_ENV,
                 crate::hermes_bridge::default_inbox_path(),
             );
             command.env("STREENOTE_HERMES_INBOX", crate::hermes_bridge::default_inbox_path());
 
-            for (key, value) in &origin {
-                if is_allowed_origin_variable(key) {
-                    command.env(key, value);
-                }
-            }
             let operator_session_id = if role == "primary" {
                 id.as_str()
             } else {
@@ -1070,8 +1072,8 @@ trap "__operator_audit_capture" EXIT
                 .expect("reuse the most recent detached primary session");
             assert_eq!(first.id, resumed.id, "the detached session should be preferred over creating another");
 
-            let different_role = manager.get_or_create("workspace:parent", 80, 24, true, None)
-                .expect("create a separate workspace role");
+            let different_role = manager.get_or_create("secondary", 80, 24, true, None)
+                .expect("create a separate secondary role");
             assert_ne!(first.id, different_role.id);
 
             second.unsubscribe(second_controller);
