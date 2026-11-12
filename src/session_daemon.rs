@@ -1123,7 +1123,7 @@ trap "__operator_audit_capture" EXIT
             let (first_controller, _, first_receiver) = session.subscribe(false)
                 .expect("attach initial controller");
 
-            session.write_input(b"printf 'operator-daemon-first-marker\\n'\\r")
+            session.write_input(b"printf 'operator-daemon-first-marker\\n'\r")
                 .expect("send first shell command");
             let first_deadline = Instant::now() + Duration::from_secs(5);
             let mut first_output = Vec::new();
@@ -1151,7 +1151,7 @@ trap "__operator_audit_capture" EXIT
             // The controller goes away but the daemon-owned PTY and shell stay
             // alive. A command submitted while detached must still execute.
             session.unsubscribe(first_controller);
-            session.write_input(b"printf 'operator-daemon-detached-marker\\n'\\r")
+            session.write_input(b"printf 'operator-daemon-detached-marker\\n'\r")
                 .expect("send command while detached");
 
             let detached_deadline = Instant::now() + Duration::from_secs(5);
