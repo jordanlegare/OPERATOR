@@ -42,28 +42,47 @@ impl std::fmt::Debug for ShellSession {
 
 impl ShellSession {
     pub fn spawn(cols: u16, rows: u16) -> io::Result<Self> {
-        Self::spawn_internal(cols, rows, None)
+        Self::spawn_internal(cols, rows, None, None)
     }
 
     /// Spawn an independent Bash workspace with a PROMPT_COMMAND hook that
     /// appends completed history entries to a private NUL-delimited file.
     /// No raw terminal bytes or secret prompt input are observed.
     pub fn spawn_with_command_audit(cols: u16, rows: u16) -> io::Result<Self> {
+        let path = Self::new_audit_file_path();
+        Self::spawn_internal(cols, rows, Some(path), None)
+    }
+
+    fn new_audit_file_path() -> PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let path = env::temp_dir().join(format!(
+        env::temp_dir().join(format!(
             "operator-audit-{}-{nanos:x}.nul",
             std::process::id()
-        ));
-        Self::spawn_internal(cols, rows, Some(path))
+        ))
+    }
+
+    #[cfg(test)]
+    fn spawn_with_command_audit_in_home(
+        cols: u16,
+        rows: u16,
+        home: &Path,
+    ) -> io::Result<Self> {
+        Self::spawn_internal(
+            cols,
+            rows,
+            Some(Self::new_audit_file_path()),
+            Some(home.to_path_buf()),
+        )
     }
 
     fn spawn_internal(
         cols: u16,
         rows: u16,
         requested_audit_path: Option<PathBuf>,
+        home_override: Option<PathBuf>,
     ) -> io::Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -108,14 +127,22 @@ elif [[ -r /etc/bash.bashrc ]]; then
   source /etc/bash.bashrc
 fi
 __operator_audit_capture() {
-  local current line
+  local current
   current="${HISTCMD:-0}"
-  if [[ "$current" != "${__OPERATOR_AUDIT_LAST_HISTCMD:-}" ]]; then
-    line="$(fc -ln -1 2>/dev/null)"
-    line="${line#"${line%%[![:space:]]*}"}"
-    if [[ -n "$line" ]]; then
-      printf '%s\0' "$line" >> "$OPERATOR_AUDIT_COMMAND_FILE"
-    fi
+
+  # The first prompt is a startup baseline, not a user command. Bash has
+  # already loaded ~/.bash_history by this point, so capturing on that first
+  # prompt would attribute the previous shell's last command to this F1 session.
+  if [[ -z "${__OPERATOR_AUDIT_LAST_HISTCMD+x}" ]]; then
+    __OPERATOR_AUDIT_LAST_HISTCMD="$current"
+    return
+  fi
+
+  if [[ "$current" != "$__OPERATOR_AUDIT_LAST_HISTCMD" ]]; then
+    # Run fc in this Bash process. Command substitution runs fc in a subshell
+    # and can lag one entry behind the command that just completed.
+    fc -ln -1 -1 >> "$OPERATOR_AUDIT_COMMAND_FILE" 2>/dev/null
+    printf '\0' >> "$OPERATOR_AUDIT_COMMAND_FILE"
     __OPERATOR_AUDIT_LAST_HISTCMD="$current"
   fi
 }
@@ -135,6 +162,10 @@ trap '__operator_audit_capture' EXIT
             let _ = command_path;
         }
         let mut command = CommandBuilder::new(&shell);
+        if let Some(home) = home_override.as_ref() {
+            command.env("HOME", home);
+            command.env("HISTFILE", home.join(".bash_history"));
+        }
         // Keep PostgreSQL credentials in the OPERATOR process only; do not
         // leak the connection URL into the interactive shell's environment.
         command.env_remove("OPERATOR_DATABASE_URL");
@@ -810,42 +841,88 @@ mod tests {
     use super::TranscriptParser;
 
     #[test]
-    fn bash_workspace_audit_captures_submitted_history_commands() {
+    fn bash_workspace_audit_ignores_prior_history_and_records_only_current_commands() {
         use super::ShellSession;
-        use std::time::{Duration, Instant};
+        use std::{fs, time::{Duration, Instant}};
 
-        let Ok(mut session) = ShellSession::spawn_with_command_audit(80, 24) else {
-            // Shell integration is optional on platforms without a usable PTY.
-            return;
-        };
-        if !session.supports_command_audit() {
-            return;
+        let home = std::env::temp_dir().join(format!(
+            "operator-audit-home-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&home).expect("create isolated Bash home");
+        fs::write(home.join(".bashrc"), "").expect("create isolated Bash rc");
+        fs::write(
+            home.join(".bash_history"),
+            "echo operator-previous-session-sentinel\\n",
+        )
+        .expect("seed prior-session history");
+
+        // Repeatedly entering and immediately leaving F1 must never turn the
+        // last command from ~/.bash_history into a new workspace CMD record.
+        for attempt in 0..3 {
+            let Ok(mut session) = ShellSession::spawn_with_command_audit_in_home(80, 24, &home) else {
+                let _ = fs::remove_dir_all(&home);
+                return;
+            };
+            if !session.supports_command_audit() {
+                let _ = fs::remove_dir_all(&home);
+                return;
+            }
+
+            let startup_deadline = Instant::now() + Duration::from_millis(350);
+            while Instant::now() < startup_deadline {
+                let _ = session.drain_output();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let startup_commands = session
+                .drain_audited_commands()
+                .expect("read startup audit spool");
+            assert!(
+                startup_commands.is_empty(),
+                "F1 entry {attempt} copied prior-session history into the audit spool: {startup_commands:?}"
+            );
+            drop(session);
         }
 
-        // Let Bash source its normal interactive startup files and install the
-        // post-startup history hook before submitting the test command.
-        let startup_deadline = Instant::now() + Duration::from_millis(500);
+        // A command entered in the current workspace must still be captured
+        // exactly once, without the old session's last command.
+        let Ok(mut session) = ShellSession::spawn_with_command_audit_in_home(80, 24, &home) else {
+            let _ = fs::remove_dir_all(&home);
+            return;
+        };
+        let startup_deadline = Instant::now() + Duration::from_millis(350);
         while Instant::now() < startup_deadline {
             let _ = session.drain_output();
             std::thread::sleep(Duration::from_millis(20));
         }
-        session.send_line("printf 'operator-audit-shell-test\\n'")
-            .expect("submit Bash audit fixture");
+        assert!(
+            session.drain_audited_commands().expect("read clean startup spool").is_empty(),
+            "fresh F1 workspace must not import previous-shell history"
+        );
 
+        let submitted = "printf 'operator-audit-current-session-test\\n'";
+        session.send_line(submitted).expect("submit Bash audit fixture");
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut captured = Vec::new();
         while Instant::now() < deadline {
             let _ = session.drain_output();
             captured.extend(session.drain_audited_commands().expect("read Bash audit spool"));
-            if captured.iter().any(|command| command.contains("operator-audit-shell-test")) {
+            if !captured.is_empty() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(
-            captured.iter().any(|command| command.contains("operator-audit-shell-test")),
-            "Bash history hook did not record the submitted command: {captured:?}"
+        assert_eq!(
+            captured,
+            vec![submitted.to_string()],
+            "only the command submitted in this F1 session should be captured"
         );
+        drop(session);
+        fs::remove_dir_all(&home).expect("remove isolated Bash home");
     }
 
     #[test]
