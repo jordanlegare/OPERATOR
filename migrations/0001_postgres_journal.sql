@@ -74,6 +74,9 @@ CREATE INDEX IF NOT EXISTS operator_journal_ssh_client_ip_idx
 CREATE INDEX IF NOT EXISTS operator_journal_ssh_username_idx
     ON operator_journal_entries (ssh_username, occurred_at, id)
     WHERE ssh_username IS NOT NULL;
+CREATE INDEX IF NOT EXISTS operator_journal_unix_uid_idx
+    ON operator_journal_entries (unix_uid, occurred_at, id)
+    WHERE unix_uid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS operator_journal_ssh_fingerprint_idx
     ON operator_journal_entries (ssh_key_fingerprint, occurred_at, id)
     WHERE ssh_key_fingerprint IS NOT NULL;
