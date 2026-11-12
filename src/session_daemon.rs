@@ -580,10 +580,19 @@ mod unix_impl {
         };
         let mut response = Response::ok();
         response.session = Some(session.info());
-        write_response(stream, response)?;
+        if let Err(error) = write_response(stream, response) {
+            session.unsubscribe(client_id);
+            return Err(error);
+        }
 
-        let mut output_stream = stream.try_clone()?;
-        let writer = thread::Builder::new()
+        let mut output_stream = match stream.try_clone() {
+            Ok(stream) => stream,
+            Err(error) => {
+                session.unsubscribe(client_id);
+                return Err(error);
+            }
+        };
+        let writer = match thread::Builder::new()
             .name(format!("operator-session-output-{}", session.id))
             .spawn(move || {
                 if !replay.is_empty() && write_frame(&mut output_stream, FRAME_OUTPUT, &replay).is_err() {
@@ -602,35 +611,48 @@ mod unix_impl {
                         }
                     }
                 }
-            })?;
+            }) {
+            Ok(writer) => writer,
+            Err(error) => {
+                session.unsubscribe(client_id);
+                return Err(error);
+            }
+        };
 
+        let mut relay_result = Ok(());
         loop {
             let (kind, payload) = match read_frame(stream) {
                 Ok(frame) => frame,
                 Err(error) if error.kind() == io::ErrorKind::UnexpectedEof
                     || error.kind() == io::ErrorKind::ConnectionReset => break,
                 Err(error) => {
-                    session.unsubscribe(client_id);
-                    let _ = writer.join();
-                    return Err(error);
+                    relay_result = Err(error);
+                    break;
                 }
             };
-            match kind {
-                FRAME_INPUT => session.write_input(&payload)?,
+            let result = match kind {
+                FRAME_INPUT => session.write_input(&payload),
                 FRAME_RESIZE if payload.len() == 4 => {
                     let cols = u16::from_be_bytes([payload[0], payload[1]]);
                     let rows = u16::from_be_bytes([payload[2], payload[3]]);
-                    session.resize(cols, rows)?;
+                    session.resize(cols, rows)
                 }
                 FRAME_DETACH => break,
-                _ => {}
+                _ => Ok(()),
+            };
+            if let Err(error) = result {
+                relay_result = Err(error);
+                break;
             }
         }
 
+        // Always release the exclusive controller lease, including on PTY,
+        // socket, and resize errors. The daemon-owned shell itself survives.
         session.unsubscribe(client_id);
-        drop(stream);
-        let _ = writer.join();
-        Ok(())
+        let writer_result = writer.join()
+            .map_err(|_| io::Error::other("session output forwarding thread panicked"));
+        relay_result?;
+        writer_result
     }
 
     fn write_response(stream: &mut UnixStream, response: Response) -> io::Result<()> {
