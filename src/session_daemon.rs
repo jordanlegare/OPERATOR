@@ -264,7 +264,7 @@ mod unix_impl {
                 "OPERATOR_SSH_CLIENT_IP", "OPERATOR_SSH_CLIENT_PORT",
                 "OPERATOR_SSH_SERVER_IP", "OPERATOR_SSH_SERVER_PORT",
                 "OPERATOR_SSH_TTY", "OPERATOR_SSH_AUTH_METHOD",
-                "OPERATOR_SSH_KEY_FINGERPRINT",
+                "OPERATOR_SSH_KEY_FINGERPRINT", "OPERATOR_INSTANCE_ID",
             ] {
                 command.env_remove(variable);
             }
@@ -914,6 +914,11 @@ mod unix_impl {
                 | "STREENOTE_OPERATOR_SESSION_ID"
                 | "OPERATOR_SHELL"
                 | "OPERATOR_HERMES_REVIEW_SESSION_DIR"
+                | "STREENOTE_HERMES_REVIEW_SESSION_DIR"
+                | "OPERATOR_HERMES_REVIEW_SOCKET"
+                | "STREENOTE_HERMES_REVIEW_SOCKET"
+                | "TERM"
+                | "COLORTERM"
                 | "OPERATOR_HERMES_INBOX"
                 | "STREENOTE_HERMES_INBOX"
         )
