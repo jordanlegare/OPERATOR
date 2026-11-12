@@ -53,6 +53,51 @@ Use `/scp on`, `/scp off`, or `/scp status` inside OPERATOR to control SCP/SFTP 
 
 Press F1 to open a separate interactive terminal workspace backed by its own independent PTY and shell process. Full-screen programs such as `vim`, `nano`, `less`, `top`, and `htop` use the terminal emulator normally. Press F1 again to return to the transcript; closing the workspace does not interrupt OPERATOR's primary shell. Workspace terminal output is displayed directly and is not added to the journal. Opening, closing, and exiting the F1 workspace do not create journal entries. The primary OPERATOR shell and its transcript continue independently.
 
+## Persistent SSH sessions and daemon
+
+OPERATOR can run its interactive shells under a per-user session daemon. The daemon owns the real shell PTYs independently of the TUI process; disconnecting SSH or closing the TUI detaches the client without terminating the shell. A subsequent SSH login automatically reconnects to the most recently detached primary session for that Unix account. If another primary session is still attached, a new login gets a separate shell.
+
+The SSH login-shell integration remains unchanged: keep the OPERATOR executable configured as the account's login shell in `/etc/passwd`. Interactive SSH logins connect to the daemon automatically. The existing non-interactive `ssh user@host command`, SCP and SFTP dispatch runs before the TUI/daemon attach path and continues to use the existing shell and transfer passthrough behavior.
+
+F1 is a separate daemon-owned workspace tied to its primary OPERATOR session. Pressing F1 from the transcript attaches to that workspace; pressing F1 again detaches it and returns to the transcript without killing Bash. Pressing F1 later, including after an SSH disconnect and reconnect, attaches to the same workspace. Typing `exit` inside the F1 Bash shell terminates that workspace. Completed Bash commands continue to be captured in the persistent per-workspace audit spool and imported into the transcript with the original OPERATOR session attribution.
+
+### Daemon commands
+
+| Command | Action |
+|---|---|
+| `operator daemon` | Run the per-user daemon in the foreground (normally managed by systemd) |
+| `operator sessions` | List this Unix account's persistent sessions and their attached/detached state |
+| `operator session create` | Create a standalone persistent shell and attach to it |
+| `operator session attach SESSION_ID` | Attach to a detached session; recent terminal output is replayed |
+| `operator session attach SESSION_ID --no-replay` | Attach without replaying buffered terminal output |
+| `operator session terminate SESSION_ID` | Terminate a session and its shell process |
+
+A standalone attached session can be detached with **Ctrl+]**. The native attach protocol allows one controlling client per session at a time; other clients cannot send input to an already-controlled shell.
+
+### Run the daemon with systemd (recommended)
+
+Install the example user service:
+
+```bash
+mkdir -p ~/.config/systemd/user
+install -m 0644 contrib/systemd/operator-sessiond.service \
+  ~/.config/systemd/user/operator-sessiond.service
+```
+
+Edit `ExecStart` in the service file if your OPERATOR binary is not at `/usr/local/bin/operator`. Then enable the service:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now operator-sessiond
+sudo loginctl enable-linger "$USER"
+```
+
+Lingering keeps the user service running after the last SSH login ends. When no systemd user service is active, the first interactive SSH login can start a detached per-user daemon automatically. The daemon socket is stored under `$XDG_RUNTIME_DIR/operator/sessiond.sock` (or `~/.local/share/operator/run/sessiond.sock` when no runtime directory is available) with user-only directory and socket permissions. On Linux, the daemon also verifies the connecting process UID with `SO_PEERCRED`.
+
+### Session persistence boundaries
+
+Shell processes survive TUI exit and SSH transport loss while the daemon remains alive. The daemon currently owns the PTY masters and shell children directly: stopping or crashing the daemon, rebooting the server, or killing its process tree terminates those shells. Crash-independent shell workers and a durable terminal screen model are future hardening work. Reattachment replays up to the latest 1 MiB of terminal output; that is useful for command-line shells, but it is not a guarantee that every full-screen application can reconstruct its exact screen after a disconnect.
+
 ## Modes
 
 The default input mode is **TERMINAL**.
