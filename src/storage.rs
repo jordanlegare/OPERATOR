@@ -781,10 +781,10 @@ impl Journal {
                                 self.persisted_event_ids.insert(id.clone());
                             }
                             self.remember_hot_identity(&entry);
-                            // Preserve the established live-sharing contract:
-                            // notes and Hermes events fan out to peers; shell commands,
-                            // raw PTY output, and system notices stay in their origin TUI.
-                            let should_mirror = entry.kind == EntryKind::Note
+                            // Notes, Hermes events, and explicitly audited F1 Bash
+                            // commands are shared with peer reviewers. Ordinary primary
+                            // shell commands, raw PTY output, and system notices stay local.
+                            let should_mirror = should_mirror_to_peers(&entry)
                                 || is_hermes_journal_kind(entry.kind);
                             if !record_is_new || !event_is_new || !should_mirror {
                                 continue;
@@ -866,7 +866,7 @@ impl Journal {
                                 _ => false,
                             }
                         }
-                    } else if entry.kind == EntryKind::Note {
+                    } else if should_mirror_to_peers(&entry) {
                         match (record_id_is_new, entry.record_id.as_ref()) {
                             (Some(true), Some(record_id)) => {
                                 self.cached_record_ids.insert(record_id.clone())
@@ -1303,6 +1303,15 @@ pub fn entry_transcript_text(entry: &Entry, index: usize) -> String {
         entry_kind_label(entry.kind),
         entry_display_text(entry)
     )
+}
+
+/// Entries intentionally replicated into every connected reviewer's live transcript.
+/// F1 commands come from Bash history rather than raw PTY input, so sharing them
+/// does not expose hidden password prompts or arbitrary terminal keystrokes.
+fn should_mirror_to_peers(entry: &Entry) -> bool {
+    entry.kind == EntryKind::Note
+        || (entry.kind == EntryKind::TerminalCommand
+            && entry.operator_surface.as_deref() == Some("f1_workspace"))
 }
 
 fn is_hermes_journal_kind(kind: EntryKind) -> bool {
@@ -1910,7 +1919,7 @@ mod shared_journal_tests {
     }
 
     #[test]
-    fn live_notes_sync_between_terminals_in_both_directions_without_mirroring_commands() {
+    fn live_notes_and_f1_bash_audit_commands_sync_but_primary_shell_commands_stay_local() {
         let path = journal_path();
         let mut first = Journal::open(path.clone()).expect("open first terminal journal");
         let mut second = Journal::open(path.clone()).expect("open second terminal journal");
@@ -1927,9 +1936,17 @@ mod shared_journal_tests {
                 "note written in terminal one".to_string(),
             ))
             .expect("persist first terminal note");
+        let mut f1_command = Entry::with_kind(
+            EntryKind::TerminalCommand,
+            "journalctl -u ssh.service".to_string(),
+        );
+        f1_command.operator_surface = Some("f1_workspace".to_string());
+        first
+            .append(f1_command)
+            .expect("persist audited F1 Bash command");
 
-        // The second terminal discovers the first note even when its next
-        // action is another local append rather than an explicit refresh.
+        // The second terminal discovers notes and audited F1 Bash commands,
+        // even when its next action is another local append rather than a poll.
         second
             .append(Entry::with_kind(
                 EntryKind::Note,
@@ -1937,10 +1954,17 @@ mod shared_journal_tests {
             ))
             .expect("persist second terminal note");
 
-        assert_eq!(second.entries.len(), 2);
+        assert_eq!(second.entries.len(), 3);
         assert_eq!(second.entries[0].kind, EntryKind::Note);
         assert_eq!(second.entries[0].text, "note written in terminal one");
-        assert_eq!(second.entries[1].text, "note written in terminal two");
+        assert_eq!(second.entries[1].kind, EntryKind::TerminalCommand);
+        assert_eq!(second.entries[1].text, "journalctl -u ssh.service");
+        assert_eq!(second.entries[1].operator_surface.as_deref(), Some("f1_workspace"));
+        assert_eq!(second.entries[2].text, "note written in terminal two");
+        assert!(
+            second.entries.iter().all(|entry| entry.text != "private shell command"),
+            "ordinary primary-shell commands must remain local to their origin",
+        );
 
         // The first terminal receives the second terminal's note on its next
         // poll, and repeated polls cannot create duplicate rows.
@@ -1952,20 +1976,23 @@ mod shared_journal_tests {
             first.refresh_external_entries().expect("idempotent note poll"),
             0
         );
-        assert_eq!(first.entries.len(), 3);
-        assert_eq!(first.entries[2].text, "note written in terminal two");
+        assert_eq!(first.entries.len(), 4);
+        assert_eq!(first.entries[2].text, "journalctl -u ssh.service");
+        assert_eq!(first.entries[3].text, "note written in terminal two");
 
-        // Neither terminal imports another terminal's shell command as a note.
+        // A repeated poll cannot duplicate the shared F1 command or notes.
         assert_eq!(
-            second.refresh_external_entries().expect("no extra shared rows"),
+            second.refresh_external_entries().expect("no duplicate shared rows"),
             0
         );
 
         drop(first);
         drop(second);
         let contents = fs::read_to_string(&path).expect("read shared journal");
-        assert_eq!(contents.lines().count(), 3);
+        assert_eq!(contents.lines().count(), 4);
+        assert_eq!(contents.matches("private shell command").count(), 1);
         assert_eq!(contents.matches("note written in terminal one").count(), 1);
+        assert_eq!(contents.matches("journalctl -u ssh.service").count(), 1);
         assert_eq!(contents.matches("note written in terminal two").count(), 1);
         let _ = fs::remove_file(&path);
         let lock = PathBuf::from(format!("{}.lock", path.display()));
