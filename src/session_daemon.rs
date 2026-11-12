@@ -258,7 +258,14 @@ mod unix_impl {
             command.env("TERM", env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string()));
             command.env("COLORTERM", env::var("COLORTERM").unwrap_or_else(|_| "truecolor".to_string()));
             command.env_remove("OPERATOR_DATABASE_URL");
-            command.env("OPERATOR_SESSION_ID", &id);
+            for variable in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "SSH_USER_AUTH"] {
+                command.env_remove(variable);
+            }
+            command.env(
+                crate::hermes_bridge::HERMES_INBOX_ENV,
+                crate::hermes_bridge::default_inbox_path(),
+            );
+            command.env("STREENOTE_HERMES_INBOX", crate::hermes_bridge::default_inbox_path());
 
             let origin = origin.unwrap_or_default();
             for (key, value) in &origin {
@@ -266,6 +273,13 @@ mod unix_impl {
                     command.env(key, value);
                 }
             }
+            let operator_session_id = if role == "primary" {
+                id.as_str()
+            } else {
+                origin.get("OPERATOR_SESSION_ID").map(String::as_str).unwrap_or(id.as_str())
+            };
+            command.env("OPERATOR_SESSION_ID", operator_session_id);
+            command.env("STREENOTE_OPERATOR_SESSION_ID", operator_session_id);
 
             if let Some(path) = audit_file_path.as_ref() {
                 command.env("OPERATOR_AUDIT_COMMAND_FILE", path);
@@ -859,6 +873,8 @@ mod unix_impl {
                 | "OPERATOR_SSH_TTY"
                 | "OPERATOR_SSH_AUTH_METHOD"
                 | "OPERATOR_SSH_KEY_FINGERPRINT"
+                | "OPERATOR_SESSION_ID"
+                | "STREENOTE_OPERATOR_SESSION_ID"
                 | "OPERATOR_HERMES_REVIEW_SESSION_DIR"
                 | "OPERATOR_HERMES_INBOX"
                 | "STREENOTE_HERMES_INBOX"
