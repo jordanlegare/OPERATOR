@@ -233,6 +233,9 @@ fn search_file(path: &Path, request_id: u64, raw_query: &str) -> ArchiveSearchRe
         },
     };
 
+    // Normalize once before both archive passes so counting and page capture
+    // use exactly the same case-insensitive literal match.
+    let normalized_needle = needle.to_lowercase();
     let mut result = ArchiveSearchResult {
         request_id,
         query: needle.clone(),
@@ -254,19 +257,16 @@ fn search_file(path: &Path, request_id: u64, raw_query: &str) -> ArchiveSearchRe
     // First pass counts the full result set without retaining hit records.
     // Second pass captures only the requested page, so even offset:100000000
     // consumes O(limit) result memory rather than O(offset + limit).
-    let total = match scan_archive(path, archive_len, &needle, None) {
+    let total = match scan_archive(path, archive_len, &normalized_needle, None) {
         Ok((total, _)) => total,
         Err(error) => {
             result.error = Some(error);
             return result;
         }
     };
-    // Normalize the query once before scanning. Stored text is normalized
-    // per record in collect_match, so both sides use the same case semantics.
-    let needle = needle.to_lowercase();
     let page_start = total.saturating_sub(offset.saturating_add(limit));
     let page_end = total.saturating_sub(offset);
-    let (_, mut hits) = match scan_archive(path, archive_len, &needle, Some((page_start, page_end))) {
+    let (_, mut hits) = match scan_archive(path, archive_len, &normalized_needle, Some((page_start, page_end))) {
         Ok(scanned) => scanned,
         Err(error) => {
             result.error = Some(error);
