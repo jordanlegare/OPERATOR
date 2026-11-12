@@ -578,6 +578,47 @@ mod tests {
     }
 
     #[test]
+    fn filters_complete_archive_by_client_ip_and_groups_originating_sessions() {
+        let path = test_path();
+        let mut first = Entry::with_kind(EntryKind::TerminalCommand, "systemctl status ssh".to_string());
+        first.operator_session_id = Some("op-session-a".to_string());
+        first.ssh_client_ip = Some("203.0.113.42".to_string());
+        first.ssh_username = Some("deploy".to_string());
+        first.unix_uid = Some(1204);
+        let mut heartbeat = Entry::with_kind(EntryKind::OperatorSessionHeartbeat, "heartbeat".to_string());
+        heartbeat.operator_session_id = first.operator_session_id.clone();
+        heartbeat.ssh_client_ip = first.ssh_client_ip.clone();
+        let mut second = Entry::with_kind(EntryKind::TerminalCommand, "journalctl -u ssh".to_string());
+        second.operator_session_id = Some("op-session-b".to_string());
+        second.ssh_client_ip = Some("203.0.113.42".to_string());
+        second.ssh_username = Some("deploy".to_string());
+        let mut unrelated = Entry::with_kind(EntryKind::TerminalCommand, "uname -a".to_string());
+        unrelated.operator_session_id = Some("op-session-c".to_string());
+        unrelated.ssh_client_ip = Some("198.51.100.9".to_string());
+
+        let mut bytes = Vec::new();
+        for entry in [&first, &heartbeat, &second, &unrelated] {
+            bytes.extend(serde_json::to_vec(entry).expect("serialize audit record"));
+            bytes.push(b'\\n');
+        }
+        fs::write(&path, bytes).expect("write audit archive");
+
+        let searcher = ArchiveSearcher::new(path.clone()).expect("start archive search");
+        searcher.search(44, "ip:203.0.113.42 user:deploy".to_string())
+            .expect("queue IP audit search");
+        let result = wait_for_result(&searcher, 44);
+        assert!(result.error.is_none(), "audit search error: {:?}", result.error);
+        assert_eq!(result.total, 2, "heartbeats and other IPs are excluded by default");
+        assert_eq!(result.hits.len(), 2);
+        assert_eq!(result.hits[0].operator_session_id.as_deref(), Some("op-session-a"));
+        assert_eq!(result.hits[1].operator_session_id.as_deref(), Some("op-session-b"));
+        assert_eq!(result.hits[0].ssh_client_ip.as_deref(), Some("203.0.113.42"));
+
+        drop(searcher);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn searches_across_adjacent_hermes_stream_deltas() {
         let path = test_path();
         let mut first = Entry::with_kind(EntryKind::HermesStreamDelta, "archive-cross-".to_string());
