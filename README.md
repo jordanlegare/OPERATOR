@@ -338,6 +338,8 @@ The palettes are built into OPERATOR and require no external theme package or co
 | `/clear` | Clear search and return to the live tail; does not delete data |
 | `/save` | Retry pending writes and sync the journal |
 | `/export [path]` | Export the complete journal as readable text |
+| `/export-search [path]` | Export full records from the currently displayed search-results page only; defaults to `operator-search-results.txt` |
+| `/export-results [path]` | Alias for `/export-search` |
 | `/stats` | Show the 30-day hot-cache entry count/bytes, pending writes, and hit count |
 | `/path` | Show the journal file path |
 | `/scp on|off|status` | Enable, disable, or inspect SSH SCP/SFTP passthrough (persistent; enabled by default) |
@@ -398,7 +400,8 @@ OPERATOR separates the live transcript cache from the durable journal:
 
 - **Hot window:** the transcript retains entries from the trailing 30 × 24 hours (a rolling 30-day window, not a calendar month). Expired rows are pruned from memory at startup and during the live session; the running TUI checks for expiry once per minute.
 - **Complete history:** the JSONL journal is append-only and is never truncated by hot-cache expiry. PostgreSQL stores and indexes the complete history when configured. Expired records remain available to archive search and export.
-- **JSONL archive search:** `/search` runs in a background worker that scans the durable file sequentially. It keeps only the requested result page as snippets and byte ranges; it does not build a second full-history `Vec<Entry>`. Results are newest-first. Use `limit:` and `offset:` to page through matches. Enter loads one selected historical record from its byte range instead of keeping every historical body in memory.
+- **JSONL archive search:** `/search` runs in a background worker that scans the durable file sequentially. Literal matching is case-insensitive. It keeps only the requested result page as snippets and byte ranges; it does not build a second full-history `Vec<Entry>`. Results are newest-first. Use `limit:` and `offset:` to page through matches. Enter loads one selected historical record from its byte range instead of keeping every historical body in memory.
+- **Search-result export:** `/export-search [path]` exports the full records represented by the currently displayed results page, preserving search order; it does not export the complete journal or only the shortened preview snippets. This works with both JSONL and PostgreSQL searches. When no path is supplied, the destination is `operator-search-results.txt` beside the journal path.
 - **Hermes streams:** adjacent stream deltas are joined while scanning so a literal phrase can match across delta boundaries. The original durable event rows are preserved.
 - **PostgreSQL:** startup hydrates only the last 30 days into the TUI; the database's full-text, literal, phrase, tsquery, and trigram indexes cover the complete archive. JSONL migration import and JSONL export are streamed in batches rather than materializing the entire file/database at once.
 - **Persistence:** new journal records are written immediately or queued for retry. PTY output is collected in the background and batched to avoid forcing an fsync for every line during large command output. `/save` retries pending writes and waits for PostgreSQL commits.

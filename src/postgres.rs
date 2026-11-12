@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     fmt,
     fs::{self, OpenOptions},
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -64,6 +64,15 @@ enum Command {
     FetchRecord { request_id: u64, record_id: String },
     Flush(Sender<Result<(), String>>),
     ExportJsonl { path: PathBuf, reply: Sender<Result<(), String>> },
+    ExportSearchResults {
+        record_ids: Vec<String>,
+        path: PathBuf,
+        query: String,
+        mode: String,
+        offset: usize,
+        total: usize,
+        reply: Sender<Result<(), String>>,
+    },
     Shutdown,
 }
 
@@ -273,6 +282,35 @@ impl PostgresJournal {
         reply_rx
             .recv_timeout(REQUEST_TIMEOUT)
             .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, format!("JSONL export timed out: {error}")))?
+            .map_err(io::Error::other)
+    }
+
+    /// Export only the current PostgreSQL search-results page, preserving its
+    /// result order and reconstructing logical Hermes stream messages.
+    pub fn export_search_results(
+        &self,
+        destination: &Path,
+        record_ids: Vec<String>,
+        query: String,
+        mode: String,
+        offset: usize,
+        total: usize,
+    ) -> io::Result<()> {
+        if record_ids.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "there are no search results on the current page to export"));
+        }
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.commands.send(Command::ExportSearchResults {
+            record_ids,
+            path: destination.to_path_buf(),
+            query,
+            mode,
+            offset,
+            total,
+            reply: reply_tx,
+        }).map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "PostgreSQL worker is not available"))?;
+        reply_rx.recv_timeout(REQUEST_TIMEOUT)
+            .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, format!("search-results export timed out: {error}")))?
             .map_err(io::Error::other)
     }
 }
@@ -1132,6 +1170,15 @@ async fn run_worker(
                         };
                         let _ = reply.send(result);
                     }
+                    Some(Command::ExportSearchResults { record_ids, path, query, mode, offset, total, reply }) => {
+                        let result = match retry_pending(&pool, &mut pending, last_seen_id, &pending_count, &updates).await {
+                            Ok(()) => export_search_results_from_database(
+                                &pool, &record_ids, &path, &query, &mode, offset, total
+                            ).await,
+                            Err(error) => Err(format!("cannot export while PostgreSQL writes are pending: {error}")),
+                        };
+                        let _ = reply.send(result);
+                    }
                     Some(Command::Shutdown) | None => {
                         // Make one final best-effort commit during orderly shutdown.
                         let _ = retry_pending(&pool, &mut pending, last_seen_id, &pending_count, &updates).await;
@@ -1156,6 +1203,126 @@ async fn run_worker(
     }
 
     Ok(())
+}
+
+async fn export_search_results_from_database(
+    pool: &PgPool,
+    record_ids: &[String],
+    destination: &Path,
+    query: &str,
+    mode: &str,
+    offset: usize,
+    total: usize,
+) -> Result<(), String> {
+    let parent = destination.parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|error| format!("create search export directory: {error}"))?;
+    let temporary = destination.with_file_name(format!(
+        ".{}.{}.{}.tmp",
+        destination.file_name().and_then(|name| name.to_str()).unwrap_or("operator-search-results.txt"),
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()
+    ));
+
+    let result = async {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&temporary)
+            .map_err(|error| format!("create temporary search export: {error}"))?;
+        let mut output = BufWriter::new(file);
+        writeln!(output, "OPERATOR search results").map_err(|error| error.to_string())?;
+        writeln!(output, "Query: {query}").map_err(|error| error.to_string())?;
+        writeln!(output, "Mode: {mode}").map_err(|error| error.to_string())?;
+        writeln!(output, "Matches: {total}").map_err(|error| error.to_string())?;
+        writeln!(output, "Exported page: {} record(s), offset {offset}", record_ids.len())
+            .map_err(|error| error.to_string())?;
+
+        // Bound database result materialization to small batches while retaining
+        // the ordering selected by the search page.
+        for chunk in record_ids.chunks(32) {
+            let rows = sqlx::query(
+                r#"SELECT e.record_id, e.payload::text AS payload,
+                          d.body AS indexed_body, d.kind AS indexed_kind,
+                          d.occurred_at AS indexed_at
+                   FROM operator_journal_entries e
+                   LEFT JOIN LATERAL (
+                       SELECT body, kind, occurred_at
+                       FROM operator_journal_search_documents
+                       WHERE record_id = e.record_id
+                       LIMIT 1
+                   ) d ON TRUE
+                   WHERE e.record_id = ANY($1)"#
+            )
+            .bind(chunk.to_vec())
+            .fetch_all(pool)
+            .await
+            .map_err(|error| format!("fetch PostgreSQL search-result records: {error}"))?;
+
+            let mut decoded = Vec::with_capacity(rows.len());
+            for row in rows {
+                let record_id: String = row.try_get("record_id")
+                    .map_err(|error| format!("read exported record ID: {error}"))?;
+                let payload: String = row.try_get("payload")
+                    .map_err(|error| format!("read exported record payload: {error}"))?;
+                let mut entry = serde_json::from_str::<Entry>(&payload)
+                    .map_err(|error| format!("decode exported record: {error}"))?;
+                let indexed_body: Option<String> = row.try_get("indexed_body")
+                    .map_err(|error| format!("read exported indexed body: {error}"))?;
+                if let Some(body) = indexed_body {
+                    entry.text = body;
+                }
+                let indexed_kind: Option<String> = row.try_get("indexed_kind")
+                    .map_err(|error| format!("read exported indexed kind: {error}"))?;
+                if let Some(kind) = indexed_kind.as_deref().and_then(entry_kind_from_name) {
+                    entry.kind = kind;
+                }
+                let indexed_at: Option<DateTime<Utc>> = row.try_get("indexed_at")
+                    .map_err(|error| format!("read exported indexed timestamp: {error}"))?;
+                if let Some(timestamp) = indexed_at {
+                    entry.timestamp = timestamp.to_rfc3339();
+                }
+                entry.text = sanitize_entry_text(entry.kind, &entry.text);
+                decoded.push((record_id, entry));
+            }
+
+            for record_id in chunk {
+                let Some((_, entry)) = decoded.iter().find(|(id, _)| id == record_id) else {
+                    return Err(format!("search result record {record_id} no longer exists"));
+                };
+                writeln!(
+                    output,
+                    "\n--- Result {} · {} · {} ---",
+                    offset.saturating_add(
+                        record_ids.iter().position(|id| id == record_id).unwrap_or(0)
+                    ).saturating_add(1),
+                    entry.timestamp,
+                    entry_kind_name(entry.kind)
+                ).map_err(|error| error.to_string())?;
+                output.write_all(entry.text.as_bytes()).map_err(|error| error.to_string())?;
+                if !entry.text.ends_with('\n') {
+                    output.write_all(b"\n").map_err(|error| error.to_string())?;
+                }
+            }
+        }
+
+        output.flush().map_err(|error| format!("flush search export: {error}"))?;
+        let file = output.into_inner().map_err(|error| format!("finish search export: {}", error.into_error()))?;
+        file.sync_all().map_err(|error| format!("sync search export: {error}"))?;
+        fs::rename(&temporary, destination)
+            .map_err(|error| format!("replace search export destination: {error}"))?;
+        Ok(())
+    }.await;
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 async fn export_jsonl_from_database(pool: &PgPool, destination: &Path) -> Result<(), String> {
@@ -1489,6 +1656,21 @@ mod tests {
             }
         }
         assert!(loaded_stream, "reconstructed PostgreSQL record fetch timed out");
+
+        let stream_export_path = std::env::temp_dir()
+            .join(format!("operator-stream-search-export-{}.txt", std::process::id()));
+        reader.export_search_results(
+            &stream_export_path,
+            vec![first_delta_record],
+            "search-token-crosses".to_string(),
+            "LITERAL".to_string(),
+            0,
+            1,
+        ).expect("export reconstructed Hermes search result");
+        let exported_stream = std::fs::read_to_string(&stream_export_path)
+            .expect("read reconstructed Hermes search export");
+        assert!(exported_stream.contains("multi-part-search-token-crosses-boundary"));
+        let _ = std::fs::remove_file(stream_export_path);
     }
 
     #[test]
@@ -1527,6 +1709,26 @@ mod tests {
             }
         }
         assert!(loaded, "full PostgreSQL archive record fetch timed out");
+
+        let unrelated = format!("unselected export record {}", std::process::id());
+        let unrelated_entry = Entry::with_kind(EntryKind::Note, unrelated.clone());
+        writer.enqueue(unrelated_entry).expect("queue unrelated export fixture");
+        writer.flush().expect("commit unrelated export fixture");
+
+        let export_path = std::env::temp_dir()
+            .join(format!("operator-search-export-{}.txt", std::process::id()));
+        reader.export_search_results(
+            &export_path,
+            vec![record_id],
+            "historical".to_string(),
+            "LITERAL".to_string(),
+            0,
+            2,
+        ).expect("export selected PostgreSQL search result");
+        let exported = std::fs::read_to_string(&export_path).expect("read PostgreSQL search export");
+        assert!(exported.contains("historical full-record payload"));
+        assert!(!exported.contains(&unrelated));
+        let _ = std::fs::remove_file(export_path);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Local, SecondsFormat, Utc};
 
 use crate::{
     archive::{ArchiveSearchHit, ArchiveSearchResult, ArchiveSearcher},
-    postgres::{PostgresJournal, SearchResult as PostgresSearchResult, Update as PostgresUpdate},
+    postgres::{PostgresJournal, SearchHit as PostgresSearchHit, SearchResult as PostgresSearchResult, Update as PostgresUpdate},
 };
 use serde::{Deserialize, Serialize};
 
@@ -1041,6 +1041,42 @@ impl Journal {
             let _ = fs::remove_file(temporary);
         }
         result
+    }
+
+    /// Export only the search results currently displayed, not the complete
+    /// journal. Local JSONL hits are loaded one at a time from their byte ranges;
+    /// PostgreSQL retrieves the selected page in bounded batches.
+    pub fn export_search_results(
+        &mut self,
+        destination: &Path,
+        query: &str,
+        mode: &str,
+        total: usize,
+        offset: usize,
+        archive_hits: &[ArchiveSearchHit],
+        postgres_hits: &[PostgresSearchHit],
+    ) -> io::Result<()> {
+        if destination == self.path.as_path() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "search results cannot be exported over the source journal",
+            ));
+        }
+
+        if let Some(postgres) = self.postgres.as_ref() {
+            let record_ids = postgres_hits.iter().map(|hit| hit.record_id.clone()).collect();
+            postgres.export_search_results(
+                destination, record_ids, query.to_string(), mode.to_string(), offset, total,
+            )
+        } else {
+            if !postgres_hits.is_empty() && archive_hits.is_empty() {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "the current search results do not belong to the local JSONL archive"));
+            }
+            self.archive_searcher
+                .as_ref()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "local archive search is unavailable"))?
+                .export_hits(destination, query, mode, total, offset, archive_hits)
+        }
     }
 }
 
