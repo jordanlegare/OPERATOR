@@ -141,6 +141,7 @@ impl ShellSession {
         let supports_bash_audit = shell.file_name()
             .is_some_and(|name| name.to_string_lossy().to_ascii_lowercase().contains("bash"));
         let audit_file_path = requested_audit_path.filter(|_| supports_bash_audit);
+        let cleanup_audit_files = audit_file_path.is_some();
         let audit_rcfile_path = audit_file_path.as_ref().map(|path| path.with_extension("bashrc"));
         if let Some(path) = audit_file_path.as_ref() {
             let mut options = OpenOptions::new();
@@ -314,7 +315,7 @@ trap '__operator_audit_capture' EXIT
                 .and_then(|value| value.trim().parse().ok())
                 .unwrap_or(0),
             audit_file_pending: Vec::new(),
-            cleanup_audit_files: proxy.is_none() && requested_audit_path.is_some(),
+            cleanup_audit_files: proxy.is_none() && cleanup_audit_files,
             remote_pid: proxy.as_ref().and_then(|proxy| proxy.pid),
         })
     }
