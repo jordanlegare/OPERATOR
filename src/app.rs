@@ -364,7 +364,8 @@ impl App {
                 .iter()
                 .enumerate()
                 .filter_map(|(index, entry)| {
-                    (!is_hermes_event(entry.kind) || entry.kind == EntryKind::HermesUser)
+                    ((!is_hermes_event(entry.kind) || entry.kind == EntryKind::HermesUser)
+                && entry.kind != EntryKind::OperatorSessionHeartbeat)
                         .then_some(index)
                 })
                 .collect();
@@ -1279,6 +1280,52 @@ impl App {
         };
     }
 
+    pub fn record_operator_session_event(&mut self, kind: EntryKind, message: String) {
+        let selected_live_tail = self.is_tracking_selected_tail();
+        let entry = Entry::with_kind(kind, sanitize_single_line(&message));
+        if let Err(error) = self.journal.append(entry) {
+            self.status = format!("Session audit event retained in memory; journal write failed: {error}");
+        } else {
+            self.status = message;
+        }
+        self.update_selected_tail_after_append(selected_live_tail);
+    }
+
+    pub fn record_operator_session_heartbeat(&mut self) {
+        let entry = Entry::with_kind(
+            EntryKind::OperatorSessionHeartbeat,
+            "OPERATOR session heartbeat".to_string(),
+        );
+        if let Err(error) = self.journal.append(entry) {
+            self.status = format!("Session heartbeat write pending: {error}");
+        }
+    }
+
+    /// Record commands submitted in the F1 Bash workspace. This reads Bash
+    /// history records, never raw terminal bytes or password-prompt input.
+    pub fn capture_workspace_commands(&mut self, commands: Vec<String>) {
+        let entries = commands.into_iter()
+            .map(|command| {
+                let mut entry = Entry::with_kind(
+                    EntryKind::TerminalCommand,
+                    sanitize_single_line(&command),
+                );
+                entry.operator_surface = Some("f1_workspace".to_string());
+                entry
+            })
+            .filter(|entry| !entry.text.is_empty())
+            .collect::<Vec<_>>();
+        if entries.is_empty() {
+            return;
+        }
+        let count = entries.len();
+        if let Err(error) = self.journal.append_batch(entries) {
+            self.status = format!("Captured {count} F1 workspace command(s) in memory; journal write pending: {error}");
+        } else {
+            self.status = format!("Captured {count} F1 workspace command(s) in the audit journal.");
+        }
+    }
+
     pub fn record_system(&mut self, message: String) {
         let selected_live_tail = self.is_tracking_selected_tail();
         let entry = Entry::with_kind(EntryKind::System, sanitize_single_line(&message));
@@ -1789,6 +1836,13 @@ impl App {
                     self.search(argument);
                 }
             }
+            "/audit" => {
+                if argument.is_empty() {
+                    self.status = "Usage: /audit ip:203.0.113.42 [user:LOGIN] [after:DATE] [before:DATE] [kind:terminal_command]".to_string();
+                } else {
+                    self.search(argument);
+                }
+            }
             "/review" => match argument.to_ascii_lowercase().as_str() {
                 "" | "status" => {
                     self.status = format!(
@@ -2199,6 +2253,12 @@ impl App {
                     occurred_at: hit.occurred_at.clone(),
                     snippet: hit.snippet.clone(),
                     rank: 1.0,
+                    operator_session_id: hit.operator_session_id.clone(),
+                    operator_instance_id: hit.operator_instance_id.clone(),
+                    ssh_username: hit.ssh_username.clone(),
+                    unix_uid: hit.unix_uid,
+                    ssh_client_ip: hit.ssh_client_ip.clone(),
+                    operator_surface: hit.operator_surface.clone(),
                 })
                 .collect();
             self.search_hit_entry_indices = self.archive_search_hits
@@ -2616,6 +2676,7 @@ fn is_operator_command(line: &str) -> bool {
             | "/threads"
             | "/conversations"
             | "/search"
+            | "/audit"
             | "/review"
             | "/clear"
             | "/save"
