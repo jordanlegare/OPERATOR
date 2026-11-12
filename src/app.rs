@@ -1855,6 +1855,46 @@ impl App {
                     Err(error) => self.status = format!("Export failed: {error}"),
                 }
             }
+            "/export-search" | "/export-results" => {
+                if !self.search_view || self.search_query.is_none() {
+                    self.status = "No active search results. Run /search first.".to_string();
+                } else if self.pending_archive_search.is_some() || self.pending_postgres_search.is_some() {
+                    self.status = "Search is still running; export the results after the search finishes.".to_string();
+                } else if let Some(error) = self.search_error.as_ref() {
+                    self.status = format!("Cannot export an unsuccessful search: {error}");
+                } else if self.archive_search_hits.is_empty() && self.search_hits.is_empty() {
+                    self.status = "There are no results on the current search page to export.".to_string();
+                } else {
+                    let destination = if argument.is_empty() {
+                        default_search_export_path(&self.journal.path)
+                    } else {
+                        PathBuf::from(argument)
+                    };
+                    let query = self.search_query.clone().unwrap_or_default();
+                    let mode = self.search_mode_label.clone();
+                    let total = self.search_total;
+                    let offset = self.search_page_offset;
+                    let archive_hits = self.archive_search_hits.clone();
+                    let postgres_hits = self.search_hits.clone();
+                    match self.journal.export_search_results(
+                        &destination,
+                        &query,
+                        &mode,
+                        total,
+                        offset,
+                        &archive_hits,
+                        &postgres_hits,
+                    ) {
+                        Ok(()) => self.status = format!(
+                            "Exported {} current-page search result(s) of {} match(es) to {}",
+                            archive_hits.len().max(postgres_hits.len()),
+                            total,
+                            destination.display()
+                        ),
+                        Err(error) => self.status = format!("Search-results export failed: {error}"),
+                    }
+                }
+            }
             "/export-jsonl" => {
                 let destination = if argument.is_empty() {
                     self.journal.path.clone()
@@ -2438,6 +2478,10 @@ fn default_export_path(journal_path: &PathBuf) -> PathBuf {
     journal_path.with_file_name("operator-export.txt")
 }
 
+fn default_search_export_path(journal_path: &PathBuf) -> PathBuf {
+    journal_path.with_file_name("operator-search-results.txt")
+}
+
 fn is_operator_command(line: &str) -> bool {
     let command = line
         .split_whitespace()
@@ -2464,6 +2508,8 @@ fn is_operator_command(line: &str) -> bool {
             | "/notes"
             | "/note"
             | "/export"
+            | "/export-search"
+            | "/export-results"
             | "/quit"
             | "/q"
     )
