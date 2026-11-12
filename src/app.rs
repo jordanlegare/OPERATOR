@@ -121,6 +121,11 @@ pub struct App {
     /// Full historical record loaded only while its search result is open.
     pub archive_detail_entry: Option<Entry>,
     pub archive_detail_line_number: usize,
+    /// SAVE AS overlay for exporting the currently displayed search-result page.
+    pub search_export_dialog_open: bool,
+    pub search_export_path: String,
+    pub search_export_cursor: usize,
+    pub search_export_error: Option<String>,
     pending_postgres_search: Option<(u64, String)>,
     pub active_match: Option<usize>,
     pub history: Vec<String>,
@@ -234,6 +239,10 @@ impl App {
             next_archive_search_id: 1,
             archive_detail_entry: None,
             archive_detail_line_number: 0,
+            search_export_dialog_open: false,
+            search_export_path: String::new(),
+            search_export_cursor: 0,
+            search_export_error: None,
             pending_postgres_search: None,
             active_match: None,
             history,
@@ -1855,46 +1864,6 @@ impl App {
                     Err(error) => self.status = format!("Export failed: {error}"),
                 }
             }
-            "/export-search" | "/export-results" => {
-                if !self.search_view || self.search_query.is_none() {
-                    self.status = "No active search results. Run /search first.".to_string();
-                } else if self.pending_archive_search.is_some() || self.pending_postgres_search.is_some() {
-                    self.status = "Search is still running; export the results after the search finishes.".to_string();
-                } else if let Some(error) = self.search_error.as_ref() {
-                    self.status = format!("Cannot export an unsuccessful search: {error}");
-                } else if self.archive_search_hits.is_empty() && self.search_hits.is_empty() {
-                    self.status = "There are no results on the current search page to export.".to_string();
-                } else {
-                    let destination = if argument.is_empty() {
-                        default_search_export_path(&self.journal.path)
-                    } else {
-                        PathBuf::from(argument)
-                    };
-                    let query = self.search_query.clone().unwrap_or_default();
-                    let mode = self.search_mode_label.clone();
-                    let total = self.search_total;
-                    let offset = self.search_page_offset;
-                    let archive_hits = self.archive_search_hits.clone();
-                    let postgres_hits = self.search_hits.clone();
-                    match self.journal.export_search_results(
-                        &destination,
-                        &query,
-                        &mode,
-                        total,
-                        offset,
-                        &archive_hits,
-                        &postgres_hits,
-                    ) {
-                        Ok(()) => self.status = format!(
-                            "Exported {} current-page search result(s) of {} match(es) to {}",
-                            archive_hits.len().max(postgres_hits.len()),
-                            total,
-                            destination.display()
-                        ),
-                        Err(error) => self.status = format!("Search-results export failed: {error}"),
-                    }
-                }
-            }
             "/export-jsonl" => {
                 let destination = if argument.is_empty() {
                     self.journal.path.clone()
@@ -1921,7 +1890,146 @@ impl App {
         }
     }
 
+    /// Open the centered SAVE AS prompt for the current search-results page.
+    pub fn open_search_export_dialog(&mut self) {
+        if !self.search_view || self.search_query.is_none() {
+            self.status = "No active search results to export.".to_string();
+            return;
+        }
+        if self.pending_archive_search.is_some() || self.pending_postgres_search.is_some() {
+            self.status = "Search is still running; wait for results before exporting.".to_string();
+            return;
+        }
+        if let Some(error) = self.search_error.as_ref() {
+            self.status = format!("Cannot export an unsuccessful search: {error}");
+            return;
+        }
+        if self.archive_search_hits.is_empty() && self.search_hits.is_empty() {
+            self.status = "There are no results on the current search page to export.".to_string();
+            return;
+        }
+
+        self.search_export_path = default_search_export_path(&self.journal.path)
+            .to_string_lossy()
+            .into_owned();
+        self.search_export_cursor = self.search_export_path.len();
+        self.search_export_error = None;
+        self.search_export_dialog_open = true;
+    }
+
+    pub fn cancel_search_export_dialog(&mut self) {
+        self.search_export_dialog_open = false;
+        self.search_export_error = None;
+        self.status = "Search-results export cancelled.".to_string();
+    }
+
+    /// Insert ordinary or pasted text at the UTF-8 byte cursor in the SAVE AS path.
+    pub fn search_export_insert_text(&mut self, text: &str) {
+        for character in text.chars().filter(|character| !character.is_control()) {
+            self.search_export_path.insert(self.search_export_cursor, character);
+            self.search_export_cursor += character.len_utf8();
+        }
+        self.search_export_error = None;
+    }
+
+    pub fn search_export_clear_path(&mut self) {
+        self.search_export_path.clear();
+        self.search_export_cursor = 0;
+        self.search_export_error = None;
+    }
+
+    pub fn search_export_backspace(&mut self) {
+        if self.search_export_cursor == 0 {
+            return;
+        }
+        if let Some((start, _)) = self.search_export_path[..self.search_export_cursor]
+            .char_indices()
+            .next_back()
+        {
+            self.search_export_path.replace_range(start..self.search_export_cursor, "");
+            self.search_export_cursor = start;
+            self.search_export_error = None;
+        }
+    }
+
+    pub fn search_export_delete(&mut self) {
+        if let Some(character) = self.search_export_path[self.search_export_cursor..].chars().next() {
+            let end = self.search_export_cursor + character.len_utf8();
+            self.search_export_path.replace_range(self.search_export_cursor..end, "");
+            self.search_export_error = None;
+        }
+    }
+
+    pub fn search_export_cursor_left(&mut self) {
+        if let Some((start, _)) = self.search_export_path[..self.search_export_cursor]
+            .char_indices()
+            .next_back()
+        {
+            self.search_export_cursor = start;
+        }
+    }
+
+    pub fn search_export_cursor_right(&mut self) {
+        if let Some(character) = self.search_export_path[self.search_export_cursor..].chars().next() {
+            self.search_export_cursor += character.len_utf8();
+        }
+    }
+
+    pub fn search_export_cursor_start(&mut self) {
+        self.search_export_cursor = 0;
+    }
+
+    pub fn search_export_cursor_end(&mut self) {
+        self.search_export_cursor = self.search_export_path.len();
+    }
+
+    /// Write the full records represented by the visible result page.
+    /// Errors leave the dialog open so the destination can be corrected.
+    pub fn confirm_search_export(&mut self) {
+        if !self.search_export_dialog_open {
+            return;
+        }
+        if self.search_export_path.trim().is_empty() {
+            self.search_export_error = Some("Enter a filename or full destination path.".to_string());
+            return;
+        }
+
+        let destination = PathBuf::from(&self.search_export_path);
+        let query = self.search_query.clone().unwrap_or_default();
+        let mode = self.search_mode_label.clone();
+        let total = self.search_total;
+        let offset = self.search_page_offset;
+        let archive_hits = self.archive_search_hits.clone();
+        let postgres_hits = self.search_hits.clone();
+        match self.journal.export_search_results(
+            &destination,
+            &query,
+            &mode,
+            total,
+            offset,
+            &archive_hits,
+            &postgres_hits,
+        ) {
+            Ok(()) => {
+                self.search_export_dialog_open = false;
+                self.search_export_error = None;
+                self.status = format!(
+                    "Exported {} current-page search result(s) of {} match(es) to {}",
+                    archive_hits.len().max(postgres_hits.len()),
+                    total,
+                    destination.display()
+                );
+            }
+            Err(error) => {
+                self.search_export_error = Some(error.to_string());
+                self.status = format!("Search-results export failed: {error}");
+            }
+        }
+    }
+
     pub fn clear_search(&mut self) {
+        self.search_export_dialog_open = false;
+        self.search_export_error = None;
         self.search_query = None;
         self.matches.clear();
         self.active_match = None;
@@ -2508,8 +2616,6 @@ fn is_operator_command(line: &str) -> bool {
             | "/notes"
             | "/note"
             | "/export"
-            | "/export-search"
-            | "/export-results"
             | "/export-jsonl"
             | "/quit"
             | "/q"
