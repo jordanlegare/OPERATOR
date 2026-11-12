@@ -1,12 +1,16 @@
-[Unit]
+Unit]
 Description=OPERATOR persistent shell session daemon
 Documentation=https://github.com/jordanlegare/OPERATOR
+
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/operator daemon
+User=guest
+Group=guest
+EnvironmentFile=/etc/operator/operator.env
+ExecStart=/bin/operator daemon
 Restart=on-failure
 RestartSec=2
 UMask=0077
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
