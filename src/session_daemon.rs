@@ -366,6 +366,61 @@ mod unix_impl {
         }
     }
 
+    /// Connect to the daemon, starting a detached per-user instance when no
+    /// systemd-managed instance is already listening.
+    pub fn ensure_running() -> io::Result<()> {
+        let ping = || request_response(&Request {
+            op: "ping".into(), session_id: None, cols: None, rows: None,
+            echo: None, role: None, replay: None, origin: None,
+        });
+        if ping().is_ok() {
+            return Ok(());
+        }
+
+        use std::os::unix::process::CommandExt;
+        let path = socket_path();
+        let parent = path.parent().ok_or_else(|| io::Error::other("daemon socket has no parent"))?;
+        fs::create_dir_all(parent)?;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        let log_path = parent.join("sessiond.log");
+        let mut log_options = fs::OpenOptions::new();
+        log_options.create(true).append(true).mode(0o600);
+        let log = log_options.open(&log_path)?;
+        let executable = env::current_exe()?;
+        let mut command = process::Command::new(executable);
+        command.arg("daemon")
+            .stdin(process::Stdio::null())
+            .stdout(process::Stdio::from(log.try_clone()?))
+            .stderr(process::Stdio::from(log));
+        // A daemon started on the first SSH login must not inherit the SSH
+        // process group or be killed when that client disconnects.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        match command.spawn() {
+            Ok(_) => {}
+            Err(_error) if ping().is_ok() => return Ok(()),
+            Err(error) => return Err(error),
+        }
+
+        for _ in 0..100 {
+            if ping().is_ok() {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("OPERATOR session daemon did not start; inspect {}", log_path.display()),
+        ))
+    }
+
     pub fn run_daemon() -> io::Result<()> {
         let path = socket_path();
         let parent = path.parent().ok_or_else(|| {
@@ -850,7 +905,7 @@ mod unix_impl {
 }
 
 #[cfg(unix)]
-pub use unix_impl::{attach_session, attach_session_with_replay, create_session, get_or_create_session, list_sessions, run_daemon, socket_path, terminate_session, SessionInfo};
+pub use unix_impl::{attach_session, attach_session_with_replay, create_session, ensure_running, get_or_create_session, list_sessions, run_daemon, socket_path, terminate_session, SessionInfo};
 
 #[cfg(not(unix))]
 compile_error!("OPERATOR's persistent session daemon currently requires a Unix platform.");
