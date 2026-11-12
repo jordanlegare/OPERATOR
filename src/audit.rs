@@ -92,14 +92,13 @@ pub struct OperatorSessionContext {
 
 impl OperatorSessionContext {
     pub fn from_environment(operator_instance_id: Option<String>) -> Self {
-        let ssh_username = env::var("USER")
-            .or_else(|_| env::var("LOGNAME"))
-            .ok()
-            .filter(|value| !value.trim().is_empty());
         #[cfg(unix)]
         let unix_uid = Some(unsafe { libc::geteuid() });
         #[cfg(not(unix))]
         let unix_uid = None;
+        let ssh_username = effective_username()
+            .or_else(|| env::var("USER").or_else(|_| env::var("LOGNAME")).ok())
+            .filter(|value| !value.trim().is_empty());
 
         Self {
             operator_session_id: new_operator_session_id(),
@@ -112,14 +111,43 @@ impl OperatorSessionContext {
 
     pub fn connection_summary(&self) -> String {
         let username = self.ssh_username.as_deref().unwrap_or("unknown-user");
-        match self.ssh.client_ip.as_deref() {
+        let address = match self.ssh.client_ip.as_deref() {
             Some(ip) => format!(
-                "SSH user {username} from {ip}{}",
+                " from {ip}{}",
                 self.ssh.client_port.map(|port| format!(":{port}")).unwrap_or_default()
             ),
-            None => format!("Local session for {username}"),
-        }
+            None => " from a local terminal".to_string(),
+        };
+        let authentication = self.ssh.auth_method.as_deref()
+            .map(|method| format!(" via {method}"))
+            .unwrap_or_default();
+        let fingerprint = self.ssh.key_fingerprint.as_deref()
+            .map(|value| format!(" ({value})"))
+            .unwrap_or_default();
+        format!("SSH/OPERATOR user {username}{address}{authentication}{fingerprint}")
     }
+}
+
+#[cfg(unix)]
+fn effective_username() -> Option<String> {
+    // Prefer the kernel's effective UID account entry over the mutable USER
+    // environment variable. This gives a stable Unix-account attribution.
+    let uid = unsafe { libc::geteuid() };
+    let passwd = unsafe { libc::getpwuid(uid) };
+    if passwd.is_null() {
+        return None;
+    }
+    let name = unsafe { (*passwd).pw_name };
+    if name.is_null() {
+        return None;
+    }
+    let value = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned();
+    (!value.is_empty()).then_some(value)
+}
+
+#[cfg(not(unix))]
+fn effective_username() -> Option<String> {
+    None
 }
 
 fn new_operator_session_id() -> String {
