@@ -1,6 +1,5 @@
 mod app;
 mod audit;
-mod audit;
 mod archive;
 mod paths;
 mod postgres;
