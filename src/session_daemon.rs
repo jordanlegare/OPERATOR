@@ -420,13 +420,12 @@ mod unix_impl {
     }
 
     pub fn socket_path() -> PathBuf {
-        if let Some(runtime) = env::var_os("XDG_RUNTIME_DIR") {
-            PathBuf::from(runtime).join("operator").join(SOCKET_NAME)
-        } else {
-            let home = env::var_os("HOME").map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("/tmp"));
-            home.join(".local/share/operator/run").join(SOCKET_NAME)
-        }
+        // Keep the rendezvous socket under persistent home storage. XDG_RUNTIME_DIR
+        // can be removed after the final SSH logout unless lingering is enabled,
+        // which would orphan a daemon that successfully survived the SSH process.
+        let home = env::var_os("HOME").map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
+        home.join(".local/share/operator/run").join(SOCKET_NAME)
     }
 
     /// Connect to the daemon, starting a detached per-user instance when no
