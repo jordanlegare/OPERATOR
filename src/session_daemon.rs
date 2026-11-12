@@ -24,7 +24,7 @@ mod unix_impl {
             Arc, Mutex, Weak,
         },
         thread,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -1105,7 +1105,7 @@ trap "__operator_audit_capture" EXIT
 }
 
 #[cfg(unix)]
-pub use unix_impl::{attach_session, attach_session_with_replay, create_session, ensure_running, get_or_create_session, list_sessions, run_daemon, socket_path, terminate_session, SessionInfo};
+pub use unix_impl::{attach_session, attach_session_with_replay, create_session, ensure_running, get_or_create_session, list_sessions, run_daemon, terminate_session, SessionInfo};
 
 #[cfg(not(unix))]
 compile_error!("OPERATOR's persistent session daemon currently requires a Unix platform.");
