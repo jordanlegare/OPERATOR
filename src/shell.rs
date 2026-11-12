@@ -128,7 +128,7 @@ impl ShellSession {
   line="$(fc -ln -1 2>/dev/null)"
   line="${line#"${line%%[![:space:]]*}"}"
   if [[ -n "$line" && "$line" != "${__OPERATOR_AUDIT_LAST:-}" ]]; then
-    printf '%s\\0' "$line" >> "$OPERATOR_AUDIT_COMMAND_FILE"
+    printf '%s\0' "$line" >> "$OPERATOR_AUDIT_COMMAND_FILE"
     __OPERATOR_AUDIT_LAST="$line"
   fi
 }
