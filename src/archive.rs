@@ -570,6 +570,49 @@ mod tests {
     }
 
     #[test]
+    fn local_search_is_case_insensitive_and_exports_only_the_current_page() {
+        let path = test_path();
+        let entries = [
+            Entry::with_kind(EntryKind::Note, "First needle match".to_string()),
+            Entry::with_kind(EntryKind::Note, "Unrelated archived text".to_string()),
+            Entry::with_kind(EntryKind::Note, "Newest NEEDLE match".to_string()),
+        ];
+        let mut bytes = Vec::new();
+        for entry in entries {
+            bytes.extend(serde_json::to_vec(&entry).expect("serialize test entry"));
+            bytes.push(b'\n');
+        }
+        fs::write(&path, bytes).expect("write archive");
+        let searcher = ArchiveSearcher::new(path.clone()).expect("start search worker");
+
+        searcher.search(5, "NEEDLE limit:1".to_string()).expect("queue case-insensitive search");
+        let result = wait_for_result(&searcher, 5);
+        assert_eq!(result.total, 2);
+        assert_eq!(result.hits.len(), 1);
+        assert!(result.hits[0].snippet.contains("Newest NEEDLE match"));
+
+        let export_path = path.with_file_name("search-results.txt");
+        searcher.export_hits(
+            &export_path,
+            "NEEDLE",
+            "LOCAL JSONL ARCHIVE",
+            result.total,
+            result.offset,
+            &result.hits,
+        ).expect("export current search page");
+        let exported = fs::read_to_string(&export_path).expect("read search export");
+        assert!(exported.contains("Query: NEEDLE"));
+        assert!(exported.contains("Matches: 2"));
+        assert!(exported.contains("Newest NEEDLE match"));
+        assert!(!exported.contains("First needle match"));
+        assert!(!exported.contains("Unrelated archived text"));
+
+        drop(searcher);
+        let _ = fs::remove_file(export_path);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn returns_newest_results_first_and_supports_paging() {
         let path = test_path();
         let mut bytes = Vec::new();
