@@ -163,36 +163,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     paths::set_compatible_env("OPERATOR_SESSION_ID", &audit_context.operator_session_id);
     paths::set_compatible_env("STREENOTE_OPERATOR_SESSION_ID", &audit_context.operator_session_id);
-    if let Some(instance_id) = audit_context.operator_instance_id.as_deref() {
-        paths::set_compatible_env("OPERATOR_INSTANCE_ID", instance_id);
-    }
-    if let Some(value) = audit_context.ssh_username.as_deref() {
-        paths::set_compatible_env("OPERATOR_SSH_USERNAME", value);
-    }
-    if let Some(value) = audit_context.unix_uid {
-        paths::set_compatible_env("OPERATOR_UNIX_UID", value.to_string());
-    }
-    if let Some(value) = audit_context.ssh.client_ip.as_deref() {
-        paths::set_compatible_env("OPERATOR_SSH_CLIENT_IP", value);
-    }
-    if let Some(value) = audit_context.ssh.client_port {
-        paths::set_compatible_env("OPERATOR_SSH_CLIENT_PORT", value.to_string());
-    }
-    if let Some(value) = audit_context.ssh.server_ip.as_deref() {
-        paths::set_compatible_env("OPERATOR_SSH_SERVER_IP", value);
-    }
-    if let Some(value) = audit_context.ssh.server_port {
-        paths::set_compatible_env("OPERATOR_SSH_SERVER_PORT", value.to_string());
-    }
-    if let Some(value) = audit_context.ssh.tty.as_deref() {
-        paths::set_compatible_env("OPERATOR_SSH_TTY", value);
-    }
-    if let Some(value) = audit_context.ssh.auth_method.as_deref() {
-        paths::set_compatible_env("OPERATOR_SSH_AUTH_METHOD", value);
-    }
-    if let Some(value) = audit_context.ssh.key_fingerprint.as_deref() {
-        paths::set_compatible_env("OPERATOR_SSH_KEY_FINGERPRINT", value);
-    }
+    set_optional_compatible_env("OPERATOR_INSTANCE_ID", audit_context.operator_instance_id.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_USERNAME", audit_context.ssh_username.as_deref());
+    let uid = audit_context.unix_uid.map(|value| value.to_string());
+    set_optional_compatible_env("OPERATOR_UNIX_UID", uid.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_CLIENT_IP", audit_context.ssh.client_ip.as_deref());
+    let client_port = audit_context.ssh.client_port.map(|value| value.to_string());
+    set_optional_compatible_env("OPERATOR_SSH_CLIENT_PORT", client_port.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_SERVER_IP", audit_context.ssh.server_ip.as_deref());
+    let server_port = audit_context.ssh.server_port.map(|value| value.to_string());
+    set_optional_compatible_env("OPERATOR_SSH_SERVER_PORT", server_port.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_TTY", audit_context.ssh.tty.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_AUTH_METHOD", audit_context.ssh.auth_method.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_KEY_FINGERPRINT", audit_context.ssh.key_fingerprint.as_deref());
 
     let shell_rows = size.height.saturating_sub(12).max(8);
     let mut shell = match ShellSession::spawn(size.width, shell_rows) {
@@ -1044,6 +1027,17 @@ fn paginate_access_notice(
 enum FileTransferRequest {
     Sftp,
     LegacyScp,
+}
+
+fn set_optional_compatible_env(name: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        paths::set_compatible_env(name, value);
+        return;
+    }
+    std::env::remove_var(name);
+    if let Some(suffix) = name.strip_prefix("OPERATOR_") {
+        std::env::remove_var(format!("STREENOTE_{suffix}"));
+    }
 }
 
 /// Return the peer address supplied by OpenSSH for this login session.
