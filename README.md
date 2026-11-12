@@ -373,7 +373,7 @@ The palettes are built into OPERATOR and require no external theme package or co
 | `F2` … `F10` | Switch between nine high-contrast color themes (F2 = theme 1; F10 = theme 9) |
 | `Ctrl+P` / `Ctrl+N` | Previous / next input-history item |
 | `Ctrl+A` / `Ctrl+E` | Move input cursor to start / end |
-| `Ctrl+S` | Save / retry pending writes |
+| `Ctrl+S` | Save / retry pending writes in LIVE; open the SAVE AS prompt when search results are displayed |
 | `Ctrl+D` | Send end-of-input to the shell when the terminal input is empty |
 | `Esc` | Clear input; in PostgreSQL search results return to the live transcript |
 | `Ctrl+Q` | Quit OPERATOR |
