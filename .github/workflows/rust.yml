@@ -49,7 +49,7 @@ jobs:
           cargo test shell::tests
 
       - name: Test persistent daemon sessions and PTY reattachment
-        run: cargo test session_daemon::tests
+        run: cargo test session_daemon::unix_impl::tests
 
       - name: Test 30-day journal hot window
         run: cargo test storage::hot_window_tests
