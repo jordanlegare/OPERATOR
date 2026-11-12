@@ -3840,7 +3840,7 @@ mod tests {
             unix_uid: None,
             ssh_client_ip: None,
             operator_surface: None,
-        ];
+        }];
         app.search_hit_entry_indices = vec![None];
 
         app.select_search_result(0);
@@ -3939,7 +3939,7 @@ mod tests {
                 unix_uid: None,
                 ssh_client_ip: None,
                 operator_surface: None,
-            ,
+            },
             crate::postgres::SearchHit {
                 record_id: app.journal.entries[0].record_id.clone().unwrap(),
                 kind: "note".to_string(),
@@ -3952,7 +3952,7 @@ mod tests {
                 unix_uid: None,
                 ssh_client_ip: None,
                 operator_surface: None,
-            ,
+            },
             crate::postgres::SearchHit {
                 record_id: app.journal.entries[1].record_id.clone().unwrap(),
                 kind: "note".to_string(),
@@ -3965,7 +3965,7 @@ mod tests {
                 unix_uid: None,
                 ssh_client_ip: None,
                 operator_surface: None,
-            ,
+            },
         ];
         app.search_hit_entry_indices = vec![Some(2), Some(0), Some(1)];
         app.matches = vec![2, 0, 1];
