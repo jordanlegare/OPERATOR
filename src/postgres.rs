@@ -961,22 +961,24 @@ async fn search_records(pool: &PgPool, raw_query: &str, request_id: u64) -> Sear
          JOIN operator_journal_entries e ON e.id = d.entry_id
          WHERE ({predicate}) {common_filters}"
     );
-    let bind_filters = |query_builder: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>| {
-        query_builder
-            .bind(query)
-            .bind(&pattern)
-            .bind(spec.kind.as_deref())
-            .bind(spec.session.as_deref())
-            .bind(spec.conversation.as_deref())
-            .bind(spec.after.clone())
-            .bind(spec.before.clone())
-            .bind(spec.operator_session.as_deref())
-            .bind(spec.client_ip.as_deref())
-            .bind(spec.ssh_user.as_deref())
-            .bind(spec.unix_uid)
-            .bind(spec.ssh_key_fingerprint.as_deref())
-    };
-    let rows = match bind_filters(sqlx::query(&sql))
+    macro_rules! bind_audit_filters {
+        ($builder:expr) => {
+            $builder
+                .bind(query)
+                .bind(&pattern)
+                .bind(spec.kind.as_deref())
+                .bind(spec.session.as_deref())
+                .bind(spec.conversation.as_deref())
+                .bind(spec.after.clone())
+                .bind(spec.before.clone())
+                .bind(spec.operator_session.as_deref())
+                .bind(spec.client_ip.as_deref())
+                .bind(spec.ssh_user.as_deref())
+                .bind(spec.unix_uid)
+                .bind(spec.ssh_key_fingerprint.as_deref())
+        };
+    }
+    let rows = match bind_audit_filters!(sqlx::query(&sql))
         .bind(spec.limit as i64)
         .bind(spec.offset as i64)
         .fetch_all(pool)
@@ -993,7 +995,7 @@ async fn search_records(pool: &PgPool, raw_query: &str, request_id: u64) -> Sear
     let total = if let Some(row) = rows.first() {
         row.try_get::<i64, _>("total_count").unwrap_or(0).max(0) as usize
     } else {
-        match bind_filters(sqlx::query_scalar::<_, i64>(&count_sql))
+        match bind_audit_filters!(sqlx::query_scalar::<_, i64>(&count_sql))
             .fetch_one(pool)
             .await
         {
