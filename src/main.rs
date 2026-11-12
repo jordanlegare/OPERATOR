@@ -84,7 +84,12 @@ enum SessionCommand {
     /// Create a persistent interactive shell and attach to it.
     Create,
     /// Attach to a detached session by its ID.
-    Attach { id: String },
+    Attach {
+        id: String,
+        /// Do not replay buffered terminal output when attaching.
+        #[arg(long)]
+        no_replay: bool,
+    },
     /// Terminate a session and its shell process.
     Terminate { id: String },
 }
@@ -133,7 +138,9 @@ fn run_operator_command(command: OperatorCommand) -> io::Result<()> {
                 eprintln!("Created persistent OPERATOR session {}. Press Ctrl+] to detach.", session.id);
                 session_daemon::attach_session(&session.id)
             }
-            SessionCommand::Attach { id } => session_daemon::attach_session(&id),
+            SessionCommand::Attach { id, no_replay } => {
+                session_daemon::attach_session_with_replay(&id, !no_replay)
+            },
             SessionCommand::Terminate { id } => session_daemon::terminate_session(&id),
         },
     }
