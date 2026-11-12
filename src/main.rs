@@ -7,6 +7,7 @@ mod conversations;
 mod hermes_bridge;
 mod hermes_review;
 mod shell;
+mod session_daemon;
 mod settings;
 mod storage;
 mod theme;
@@ -22,7 +23,7 @@ use std::{
 #[cfg(unix)]
 use std::os::{fd::AsRawFd, unix::fs::{OpenOptionsExt, PermissionsExt}};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
@@ -55,12 +56,107 @@ use storage::{EntryKind, Journal};
 #[derive(Debug, Parser)]
 #[command(name = "operator", version, about = "A live Debian shell transcript and unwrapped note stream")]
 struct Args {
+    #[command(subcommand)]
+    command: Option<OperatorCommand>,
     /// Legacy JSONL import/export path. Defaults to ~/.local/share/operator/journal.jsonl
     #[arg(short, long)]
     file: Option<PathBuf>,
     /// PostgreSQL connection URL. Also read from OPERATOR_DATABASE_URL.
     #[arg(long)]
     database_url: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum OperatorCommand {
+    /// Run the persistent per-user PTY session daemon in the foreground.
+    Daemon,
+    /// List sessions currently owned by the daemon.
+    Sessions,
+    /// Create, attach to, or terminate a persistent shell session.
+    Session {
+        #[command(subcommand)]
+        action: SessionCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionCommand {
+    /// Create a persistent interactive shell and attach to it.
+    Create,
+    /// Attach to a detached session by its ID.
+    Attach { id: String },
+    /// Terminate a session and its shell process.
+    Terminate { id: String },
+}
+
+fn run_operator_command(command: OperatorCommand) -> io::Result<()> {
+    match command {
+        OperatorCommand::Daemon => session_daemon::run_daemon(),
+        OperatorCommand::Sessions => {
+            let sessions = session_daemon::list_sessions()?;
+            if sessions.is_empty() {
+                println!("No persistent OPERATOR sessions.");
+            } else {
+                println!("{:<38} {:<8} {:<7} {:<10} SHELL", "SESSION ID", "STATE", "PID", "AGE");
+                for session in sessions {
+                    let state = if session.exited {
+                        "EXITED"
+                    } else if session.attached {
+                        "ATTACHED"
+                    } else {
+                        "DETACHED"
+                    };
+                    let age_seconds = chrono::Utc::now().timestamp_millis()
+                        .saturating_sub(session.created_unix_ms.min(i64::MAX as u128) as i64)
+                        .max(0) / 1000;
+                    println!(
+                        "{:<38} {:<8} {:<7} {:<10} {}",
+                        session.id,
+                        state,
+                        session.pid.map(|pid| pid.to_string()).unwrap_or_else(|| "-".to_string()),
+                        format!("{age_seconds}s"),
+                        session.shell,
+                    );
+                }
+            }
+            Ok(())
+        }
+        OperatorCommand::Session { action } => match action {
+            SessionCommand::Create => {
+                let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                let session = session_daemon::create_session(
+                    cols,
+                    rows,
+                    true,
+                    session_origin_from_environment(),
+                )?;
+                eprintln!("Created persistent OPERATOR session {}. Press Ctrl+] to detach.", session.id);
+                session_daemon::attach_session(&session.id)
+            }
+            SessionCommand::Attach { id } => session_daemon::attach_session(&id),
+            SessionCommand::Terminate { id } => session_daemon::terminate_session(&id),
+        },
+    }
+}
+
+fn session_origin_from_environment() -> std::collections::HashMap<String, String> {
+    [
+        "OPERATOR_SSH_USERNAME",
+        "OPERATOR_UNIX_UID",
+        "OPERATOR_SSH_CLIENT_IP",
+        "OPERATOR_SSH_CLIENT_PORT",
+        "OPERATOR_SSH_SERVER_IP",
+        "OPERATOR_SSH_SERVER_PORT",
+        "OPERATOR_SSH_TTY",
+        "OPERATOR_SSH_AUTH_METHOD",
+        "OPERATOR_SSH_KEY_FINGERPRINT",
+        "OPERATOR_HERMES_REVIEW_SESSION_DIR",
+        "OPERATOR_HERMES_INBOX",
+        "STREENOTE_HERMES_INBOX",
+    ]
+    .into_iter()
+    .filter_map(|key| std::env::var(key).ok().map(|value| (key.to_string(), value)))
+    .collect()
 }
 
 struct TerminalGuard;
@@ -108,6 +204,10 @@ impl Drop for TerminalGuard {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     dispatch_ssh_invocation();
     let args = Args::parse();
+    if let Some(command) = args.command {
+        run_operator_command(command)?;
+        return Ok(());
+    }
     let journal_path = args.file.unwrap_or_else(default_journal_path);
     let database_url = args.database_url.or_else(|| std::env::var("OPERATOR_DATABASE_URL").ok());
     let (journal, startup_message) = if let Some(database_url) = database_url {
