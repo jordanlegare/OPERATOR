@@ -98,6 +98,7 @@ fn run_operator_command(command: OperatorCommand) -> io::Result<()> {
     match command {
         OperatorCommand::Daemon => session_daemon::run_daemon(),
         OperatorCommand::Sessions => {
+            session_daemon::ensure_running()?;
             let sessions = session_daemon::list_sessions()?;
             if sessions.is_empty() {
                 println!("No persistent OPERATOR sessions.");
@@ -128,6 +129,7 @@ fn run_operator_command(command: OperatorCommand) -> io::Result<()> {
         }
         OperatorCommand::Session { action } => match action {
             SessionCommand::Create => {
+                session_daemon::ensure_running()?;
                 let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
                 let session = session_daemon::create_session(
                     cols,
