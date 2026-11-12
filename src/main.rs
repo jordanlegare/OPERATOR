@@ -153,35 +153,11 @@ fn adopt_daemon_session_origin(
     context: &mut OperatorSessionContext,
     session: &session_daemon::SessionInfo,
 ) {
+    // The daemon session ID remains stable across reconnects, while the SSH
+    // metadata in the current context remains that of the attaching connection.
+    // Commands typed after reconnect are therefore attributed to the client
+    // actually controlling the shell now, not the original session creator.
     context.operator_session_id = session.id.clone();
-    let origin = &session.origin;
-    context.ssh = audit::SshConnectionInfo::default();
-    context.ssh_username = origin.get("OPERATOR_SSH_USERNAME").cloned();
-    context.unix_uid = None;
-    if let Some(value) = origin.get("OPERATOR_UNIX_UID").and_then(|value| value.parse().ok()) {
-        context.unix_uid = Some(value);
-    }
-    if let Some(value) = origin.get("OPERATOR_SSH_CLIENT_IP") {
-        context.ssh.client_ip = Some(value.clone());
-    }
-    if let Some(value) = origin.get("OPERATOR_SSH_CLIENT_PORT").and_then(|value| value.parse().ok()) {
-        context.ssh.client_port = Some(value);
-    }
-    if let Some(value) = origin.get("OPERATOR_SSH_SERVER_IP") {
-        context.ssh.server_ip = Some(value.clone());
-    }
-    if let Some(value) = origin.get("OPERATOR_SSH_SERVER_PORT").and_then(|value| value.parse().ok()) {
-        context.ssh.server_port = Some(value);
-    }
-    if let Some(value) = origin.get("OPERATOR_SSH_TTY") {
-        context.ssh.tty = Some(value.clone());
-    }
-    if let Some(value) = origin.get("OPERATOR_SSH_AUTH_METHOD") {
-        context.ssh.auth_method = Some(value.clone());
-    }
-    if let Some(value) = origin.get("OPERATOR_SSH_KEY_FINGERPRINT") {
-        context.ssh.key_fingerprint = Some(value.clone());
-    }
 }
 
 fn session_origin_from_environment() -> std::collections::HashMap<String, String> {
