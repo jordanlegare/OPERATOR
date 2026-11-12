@@ -1259,7 +1259,7 @@ async fn export_search_results_from_database(
                    ) d ON TRUE
                    WHERE e.record_id = ANY($1)"#
             )
-            .bind(chunk)
+            .bind(chunk.to_vec())
             .fetch_all(pool)
             .await
             .map_err(|error| format!("fetch PostgreSQL search-result records: {error}"))?;
@@ -1694,6 +1694,26 @@ mod tests {
             }
         }
         assert!(loaded, "full PostgreSQL archive record fetch timed out");
+
+        let unrelated = format!("unselected export record {}", std::process::id());
+        let unrelated_entry = Entry::with_kind(EntryKind::Note, unrelated.clone());
+        writer.enqueue(unrelated_entry).expect("queue unrelated export fixture");
+        writer.flush().expect("commit unrelated export fixture");
+
+        let export_path = std::env::temp_dir()
+            .join(format!("operator-search-export-{}.txt", std::process::id()));
+        reader.export_search_results(
+            &export_path,
+            vec![record_id],
+            "historical".to_string(),
+            "LITERAL".to_string(),
+            0,
+            2,
+        ).expect("export selected PostgreSQL search result");
+        let exported = std::fs::read_to_string(&export_path).expect("read PostgreSQL search export");
+        assert!(exported.contains("historical full-record payload"));
+        assert!(!exported.contains(&unrelated));
+        let _ = std::fs::remove_file(export_path);
     }
 
     #[test]
