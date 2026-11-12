@@ -114,7 +114,7 @@ __operator_audit_capture() {
     line="$(fc -ln -1 2>/dev/null)"
     line="${line#"${line%%[![:space:]]*}"}"
     if [[ -n "$line" ]]; then
-      printf '%s\\0' "$line" >> "$OPERATOR_AUDIT_COMMAND_FILE"
+      printf '%s\0' "$line" >> "$OPERATOR_AUDIT_COMMAND_FILE"
     fi
     __OPERATOR_AUDIT_LAST_HISTCMD="$current"
   fi
