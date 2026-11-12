@@ -1,8 +1,6 @@
 [Unit]
 Description=OPERATOR persistent shell session daemon
 Documentation=https://github.com/jordanlegare/OPERATOR
-After=default.target
-
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/operator daemon
