@@ -3884,8 +3884,56 @@ mod tests {
         assert_eq!(app.selected_row, Some(0));
         let _ = fs::remove_file(path);
     }
-}
+    #[test]
+    fn search_ctrl_s_save_as_edits_and_exports_only_the_visible_page() {
+        use crate::storage::{Entry, EntryKind};
 
+        let (mut app, journal_path) = test_app();
+        app.journal.append(Entry::with_kind(
+            EntryKind::Note,
+            "The uppercase needle should match.".to_string(),
+        )).expect("append matching note");
+        app.journal.append(Entry::with_kind(
+            EntryKind::Note,
+            "This unrelated record must not be exported.".to_string(),
+        )).expect("append unrelated note");
+
+        app.search("NEEDLE");
+        wait_for_archive_search(&mut app);
+        assert_eq!(app.search_total, 1);
+        assert_eq!(app.archive_search_hits.len(), 1);
+
+        app.open_search_export_dialog();
+        assert!(app.search_export_dialog_open);
+        assert!(app.search_export_path.ends_with("operator-search-results.txt"));
+        app.cancel_search_export_dialog();
+        assert!(!app.search_export_dialog_open);
+
+        let export_path = env::temp_dir().join(format!(
+            "operator-search-résultats-{}.txt",
+            std::process::id()
+        ));
+        let export_name = export_path.to_string_lossy().into_owned();
+
+        app.open_search_export_dialog();
+        app.search_export_clear_path();
+        app.search_export_insert_text(&export_name);
+        assert_eq!(app.search_export_cursor, export_name.len());
+        app.search_export_cursor_left();
+        assert!(app.search_export_path.is_char_boundary(app.search_export_cursor));
+        app.search_export_cursor_right();
+        assert_eq!(app.search_export_cursor, export_name.len());
+
+        app.confirm_search_export();
+        assert!(!app.search_export_dialog_open);
+        let exported = fs::read_to_string(&export_path).expect("read search export");
+        assert!(exported.contains("The uppercase needle should match."));
+        assert!(!exported.contains("This unrelated record must not be exported."));
+
+        let _ = fs::remove_file(export_path);
+        let _ = fs::remove_file(journal_path);
+    }
+}
 
 fn completion_common_prefix(candidates: &[String]) -> String {
     let Some(first) = candidates.first() else {
