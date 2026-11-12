@@ -21,7 +21,7 @@ mod unix_impl {
         sync::{
             atomic::{AtomicU64, Ordering},
             mpsc::{self, Receiver, Sender},
-            Arc, Mutex,
+            Arc, Mutex, Weak,
         },
         thread,
         time::{SystemTime, UNIX_EPOCH},
@@ -329,7 +329,7 @@ mod unix_impl {
                 next_client_id: AtomicU64::new(1),
             });
 
-            let reader_session = Arc::clone(&session);
+            let reader_session: Weak<ManagedSession> = Arc::downgrade(&session);
             thread::Builder::new()
                 .name(format!("operator-session-pty-{id}"))
                 .spawn(move || {
@@ -337,21 +337,26 @@ mod unix_impl {
                     loop {
                         match reader.read(&mut buffer) {
                             Ok(0) => break,
-                            Ok(count) => reader_session.publish(&buffer[..count]),
+                            Ok(count) => {
+                                let Some(session) = reader_session.upgrade() else { break; };
+                                session.publish(&buffer[..count]);
+                            }
                             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                             Err(_) => break,
                         }
                     }
-                    let exited = reader_session.child.lock()
-                        .ok()
-                        .and_then(|mut child| child.try_wait().ok())
-                        .flatten()
-                        .is_some();
-                    let mut output = reader_session.output.lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    output.exited = exited;
-                    for sender in output.clients.values() {
-                        let _ = sender.send(OutputPacket::Exit);
+                    if let Some(session) = reader_session.upgrade() {
+                        let exited = session.child.lock()
+                            .ok()
+                            .and_then(|mut child| child.try_wait().ok())
+                            .flatten()
+                            .is_some();
+                        let mut output = session.output.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        output.exited = exited;
+                        for sender in output.clients.values() {
+                            let _ = sender.send(OutputPacket::Exit);
+                        }
                     }
                 })?;
 
@@ -1021,6 +1026,48 @@ trap "__operator_audit_capture" EXIT
         #[test]
         fn replay_buffer_has_a_bounded_cap() {
             assert_eq!(OUTPUT_HISTORY_BYTES, 1024 * 1024);
+        }
+
+        #[test]
+        fn daemon_reuses_only_detached_sessions_with_the_same_role() {
+            use super::SessionManager;
+
+            let manager = SessionManager::default();
+            let first = manager.create("primary".into(), 80, 24, false, None)
+                .expect("create first primary session");
+            let (first_controller, _, _first_receiver) = first.subscribe(false)
+                .expect("attach first primary session");
+
+            let second = manager.get_or_create("primary", 80, 24, false, None)
+                .expect("create another while the first is controlled");
+            assert_ne!(first.id, second.id, "an actively controlled shell must not be shared");
+
+            let (second_controller, _, _second_receiver) = second.subscribe(false)
+                .expect("attach second primary session");
+            first.unsubscribe(first_controller);
+
+            let resumed = manager.get_or_create("primary", 80, 24, false, None)
+                .expect("reuse the most recent detached primary session");
+            assert_eq!(first.id, resumed.id, "the detached session should be preferred over creating another");
+
+            let different_role = manager.get_or_create("workspace:parent", 80, 24, true, None)
+                .expect("create a separate workspace role");
+            assert_ne!(first.id, different_role.id);
+
+            second.unsubscribe(second_controller);
+        }
+
+        #[test]
+        fn daemon_frame_protocol_round_trips_binary_payloads() {
+            use super::{read_frame, write_frame};
+            use std::io::Cursor;
+
+            let payload = b"PTY output\\0with terminal bytes\\x1b[31m".to_vec();
+            let mut encoded = Vec::new();
+            write_frame(&mut encoded, 7, &payload).expect("encode frame");
+            let (kind, decoded) = read_frame(&mut Cursor::new(encoded)).expect("decode frame");
+            assert_eq!(kind, 7);
+            assert_eq!(decoded, payload);
         }
     }
 }
