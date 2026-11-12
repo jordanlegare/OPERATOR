@@ -51,7 +51,7 @@ CREATE INDEX IF NOT EXISTS operator_journal_search_record_idx
     ON operator_journal_search_documents (record_id);
 
 -- Structured OPERATOR SSH/session attribution. Existing JSONB payloads remain
--- backward compatible; these columns support indexed filters across reviewers.
+-- backward compatible, and these columns support indexed filters across reviewers.
 ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS operator_session_id TEXT;
 ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS operator_instance_id TEXT;
 ALTER TABLE operator_journal_entries ADD COLUMN IF NOT EXISTS ssh_username TEXT;
