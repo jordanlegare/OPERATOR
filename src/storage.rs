@@ -1222,6 +1222,11 @@ pub fn entry_kind_label(kind: EntryKind) -> &'static str {
         EntryKind::HermesHistory => "HCTX",
         EntryKind::HermesInterim => "HINT",
         EntryKind::HermesSession => "HSES",
+        EntryKind::OperatorSessionStart => "OPST",
+        EntryKind::OperatorSessionHeartbeat => "OPHB",
+        EntryKind::OperatorSessionEnd => "OPEN",
+        EntryKind::OperatorWorkspaceStart => "WKST",
+        EntryKind::OperatorWorkspaceEnd => "WKED",
     }
 }
 
@@ -1408,6 +1413,7 @@ fn can_merge_stream_delta(previous: &Entry, next: &Entry) -> bool {
         && previous.conversation_id == next.conversation_id
         && previous.turn_id == next.turn_id
         && previous.iteration == next.iteration
+        && previous.operator_session_id == next.operator_session_id
 }
 
 fn append_jsonl(path: &Path, entry: &Entry) -> io::Result<()> {
