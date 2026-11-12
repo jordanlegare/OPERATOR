@@ -337,6 +337,13 @@ trap '__operator_audit_capture' EXIT
             .unwrap_or_else(|| PathBuf::from("."))
     }
 
+    /// True when this ShellSession is only a local PTY bridge to a
+    /// daemon-owned shell. Its local PTY must stay in raw/no-echo mode because
+    /// the daemon-owned shell controls its own echo setting.
+    pub fn is_daemon_proxy(&self) -> bool {
+        self.remote_pid.is_some()
+    }
+
     pub fn supports_command_audit(&self) -> bool {
         self.audit_file_path.is_some()
     }
