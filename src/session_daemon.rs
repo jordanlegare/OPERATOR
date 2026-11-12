@@ -258,7 +258,14 @@ mod unix_impl {
             command.env("TERM", env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string()));
             command.env("COLORTERM", env::var("COLORTERM").unwrap_or_else(|_| "truecolor".to_string()));
             command.env_remove("OPERATOR_DATABASE_URL");
-            for variable in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "SSH_USER_AUTH"] {
+            for variable in [
+                "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "SSH_USER_AUTH",
+                "OPERATOR_SSH_USERNAME", "OPERATOR_UNIX_UID",
+                "OPERATOR_SSH_CLIENT_IP", "OPERATOR_SSH_CLIENT_PORT",
+                "OPERATOR_SSH_SERVER_IP", "OPERATOR_SSH_SERVER_PORT",
+                "OPERATOR_SSH_TTY", "OPERATOR_SSH_AUTH_METHOD",
+                "OPERATOR_SSH_KEY_FINGERPRINT",
+            ] {
                 command.env_remove(variable);
             }
             command.env(
@@ -468,18 +475,21 @@ mod unix_impl {
         fs::create_dir_all(parent)?;
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
 
-        if path.exists() {
-            let metadata = fs::symlink_metadata(&path)?;
-            if !metadata.file_type().is_socket() || metadata.uid() != unsafe { libc::geteuid() } {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    format!("refusing to remove non-owned or non-socket path {}", path.display()),
-                ));
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_socket() || metadata.uid() != unsafe { libc::geteuid() } {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!("refusing to remove non-owned or non-socket path {}", path.display()),
+                    ));
+                }
+                if UnixStream::connect(&path).is_ok() {
+                    return Err(io::Error::new(io::ErrorKind::AddrInUse, "OPERATOR session daemon is already running"));
+                }
+                fs::remove_file(&path)?;
             }
-            if UnixStream::connect(&path).is_ok() {
-                return Err(io::Error::new(io::ErrorKind::AddrInUse, "OPERATOR session daemon is already running"));
-            }
-            fs::remove_file(&path)?;
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
 
         let listener = UnixListener::bind(&path)?;
