@@ -1990,8 +1990,8 @@ mod workspace_input_tests {
         let mut output = Vec::new();
         super::clear_workspace_screen(&mut output).expect("clear workspace screen");
         let output = String::from_utf8(output).expect("terminal control output is ASCII");
-        assert!(output.contains("\\u{1b}[2J"), "must clear the visible screen: {output:?}");
-        assert!(output.contains("\\u{1b}[1;1H"), "must home the cursor: {output:?}");
+        assert!(output.contains("\x1b[2J"), "must clear the visible screen: {output:?}");
+        assert!(output.contains("\x1b[1;1H"), "must home the cursor: {output:?}");
     }
 
     #[test]
