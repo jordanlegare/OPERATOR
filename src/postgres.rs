@@ -452,7 +452,7 @@ async fn insert_entry(
             ssh_client_ip, ssh_client_port, ssh_server_ip, ssh_server_port, ssh_tty,
             ssh_auth_method, ssh_key_fingerprint, operator_surface)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
-                   $13, $14, $15, $16, $17::inet, $18, $19::inet, $20, $21,
+                   $13, $14, $15, $16, $17, $18, $19, $20, $21,
                    $22, $23, $24)
            ON CONFLICT DO NOTHING
            RETURNING id"#,
@@ -895,10 +895,11 @@ async fn search_records(pool: &PgPool, raw_query: &str, request_id: u64) -> Sear
         AND ($6::timestamptz IS NULL OR d.occurred_at >= $6)
         AND ($7::timestamptz IS NULL OR d.occurred_at < $7)
         AND ($8::text IS NULL OR e.operator_session_id = $8)
-        AND ($9::inet IS NULL OR e.ssh_client_ip = $9::inet)
+        AND ($9::text IS NULL OR e.ssh_client_ip = $9)
         AND ($10::text IS NULL OR e.ssh_username = $10)
         AND ($11::bigint IS NULL OR e.unix_uid = $11)
         AND ($12::text IS NULL OR e.ssh_key_fingerprint = $12)
+        AND (d.kind <> 'operator_session_heartbeat' OR $3::text = 'operator_session_heartbeat')
     "#;
     let grouped_order = if spec.operator_session.is_some() || spec.client_ip.is_some()
         || spec.ssh_user.is_some() || spec.unix_uid.is_some() || spec.ssh_key_fingerprint.is_some()
@@ -949,7 +950,7 @@ async fn search_records(pool: &PgPool, raw_query: &str, request_id: u64) -> Sear
         r#"SELECT d.record_id, d.kind, d.occurred_at,
                   ({rank_expr})::real AS rank, {snippet_expr} AS snippet,
                   e.operator_session_id, e.operator_instance_id, e.ssh_username,
-                  e.unix_uid, host(e.ssh_client_ip) AS ssh_client_ip, e.operator_surface,
+                  e.unix_uid, e.ssh_client_ip AS ssh_client_ip, e.operator_surface,
                   COUNT(*) OVER()::bigint AS total_count
            FROM operator_journal_search_documents d
            JOIN operator_journal_entries e ON e.id = d.entry_id
