@@ -238,7 +238,8 @@ mod unix_impl {
                 pixel_height: 0,
             }).map_err(|error| io::Error::other(error.to_string()))?;
 
-            let shell = resolve_shell_program();
+            let origin = origin.unwrap_or_default();
+            let shell = resolve_shell_program_for_origin(&origin);
             let id = new_session_id();
             let supports_bash_audit = shell.file_name()
                 .is_some_and(|name| name.to_string_lossy().to_ascii_lowercase().contains("bash"));
@@ -253,7 +254,6 @@ mod unix_impl {
             }
 
             let mut command = CommandBuilder::new(&shell);
-            command.arg("-i");
             command.env("SHELL", &shell);
             command.env("TERM", env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string()));
             command.env("COLORTERM", env::var("COLORTERM").unwrap_or_else(|_| "truecolor".to_string()));
@@ -274,7 +274,6 @@ mod unix_impl {
             );
             command.env("STREENOTE_HERMES_INBOX", crate::hermes_bridge::default_inbox_path());
 
-            let origin = origin.unwrap_or_default();
             for (key, value) in &origin {
                 if is_allowed_origin_variable(key) {
                     command.env(key, value);
@@ -295,6 +294,7 @@ mod unix_impl {
                     command.arg(rcfile);
                 }
             }
+            command.arg("-i");
 
             let child = match pair.slave.spawn_command(command) {
                 Ok(child) => child,
@@ -912,6 +912,7 @@ mod unix_impl {
                 | "OPERATOR_SSH_KEY_FINGERPRINT"
                 | "OPERATOR_SESSION_ID"
                 | "STREENOTE_OPERATOR_SESSION_ID"
+                | "OPERATOR_SHELL"
                 | "OPERATOR_HERMES_REVIEW_SESSION_DIR"
                 | "OPERATOR_HERMES_INBOX"
                 | "STREENOTE_HERMES_INBOX"
@@ -964,6 +965,20 @@ trap "__operator_audit_capture" EXIT
         rcfile.write_all(rc_source.as_bytes())?;
         rcfile.sync_all()?;
         Ok(path)
+    }
+
+    fn resolve_shell_program_for_origin(origin: &HashMap<String, String>) -> PathBuf {
+        let candidate = origin.get("OPERATOR_SHELL").map(PathBuf::from);
+        if let Some(candidate) = candidate {
+            let current_exe = env::current_exe().ok().and_then(|path| fs::canonicalize(path).ok());
+            let resolves_to_self = current_exe.as_ref().is_some_and(|current| {
+                fs::canonicalize(&candidate).map(|resolved| resolved == *current).unwrap_or(false)
+            });
+            if !resolves_to_self && candidate.is_file() {
+                return candidate;
+            }
+        }
+        resolve_shell_program()
     }
 
     fn resolve_shell_program() -> PathBuf {
