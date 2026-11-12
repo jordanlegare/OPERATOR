@@ -76,6 +76,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.show_banner {
         draw_banner(frame, frame.area(), theme);
     }
+    if app.search_export_dialog_open && app.pending_review.is_none() {
+        draw_search_export_dialog(frame, app, theme);
+    }
 }
 
 fn review_editor_lines(app: &App, theme: Theme) -> Vec<Line<'static>> {
@@ -706,7 +709,7 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
         "THREADS      /threads browses conversations; Enter expands a thread.",
         "REVIEW       /review on|off|status controls answer release.",
         "COMMANDS     /view · /save · /export · /export-search · /stats · /path",
-        "CONTROL      Tab completion · Ctrl+P/N history · Ctrl+W wrap · Ctrl+S save.",
+        "CONTROL      Tab completion · Ctrl+P/N history · Ctrl+W wrap · Ctrl+S save / search SAVE AS.",
         "THEMES       F2–F10 changes palettes; F12 hides or restores this splash.",
         "HELP         /help opens the complete command and keyboard reference.",
         "SSH          F1 opens the terminal workspace; SCP/SFTP is configurable.",
@@ -1546,6 +1549,105 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
     );
 }
 
+fn draw_search_export_dialog(frame: &mut Frame, app: &App, theme: Theme) {
+    let popup = centered_rect(78, 34, frame.area());
+    frame.render_widget(Clear, popup);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.info))
+        .title(Span::styled(
+            " SAVE AS · SEARCH RESULTS ",
+            Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(theme.panel));
+    let inner = outer.inner(popup);
+    frame.render_widget(outer, popup);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let result_count = app.archive_search_hits.len().max(app.search_hits.len());
+    let query = app.search_query.as_deref().unwrap_or("");
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Export {result_count} displayed result(s) for {query:?}. Only this page is included."
+        ))
+        .style(Style::default().fg(theme.text).bg(theme.panel))
+        .alignment(Alignment::Center),
+        sections[0],
+    );
+
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.primary))
+        .title(Span::styled(
+            " FILE NAME / DESTINATION ",
+            Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(theme.panel));
+    let input_area = input_block.inner(sections[1]);
+    frame.render_widget(input_block, sections[1]);
+
+    let cursor = app.search_export_cursor.min(app.search_export_path.len());
+    let before = &app.search_export_path[..cursor];
+    let after = &app.search_export_path[cursor..];
+    let cursor_style = Style::default()
+        .fg(theme.bg)
+        .bg(theme.info)
+        .add_modifier(Modifier::BOLD);
+    let cursor_span = Span::styled("▏", cursor_style);
+    let line = if app.search_export_path.is_empty() {
+        Line::from(vec![
+            cursor_span,
+            Span::styled("operator-search-results.txt", Style::default().fg(theme.muted)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(before, Style::default().fg(theme.text)),
+            cursor_span,
+            Span::styled(after, Style::default().fg(theme.text)),
+        ])
+    };
+
+    let available_width = input_area.width.saturating_sub(2).max(1) as usize;
+    let cursor_width = UnicodeWidthStr::width(before);
+    let horizontal_scroll = cursor_width.saturating_sub(available_width.saturating_sub(1));
+    frame.render_widget(
+        Paragraph::new(line)
+            .style(Style::default().fg(theme.text).bg(theme.panel))
+            .scroll((0, horizontal_scroll.min(u16::MAX as usize) as u16)),
+        input_area,
+    );
+    let cursor_x = input_area
+        .x
+        .saturating_add(1)
+        .saturating_add(cursor_width.saturating_sub(horizontal_scroll).min(u16::MAX as usize) as u16)
+        .min(input_area.x.saturating_add(input_area.width.saturating_sub(2)));
+    let cursor_y = input_area.y.saturating_add(1);
+    frame.set_cursor_position(Position::new(cursor_x, cursor_y));
+
+    let footer = app.search_export_error.as_deref().unwrap_or(
+        "ENTER EXPORT  ·  ESC CANCEL  ·  CTRL+U CLEAR PATH",
+    );
+    frame.render_widget(
+        Paragraph::new(footer)
+            .style(Style::default().fg(if app.search_export_error.is_some() {
+                theme.warning
+            } else {
+                theme.muted
+            }).bg(theme.panel))
+            .alignment(Alignment::Center),
+        sections[2],
+    );
+}
+
 fn help_lines(theme: Theme) -> Vec<Line<'static>> {
     vec![
         Line::from(Span::styled(
@@ -1585,7 +1687,6 @@ fn help_lines(theme: Theme) -> Vec<Line<'static>> {
         Line::from(vec![Span::styled("/note TEXT", Style::default().fg(theme.warning)), Span::raw("      Save a note without leaving terminal mode; /note alone switches to Notes mode.")]),
         Line::from(vec![Span::styled("/save", Style::default().fg(theme.warning)), Span::raw("          Retry pending writes and sync the journal.")]),
         Line::from(vec![Span::styled("/export [FILE]", Style::default().fg(theme.warning)), Span::raw(" Export every journal record as readable text.")]),
-        Line::from(vec![Span::styled("/export-search [FILE]", Style::default().fg(theme.warning)), Span::raw(" Export full records from the current search-results page only; defaults to operator-search-results.txt.")]),
         Line::from(vec![Span::styled("/export-jsonl [FILE]", Style::default().fg(theme.warning)), Span::raw(" Export the original uncoalesced journal events as JSONL.")]),
         Line::from(vec![Span::styled("/stats · /path", Style::default().fg(theme.warning)), Span::raw("  Show journal statistics, backend and import/export path.")]),
         Line::from(vec![Span::styled("/scp on|off|status", Style::default().fg(theme.warning)), Span::raw("  Toggle persistent SSH SCP/SFTP file-transfer passthrough.")]),
@@ -1599,7 +1700,7 @@ fn help_lines(theme: Theme) -> Vec<Line<'static>> {
         Line::from("Each transcript row displays the full local date, time, seconds and UTC offset."),
         Line::from("Tab completes shell commands and paths · four spaces in Notes mode"),
         Line::from(format!("F2–F10 switches high-contrast palettes (F2 = 1, F10 = 9) · active: {}", theme.name)),
-        Line::from("Ctrl+W toggles transcript word wrap · Alt+←/→ horizontal pan · Ctrl+P/N history · Ctrl+S save · Ctrl+T mode"),
+        Line::from("Ctrl+W toggles transcript word wrap · Alt+←/→ horizontal pan · Ctrl+P/N history · Ctrl+S save / search SAVE AS · Ctrl+T mode"),
         Line::from("Ctrl+L / Esc clears the input line · F12 shows or hides the animated full-screen credits splash"),
         Line::from("Ctrl+C in a thread copies its full transcript; elsewhere it sends SIGINT or clears the draft."),
         Line::from(""),

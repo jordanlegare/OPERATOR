@@ -338,8 +338,6 @@ The palettes are built into OPERATOR and require no external theme package or co
 | `/clear` | Clear search and return to the live tail; does not delete data |
 | `/save` | Retry pending writes and sync the journal |
 | `/export [path]` | Export the complete journal as readable text |
-| `/export-search [path]` | Export full records from the currently displayed search-results page only; defaults to `operator-search-results.txt` |
-| `/export-results [path]` | Alias for `/export-search` |
 | `/stats` | Show the 30-day hot-cache entry count/bytes, pending writes, and hit count |
 | `/path` | Show the journal file path |
 | `/scp on|off|status` | Enable, disable, or inspect SSH SCP/SFTP passthrough (persistent; enabled by default) |
@@ -365,6 +363,7 @@ The palettes are built into OPERATOR and require no external theme package or co
 | Left-click + drag | Select text across one or more transcript rows |
 | `Ctrl+C` with a text/row selection | Copy selected transcript text via OSC 52 |
 | `Ctrl+C` on a highlighted HUSR row | Open that prompt's expanded Hermes thread |
+| `Ctrl+S` while search results are open | Open the centered SAVE AS prompt and export the current results page only; Enter confirms and Esc cancels |
 | `Ctrl+C` in the expanded thread | Copy the full thread with each streamed assistant turn joined into one continuous message |
 | `Ctrl+C` without a selection or HUSR row | Send SIGINT to shell (TERMINAL) or clear the draft (NOTES) |
 | `Shift` + mouse wheel | Faster vertical scroll |
@@ -374,7 +373,7 @@ The palettes are built into OPERATOR and require no external theme package or co
 | `F2` … `F10` | Switch between nine high-contrast color themes (F2 = theme 1; F10 = theme 9) |
 | `Ctrl+P` / `Ctrl+N` | Previous / next input-history item |
 | `Ctrl+A` / `Ctrl+E` | Move input cursor to start / end |
-| `Ctrl+S` | Save / retry pending writes |
+| `Ctrl+S` | Save / retry pending writes in LIVE; open the SAVE AS prompt when search results are displayed |
 | `Ctrl+D` | Send end-of-input to the shell when the terminal input is empty |
 | `Esc` | Clear input; in PostgreSQL search results return to the live transcript |
 | `Ctrl+Q` | Quit OPERATOR |
