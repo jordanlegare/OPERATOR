@@ -9,8 +9,6 @@ ExecStart=/usr/local/bin/operator daemon
 Restart=on-failure
 RestartSec=2
 UMask=0077
-NoNewPrivileges=true
-PrivateTmp=true
 
 [Install]
 WantedBy=default.target
