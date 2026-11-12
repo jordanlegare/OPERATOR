@@ -145,6 +145,15 @@ impl ShellSession {
         &self.shell_program
     }
 
+    /// Return the live shell's actual cwd, including changes made with `cd`.
+    pub fn current_working_directory(&self) -> PathBuf {
+        self.child
+            .process_id()
+            .and_then(|pid| fs::read_link(format!("/proc/{pid}/cwd")).ok())
+            .or_else(|| env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
     /// Build the footer prompt from the real shell process identity and cwd.
     /// The home directory is displayed as "~" for a compact, familiar prompt.
     pub fn prompt_label(&self) -> String {
@@ -157,12 +166,7 @@ impl ShellSession {
             .filter(|value| !value.is_empty())
             .or_else(|| env::var("HOSTNAME").ok())
             .unwrap_or_else(|| "localhost".to_string());
-        let cwd = self
-            .child
-            .process_id()
-            .and_then(|pid| fs::read_link(format!("/proc/{pid}/cwd")).ok())
-            .or_else(|| env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("?"));
+        let cwd = self.current_working_directory();
         let home = env::var_os("HOME").map(PathBuf::from);
         format_shell_prompt(&user, &hostname, &cwd, home.as_deref())
     }
