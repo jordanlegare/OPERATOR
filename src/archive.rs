@@ -459,6 +459,11 @@ fn entry_kind_name(kind: EntryKind) -> &'static str {
         EntryKind::HermesHistory => "hermes_history",
         EntryKind::HermesInterim => "hermes_interim",
         EntryKind::HermesSession => "hermes_session",
+        EntryKind::OperatorSessionStart => "operator_session_start",
+        EntryKind::OperatorSessionHeartbeat => "operator_session_heartbeat",
+        EntryKind::OperatorSessionEnd => "operator_session_end",
+        EntryKind::OperatorWorkspaceStart => "operator_workspace_start",
+        EntryKind::OperatorWorkspaceEnd => "operator_workspace_end",
     }
 }
 
