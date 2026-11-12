@@ -337,6 +337,11 @@ fn draw_hermes_message(
             index + 1,
             format_timestamp(&entry.timestamp)
         ),
+        EntryKind::OperatorSessionStart => format!(" OPERATOR SESSION START · ROW {} · {} ", index + 1, format_timestamp(&entry.timestamp)),
+        EntryKind::OperatorSessionHeartbeat => format!(" OPERATOR SESSION HEARTBEAT · ROW {} · {} ", index + 1, format_timestamp(&entry.timestamp)),
+        EntryKind::OperatorSessionEnd => format!(" OPERATOR SESSION END · ROW {} · {} ", index + 1, format_timestamp(&entry.timestamp)),
+        EntryKind::OperatorWorkspaceStart => format!(" F1 WORKSPACE START · ROW {} · {} ", index + 1, format_timestamp(&entry.timestamp)),
+        EntryKind::OperatorWorkspaceEnd => format!(" F1 WORKSPACE END · ROW {} · {} ", index + 1, format_timestamp(&entry.timestamp)),
         _ => " HERMES MESSAGE ".to_string(),
     };
     let block = Block::default()
@@ -470,6 +475,11 @@ fn draw_conversation_thread(frame: &mut Frame, app: &mut App, id: &str, theme: T
                 EntryKind::HermesHistory => ("PRIOR CONTEXT", theme.info),
                 EntryKind::HermesInterim => ("INTERIM MESSAGE", theme.primary),
                 EntryKind::HermesSession => ("SESSION EVENT", theme.muted),
+                EntryKind::OperatorSessionStart => ("OPERATOR SESSION START", theme.success),
+                EntryKind::OperatorSessionHeartbeat => ("OPERATOR SESSION HEARTBEAT", theme.muted),
+                EntryKind::OperatorSessionEnd => ("OPERATOR SESSION END", theme.success),
+                EntryKind::OperatorWorkspaceStart => ("F1 WORKSPACE START", theme.info),
+                EntryKind::OperatorWorkspaceEnd => ("F1 WORKSPACE END", theme.info),
                 EntryKind::HermesStreamDelta => ("ASSISTANT - LIVE STREAM", theme.primary),
                 _ => ("HERMES", theme.muted),
             };
