@@ -1989,8 +1989,10 @@ mod shared_journal_tests {
         drop(first);
         drop(second);
         let contents = fs::read_to_string(&path).expect("read shared journal");
-        assert_eq!(contents.lines().count(), 3);
+        assert_eq!(contents.lines().count(), 4);
+        assert_eq!(contents.matches("private shell command").count(), 1);
         assert_eq!(contents.matches("note written in terminal one").count(), 1);
+        assert_eq!(contents.matches("journalctl -u ssh.service").count(), 1);
         assert_eq!(contents.matches("note written in terminal two").count(), 1);
         let _ = fs::remove_file(&path);
         let lock = PathBuf::from(format!("{}.lock", path.display()));
