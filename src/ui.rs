@@ -708,7 +708,7 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
         "HERMES       Prompts, streams, tools, threads, and response review.",
         "THREADS      /threads browses conversations; Enter expands a thread.",
         "REVIEW       /review on|off|status controls answer release.",
-        "COMMANDS     /view · /save · /export · /export-search · /stats · /path",
+        "COMMANDS     /view · /save · /export · Ctrl+S SAVE AS · /stats · /path",
         "CONTROL      Tab completion · Ctrl+P/N history · Ctrl+W wrap · Ctrl+S save / search SAVE AS.",
         "THEMES       F2–F10 changes palettes; F12 hides or restores this splash.",
         "HELP         /help opens the complete command and keyboard reference.",
