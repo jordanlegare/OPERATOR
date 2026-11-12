@@ -448,6 +448,7 @@ mod unix_impl {
         let mut log_options = fs::OpenOptions::new();
         log_options.create(true).append(true).mode(0o600);
         let log = log_options.open(&log_path)?;
+        fs::set_permissions(&log_path, fs::Permissions::from_mode(0o600))?;
         let executable = env::current_exe()?;
         let mut command = process::Command::new(executable);
         command.env_remove("OPERATOR_DATABASE_URL");
@@ -478,18 +479,28 @@ mod unix_impl {
                 }
             });
         }
-        match command.spawn() {
-            Ok(_) => {}
+        let mut daemon_child = match command.spawn() {
+            Ok(child) => child,
             Err(_error) if ping().is_ok() => return Ok(()),
             Err(error) => return Err(error),
-        }
+        };
 
         for _ in 0..100 {
             if ping().is_ok() {
+                // Dropping std::process::Child does not terminate the daemon;
+                // the setsid() call above has detached it from this SSH login.
                 return Ok(());
+            }
+            if let Some(status) = daemon_child.try_wait()? {
+                return Err(io::Error::other(format!(
+                    "OPERATOR session daemon exited during startup with {status}; inspect {}",
+                    log_path.display()
+                )));
             }
             thread::sleep(Duration::from_millis(20));
         }
+        let _ = daemon_child.kill();
+        let _ = daemon_child.wait();
         Err(io::Error::new(
             io::ErrorKind::TimedOut,
             format!("OPERATOR session daemon did not start; inspect {}", log_path.display()),
