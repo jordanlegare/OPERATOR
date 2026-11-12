@@ -709,7 +709,7 @@ fn draw_banner(frame: &mut Frame, area: Rect, theme: Theme) {
         "THREADS      /threads browses conversations; Enter expands a thread.",
         "REVIEW       /review on|off|status controls answer release.",
         "COMMANDS     /view · /save · /export · /export-search · /stats · /path",
-        "CONTROL      Tab completion · Ctrl+P/N history · Ctrl+W wrap · Ctrl+S save.",
+        "CONTROL      Tab completion · Ctrl+P/N history · Ctrl+W wrap · Ctrl+S save / search SAVE AS.",
         "THEMES       F2–F10 changes palettes; F12 hides or restores this splash.",
         "HELP         /help opens the complete command and keyboard reference.",
         "SSH          F1 opens the terminal workspace; SCP/SFTP is configurable.",
