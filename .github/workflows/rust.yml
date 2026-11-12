@@ -48,6 +48,9 @@ jobs:
           cargo test audit::tests
           cargo test shell::tests
 
+      - name: Test persistent daemon sessions and PTY reattachment
+        run: cargo test session_daemon::tests
+
       - name: Test 30-day journal hot window
         run: cargo test storage::hot_window_tests
 
