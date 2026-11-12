@@ -60,9 +60,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             ConversationView::Thread { id } => draw_conversation_thread(frame, app, &id, theme),
         }
     }
-    if app.search_export_dialog_open && app.pending_review.is_none() {
-        draw_search_export_dialog(frame, app, theme);
-    }
     if app.pending_review.is_some() {
         draw_hermes_review(frame, app, theme);
     }
@@ -78,6 +75,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // immediately and reveals the live application underneath.
     if app.show_banner {
         draw_banner(frame, frame.area(), theme);
+    }
+    if app.search_export_dialog_open && app.pending_review.is_none() {
+        draw_search_export_dialog(frame, app, theme);
     }
 }
 
