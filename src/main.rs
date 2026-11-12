@@ -1259,6 +1259,7 @@ fn run(
         }
         if let Some(session) = shell.as_ref() {
             app.set_terminal_prompt(session.prompt_label());
+            app.set_terminal_working_directory(session.current_working_directory());
         }
         terminal.draw(|frame| ui::draw(frame, app))?;
 
