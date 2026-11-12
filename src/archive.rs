@@ -269,9 +269,6 @@ fn search_file(path: &Path, request_id: u64, raw_query: &str) -> ArchiveSearchRe
         },
     };
 
-    // Normalize once before both archive passes so counting and page capture
-    // use exactly the same case-insensitive literal match.
-    let normalized_needle = spec.needle.to_lowercase();
     let mut result = ArchiveSearchResult {
         request_id,
         query: if spec.needle.is_empty() { raw_query.to_string() } else { spec.needle.clone() },
