@@ -9,6 +9,7 @@ use std::{
 };
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use crate::session_daemon::SessionInfo;
 
 const IDLE_FLUSH: Duration = Duration::from_millis(180);
 const READ_BUFFER_SIZE: usize = 4096;
@@ -27,8 +28,12 @@ pub struct ShellSession {
     shell_program: PathBuf,
     audit_file_path: Option<PathBuf>,
     audit_rcfile_path: Option<PathBuf>,
+    audit_offset_path: Option<PathBuf>,
     audit_file_cursor: u64,
+    audit_persisted_cursor: u64,
     audit_file_pending: Vec<u8>,
+    cleanup_audit_files: bool,
+    remote_pid: Option<u32>,
 }
 
 impl std::fmt::Debug for ShellSession {
@@ -40,9 +45,36 @@ impl std::fmt::Debug for ShellSession {
     }
 }
 
+#[derive(Debug, Clone)]
+struct RemoteProxy {
+    session_id: String,
+    shell: PathBuf,
+    pid: Option<u32>,
+    audit_file_path: Option<PathBuf>,
+    replay: bool,
+}
+
 impl ShellSession {
     pub fn spawn(cols: u16, rows: u16) -> io::Result<Self> {
-        Self::spawn_internal(cols, rows, None, None)
+        Self::spawn_internal(cols, rows, None, None, None)
+    }
+
+    /// Attach this local TUI PTY to a daemon-owned interactive shell.
+    /// Dropping the proxy detaches the client; it does not terminate the shell.
+    pub fn spawn_daemon_proxy(
+        cols: u16,
+        rows: u16,
+        session: &SessionInfo,
+        replay: bool,
+    ) -> io::Result<Self> {
+        let proxy = RemoteProxy {
+            session_id: session.id.clone(),
+            shell: PathBuf::from(&session.shell),
+            pid: session.pid,
+            audit_file_path: session.audit_file_path.as_ref().map(PathBuf::from),
+            replay,
+        };
+        Self::spawn_internal(cols, rows, None, None, Some(proxy))
     }
 
     /// Spawn an independent Bash workspace with a PROMPT_COMMAND hook that
@@ -50,7 +82,7 @@ impl ShellSession {
     /// No raw terminal bytes or secret prompt input are observed.
     pub fn spawn_with_command_audit(cols: u16, rows: u16) -> io::Result<Self> {
         let path = Self::new_audit_file_path();
-        Self::spawn_internal(cols, rows, Some(path), None)
+        Self::spawn_internal(cols, rows, Some(path), None, None)
     }
 
     fn new_audit_file_path() -> PathBuf {
@@ -75,6 +107,7 @@ impl ShellSession {
             rows,
             Some(Self::new_audit_file_path()),
             Some(home.to_path_buf()),
+            None,
         )
     }
 
@@ -83,6 +116,7 @@ impl ShellSession {
         rows: u16,
         requested_audit_path: Option<PathBuf>,
         home_override: Option<PathBuf>,
+        proxy: Option<RemoteProxy>,
     ) -> io::Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -108,6 +142,7 @@ impl ShellSession {
         let supports_bash_audit = shell.file_name()
             .is_some_and(|name| name.to_string_lossy().to_ascii_lowercase().contains("bash"));
         let audit_file_path = requested_audit_path.filter(|_| supports_bash_audit);
+        let cleanup_audit_files = audit_file_path.is_some();
         let audit_rcfile_path = audit_file_path.as_ref().map(|path| path.with_extension("bashrc"));
         if let Some(path) = audit_file_path.as_ref() {
             let mut options = OpenOptions::new();
@@ -161,7 +196,11 @@ trap '__operator_audit_capture' EXIT
             rcfile.sync_all()?;
             let _ = command_path;
         }
-        let mut command = CommandBuilder::new(&shell);
+        let mut command = if proxy.is_some() {
+            CommandBuilder::new(env::current_exe()?)
+        } else {
+            CommandBuilder::new(&shell)
+        };
         if let Some(home) = home_override.as_ref() {
             command.env("HOME", home);
             command.env("HISTFILE", home.join(".bash_history"));
@@ -169,6 +208,14 @@ trap '__operator_audit_capture' EXIT
         // Keep PostgreSQL credentials in the OPERATOR process only; do not
         // leak the connection URL into the interactive shell's environment.
         command.env_remove("OPERATOR_DATABASE_URL");
+        if let Some(proxy) = proxy.as_ref() {
+            command.arg("session");
+            command.arg("attach");
+            command.arg(&proxy.session_id);
+            if !proxy.replay {
+                command.arg("--no-replay");
+            }
+        }
         // Standard Hermes integration contract: every OPERATOR-managed PTY
         // receives the canonical inbox path from the Rust bridge. Child tools
         // inherit it; independent gateway services need their own hook adapter.
@@ -188,6 +235,7 @@ trap '__operator_audit_capture' EXIT
         // Keep subprocesses and shell startup files pointed at the real shell,
         // not at OPERATOR when it is the account's configured login shell.
         command.env("SHELL", &shell);
+        if proxy.is_none() {
         if let Some(path) = audit_file_path.as_ref() {
             command.env("OPERATOR_AUDIT_COMMAND_FILE", path);
             if let Some(rcfile) = audit_rcfile_path.as_ref() {
@@ -199,6 +247,7 @@ trap '__operator_audit_capture' EXIT
         // Start the configured interactive shell normally so Debian's shell
         // startup files, aliases, prompt, PATH, and environment are honored.
         command.arg("-i");
+        }
 
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
@@ -248,6 +297,12 @@ trap '__operator_audit_capture' EXIT
                 }
             })?;
 
+        let persisted_audit_cursor = proxy.as_ref()
+            .and_then(|proxy| proxy.audit_file_path.as_ref())
+            .and_then(|path| fs::read_to_string(path.with_extension("offset")).ok())
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(0);
+
         Ok(Self {
             writer,
             child,
@@ -257,11 +312,15 @@ trap '__operator_audit_capture' EXIT
             last_output: None,
             exited: false,
             reader_closed: false,
-            shell_program: shell,
-            audit_file_path,
+            shell_program: proxy.as_ref().map(|proxy| proxy.shell.clone()).unwrap_or(shell),
+            audit_file_path: proxy.as_ref().and_then(|proxy| proxy.audit_file_path.clone()).or(audit_file_path),
             audit_rcfile_path,
-            audit_file_cursor: 0,
+            audit_offset_path: proxy.as_ref().and_then(|proxy| proxy.audit_file_path.as_ref().map(|path| path.with_extension("offset"))),
+            audit_file_cursor: persisted_audit_cursor,
+            audit_persisted_cursor: persisted_audit_cursor,
             audit_file_pending: Vec::new(),
+            cleanup_audit_files: proxy.is_none() && cleanup_audit_files,
+            remote_pid: proxy.as_ref().and_then(|proxy| proxy.pid),
         })
     }
 
@@ -272,11 +331,17 @@ trap '__operator_audit_capture' EXIT
 
     /// Return the live shell's actual cwd, including changes made with `cd`.
     pub fn current_working_directory(&self) -> PathBuf {
-        self.child
-            .process_id()
+        self.remote_pid.or_else(|| self.child.process_id())
             .and_then(|pid| fs::read_link(format!("/proc/{pid}/cwd")).ok())
             .or_else(|| env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// True when this ShellSession is only a local PTY bridge to a
+    /// daemon-owned shell. Its local PTY must stay in raw/no-echo mode because
+    /// the daemon-owned shell controls its own echo setting.
+    pub fn is_daemon_proxy(&self) -> bool {
+        self.remote_pid.is_some()
     }
 
     pub fn supports_command_audit(&self) -> bool {
@@ -313,6 +378,20 @@ trap '__operator_audit_capture' EXIT
             if !command.is_empty() {
                 commands.push(command);
             }
+        }
+
+        // Persist only through the last complete NUL-delimited record. If a
+        // command and its trailing NUL arrive in separate reads, a reconnect
+        // must re-read the incomplete tail instead of skipping it.
+        let committed_cursor = self.audit_file_cursor
+            .saturating_sub(self.audit_file_pending.len() as u64);
+        if committed_cursor > self.audit_persisted_cursor {
+            if let Some(offset_path) = self.audit_offset_path.as_ref() {
+                let temporary = offset_path.with_extension(format!("offset.tmp.{}", std::process::id()));
+                fs::write(&temporary, committed_cursor.to_string())?;
+                fs::rename(&temporary, offset_path)?;
+            }
+            self.audit_persisted_cursor = committed_cursor;
         }
         Ok(commands)
     }
@@ -355,7 +434,7 @@ trap '__operator_audit_capture' EXIT
         }
 
         let command_position = before_cursor[..token_start].trim().is_empty();
-        let cwd = self.child.process_id()
+        let cwd = self.remote_pid.or_else(|| self.child.process_id())
             .and_then(|pid| fs::read_link(format!("/proc/{pid}/cwd")).ok())
             .or_else(|| env::current_dir().ok());
 
@@ -396,7 +475,7 @@ trap '__operator_audit_capture' EXIT
                 let path = Path::new(&value);
                 let resolved = if path.is_absolute() {
                     path.to_path_buf()
-                } else if let Some(cwd) = self.child.process_id()
+                } else if let Some(cwd) = self.remote_pid.or_else(|| self.child.process_id())
                     .and_then(|pid| fs::read_link(format!("/proc/{pid}/cwd")).ok())
                 {
                     cwd.join(path)
@@ -642,11 +721,13 @@ impl Drop for ShellSession {
         if !self.exited {
             let _ = self.child.kill();
         }
-        if let Some(path) = self.audit_file_path.take() {
-            let _ = fs::remove_file(path);
-        }
-        if let Some(path) = self.audit_rcfile_path.take() {
-            let _ = fs::remove_file(path);
+        if self.cleanup_audit_files {
+            if let Some(path) = self.audit_file_path.take() {
+                let _ = fs::remove_file(path);
+            }
+            if let Some(path) = self.audit_rcfile_path.take() {
+                let _ = fs::remove_file(path);
+            }
         }
     }
 }

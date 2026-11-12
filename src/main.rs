@@ -7,6 +7,7 @@ mod conversations;
 mod hermes_bridge;
 mod hermes_review;
 mod shell;
+mod session_daemon;
 mod settings;
 mod storage;
 mod theme;
@@ -22,7 +23,7 @@ use std::{
 #[cfg(unix)]
 use std::os::{fd::AsRawFd, unix::fs::{OpenOptionsExt, PermissionsExt}};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
@@ -55,12 +56,136 @@ use storage::{EntryKind, Journal};
 #[derive(Debug, Parser)]
 #[command(name = "operator", version, about = "A live Debian shell transcript and unwrapped note stream")]
 struct Args {
+    #[command(subcommand)]
+    command: Option<OperatorCommand>,
     /// Legacy JSONL import/export path. Defaults to ~/.local/share/operator/journal.jsonl
     #[arg(short, long)]
     file: Option<PathBuf>,
     /// PostgreSQL connection URL. Also read from OPERATOR_DATABASE_URL.
     #[arg(long)]
     database_url: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum OperatorCommand {
+    /// Run the persistent per-user PTY session daemon in the foreground.
+    Daemon,
+    /// List sessions currently owned by the daemon.
+    Sessions,
+    /// Create, attach to, or terminate a persistent shell session.
+    Session {
+        #[command(subcommand)]
+        action: SessionCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionCommand {
+    /// Create a persistent interactive shell and attach to it.
+    Create,
+    /// Attach to a detached session by its ID.
+    Attach {
+        id: String,
+        /// Do not replay buffered terminal output when attaching.
+        #[arg(long)]
+        no_replay: bool,
+    },
+    /// Terminate a session and its shell process.
+    Terminate { id: String },
+}
+
+fn run_operator_command(command: OperatorCommand) -> io::Result<()> {
+    match command {
+        OperatorCommand::Daemon => session_daemon::run_daemon(),
+        OperatorCommand::Sessions => {
+            session_daemon::ensure_running()?;
+            let sessions = session_daemon::list_sessions()?;
+            if sessions.is_empty() {
+                println!("No persistent OPERATOR sessions.");
+            } else {
+                println!("{:<38} {:<18} {:<8} {:<7} {:<10} SHELL", "SESSION ID", "ROLE", "STATE", "PID", "AGE");
+                for session in sessions {
+                    let state = if session.exited {
+                        "EXITED"
+                    } else if session.attached {
+                        "ATTACHED"
+                    } else {
+                        "DETACHED"
+                    };
+                    let age_seconds = chrono::Utc::now().timestamp_millis()
+                        .saturating_sub(session.created_unix_ms.min(i64::MAX as u128) as i64)
+                        .max(0) / 1000;
+                    println!(
+                        "{:<38} {:<18} {:<8} {:<7} {:<10} {}",
+                        session.id,
+                        session.role,
+                        state,
+                        session.pid.map(|pid| pid.to_string()).unwrap_or_else(|| "-".to_string()),
+                        format!("{age_seconds}s"),
+                        session.shell,
+                    );
+                }
+            }
+            Ok(())
+        }
+        OperatorCommand::Session { action } => match action {
+            SessionCommand::Create => {
+                session_daemon::ensure_running()?;
+                let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                let session = session_daemon::create_session(
+                    cols,
+                    rows,
+                    true,
+                    session_origin_from_environment(),
+                )?;
+                eprintln!("Created persistent OPERATOR session {}. Press Ctrl+] to detach.", session.id);
+                session_daemon::attach_session(&session.id)
+            }
+            SessionCommand::Attach { id, no_replay } => {
+                session_daemon::attach_session_with_replay(&id, !no_replay)
+            },
+            SessionCommand::Terminate { id } => session_daemon::terminate_session(&id),
+        },
+    }
+}
+
+fn adopt_daemon_session_origin(
+    context: &mut OperatorSessionContext,
+    session: &session_daemon::SessionInfo,
+) {
+    // The daemon session ID remains stable across reconnects, while the SSH
+    // metadata in the current context remains that of the attaching connection.
+    // Commands typed after reconnect are therefore attributed to the client
+    // actually controlling the shell now, not the original session creator.
+    context.operator_session_id = session.id.clone();
+}
+
+fn session_origin_from_environment() -> std::collections::HashMap<String, String> {
+    [
+        "OPERATOR_SSH_USERNAME",
+        "OPERATOR_UNIX_UID",
+        "OPERATOR_SSH_CLIENT_IP",
+        "OPERATOR_SSH_CLIENT_PORT",
+        "OPERATOR_SSH_SERVER_IP",
+        "OPERATOR_SSH_SERVER_PORT",
+        "OPERATOR_SSH_TTY",
+        "OPERATOR_SSH_AUTH_METHOD",
+        "OPERATOR_SSH_KEY_FINGERPRINT",
+        "OPERATOR_SESSION_ID",
+        "STREENOTE_OPERATOR_SESSION_ID",
+        "OPERATOR_SHELL",
+        "OPERATOR_HERMES_REVIEW_SESSION_DIR",
+        "STREENOTE_HERMES_REVIEW_SESSION_DIR",
+        "OPERATOR_HERMES_REVIEW_SOCKET",
+        "STREENOTE_HERMES_REVIEW_SOCKET",
+        "TERM",
+        "COLORTERM",
+        "OPERATOR_HERMES_INBOX",
+        "STREENOTE_HERMES_INBOX",
+    ]
+    .into_iter()
+    .filter_map(|key| std::env::var(key).ok().map(|value| (key.to_string(), value)))
+    .collect()
 }
 
 struct TerminalGuard;
@@ -108,6 +233,10 @@ impl Drop for TerminalGuard {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     dispatch_ssh_invocation();
     let args = Args::parse();
+    if let Some(command) = args.command {
+        run_operator_command(command)?;
+        return Ok(());
+    }
     let journal_path = args.file.unwrap_or_else(default_journal_path);
     let database_url = args.database_url.or_else(|| std::env::var("OPERATOR_DATABASE_URL").ok());
     let (journal, startup_message) = if let Some(database_url) = database_url {
@@ -161,7 +290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let audit_context = OperatorSessionContext::from_environment(
+    let mut audit_context = OperatorSessionContext::from_environment(
         review_server.instance_id().map(str::to_string),
     );
     paths::set_compatible_env("OPERATOR_SESSION_ID", &audit_context.operator_session_id);
@@ -181,20 +310,81 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     set_optional_compatible_env("OPERATOR_SSH_KEY_FINGERPRINT", audit_context.ssh.key_fingerprint.as_deref());
 
     let shell_rows = size.height.saturating_sub(12).max(8);
-    let mut shell = match ShellSession::spawn(size.width, shell_rows) {
-        Ok(session) => Some(session),
-        Err(_error) => {
-            // Note-taking remains available even if the host has no usable shell.
-            None
+    let use_session_daemon = std::env::var_os("SSH_CONNECTION").is_some()
+        || std::env::var("OPERATOR_SESSION_DAEMON").is_ok_and(|value| value == "1");
+    let mut daemon_start_error = None;
+    let daemon_primary_session = if use_session_daemon {
+        match session_daemon::ensure_running().and_then(|()| {
+            session_daemon::get_or_create_session(
+                "primary",
+                size.width,
+                shell_rows,
+                false,
+                session_origin_from_environment(),
+            )
+        }) {
+            Ok(session) => {
+                adopt_daemon_session_origin(&mut audit_context, &session);
+                paths::set_compatible_env("OPERATOR_SHELL", &session.shell);
+                Some(session)
+            }
+            Err(error) => {
+                daemon_start_error = Some(error.to_string());
+                None
+            }
         }
+    } else {
+        None
+    };
+
+    // A resumed shell keeps its original SSH attribution and session ID. The
+    // current TUI still has its own reviewer-instance identity and inbox.
+    paths::set_compatible_env("OPERATOR_SESSION_ID", &audit_context.operator_session_id);
+    paths::set_compatible_env("STREENOTE_OPERATOR_SESSION_ID", &audit_context.operator_session_id);
+    set_optional_compatible_env("OPERATOR_INSTANCE_ID", audit_context.operator_instance_id.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_USERNAME", audit_context.ssh_username.as_deref());
+    let uid = audit_context.unix_uid.map(|value| value.to_string());
+    set_optional_compatible_env("OPERATOR_UNIX_UID", uid.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_CLIENT_IP", audit_context.ssh.client_ip.as_deref());
+    let client_port = audit_context.ssh.client_port.map(|value| value.to_string());
+    set_optional_compatible_env("OPERATOR_SSH_CLIENT_PORT", client_port.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_SERVER_IP", audit_context.ssh.server_ip.as_deref());
+    let server_port = audit_context.ssh.server_port.map(|value| value.to_string());
+    set_optional_compatible_env("OPERATOR_SSH_SERVER_PORT", server_port.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_TTY", audit_context.ssh.tty.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_AUTH_METHOD", audit_context.ssh.auth_method.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_KEY_FINGERPRINT", audit_context.ssh.key_fingerprint.as_deref());
+
+    let mut daemon_session_id = None;
+    let mut shell = if let Some(session) = daemon_primary_session.as_ref() {
+        match ShellSession::spawn_daemon_proxy(size.width, shell_rows, session, false) {
+            Ok(proxy) => {
+                daemon_session_id = Some(session.id.clone());
+                Some(proxy)
+            }
+            Err(error) => {
+                daemon_start_error = Some(format!("daemon session created but could not attach: {error}"));
+                ShellSession::spawn(size.width, shell_rows).ok()
+            }
+        }
+    } else {
+        ShellSession::spawn(size.width, shell_rows).ok()
     };
 
     let mut app = App::new(journal, startup_message);
+    if let Some(error) = daemon_start_error {
+        app.record_system(format!("Persistent session daemon unavailable; using a local shell for this login: {error}"));
+    }
     app.journal.set_operator_session_context(audit_context.clone());
     app.record_operator_session_event(
         EntryKind::OperatorSessionStart,
         format!(
-            "OPERATOR session started · {} · session {}",
+            "{} · {} · session {}",
+            if daemon_session_id.is_some() {
+                "OPERATOR client attached to persistent shell"
+            } else {
+                "OPERATOR session started"
+            },
             audit_context.connection_summary(),
             audit_context.operator_session_id
         ),
@@ -224,6 +414,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut shell,
         &mut hermes_bridge,
         &mut review_server,
+        daemon_session_id.clone(),
     );
     // Import any Hermes events queued before shutdown, then drain shell output.
     if let Err(error) = drain_shared_journal_updates(&mut app, &mut hermes_bridge) {
@@ -234,7 +425,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     app.record_operator_session_event(
         EntryKind::OperatorSessionEnd,
-        if result.is_ok() {
+        if daemon_session_id.is_some() {
+            "OPERATOR client detached; daemon-owned shell remains available".to_string()
+        } else if result.is_ok() {
             "OPERATOR session ended cleanly".to_string()
         } else {
             "OPERATOR session terminated with an application error".to_string()
@@ -1282,6 +1475,7 @@ fn run(
     shell: &mut Option<ShellSession>,
     hermes_bridge: &mut HermesBridge,
     review_server: &mut HermesReviewServer,
+    daemon_session_id: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     app.active_reviewer_count = review_server.active_reviewer_count();
     let mut last_reviewer_count_refresh = Instant::now();
@@ -1335,7 +1529,21 @@ fn run(
                     app.show_help = false;
                 } else if key.kind == KeyEventKind::Press && key.code == KeyCode::F(1) {
                     let size = terminal.size()?;
-                    match ShellSession::spawn_with_command_audit(size.width, size.height) {
+                    let workspace_result = if let Some(primary_id) = daemon_session_id.as_deref() {
+                        let role = format!("workspace:{primary_id}");
+                        session_daemon::get_or_create_session(
+                            &role,
+                            size.width,
+                            size.height,
+                            true,
+                            session_origin_from_environment(),
+                        ).and_then(|session| {
+                            ShellSession::spawn_daemon_proxy(size.width, size.height, &session, true)
+                        })
+                    } else {
+                        ShellSession::spawn_with_command_audit(size.width, size.height)
+                    };
+                    match workspace_result {
                         Ok(mut workspace_session) => {
                             app.record_operator_session_event(
                                 EntryKind::OperatorWorkspaceStart,
@@ -1359,8 +1567,9 @@ fn run(
                                 EntryKind::OperatorWorkspaceEnd,
                                 "Exited F1 interactive terminal workspace".to_string(),
                             );
-                            // Dropping this session closes only the workspace shell.
-                            // OPERATOR's primary transcript shell remains untouched.
+                            // With the daemon enabled, dropping this proxy detaches
+                            // the F1 shell while the daemon keeps it running. Local
+                            // fallback workspaces retain their original close behavior.
                             terminal.clear()?;
                         }
                         Err(error) => {
@@ -1457,7 +1666,9 @@ fn run_terminal_workspace(
     let mut out = stdout();
     let size = terminal.size()?;
     session.resize(size.width, size.height)?;
-    session.set_echo(true)?;
+    if !session.is_daemon_proxy() {
+        session.set_echo(true)?;
+    }
 
     // Stop Crossterm's enhanced-key parser from consuming terminal replies
     // while the child PTY owns input. The raw Unix pump below forwards every
