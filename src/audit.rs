@@ -22,8 +22,24 @@ pub struct SshConnectionInfo {
 
 impl SshConnectionInfo {
     pub fn from_environment() -> Self {
+        let auth_info = env::var_os("SSH_USER_AUTH")
+            .and_then(|path| fs::read_to_string(PathBuf::from(path)).ok());
+        Self::from_values(
+            env::var("SSH_CONNECTION").ok().as_deref(),
+            env::var("SSH_CLIENT").ok().as_deref(),
+            env::var("SSH_TTY").ok().as_deref(),
+            auth_info.as_deref(),
+        )
+    }
+
+    fn from_values(
+        ssh_connection: Option<&str>,
+        ssh_client: Option<&str>,
+        ssh_tty: Option<&str>,
+        auth_info: Option<&str>,
+    ) -> Self {
         let mut info = Self::default();
-        if let Some(raw) = env::var("SSH_CONNECTION").ok() {
+        if let Some(raw) = ssh_connection {
             let fields = raw.split_whitespace().collect::<Vec<_>>();
             if fields.len() == 4 {
                 info.client_ip = fields[0].parse::<IpAddr>().ok().map(|ip| ip.to_string());
@@ -32,11 +48,9 @@ impl SshConnectionInfo {
                 info.server_port = fields[3].parse::<u16>().ok();
             }
         }
-
-        // Compatibility fallback for older OpenSSH environments. SSH_CLIENT
-        // provides only the peer address/port and server-side details remain unknown.
+        // Compatibility fallback for older OpenSSH environments.
         if info.client_ip.is_none() {
-            if let Some(raw) = env::var("SSH_CLIENT").ok() {
+            if let Some(raw) = ssh_client {
                 let fields = raw.split_whitespace().collect::<Vec<_>>();
                 if fields.len() >= 2 {
                     info.client_ip = fields[0].parse::<IpAddr>().ok().map(|ip| ip.to_string());
@@ -44,25 +58,20 @@ impl SshConnectionInfo {
                 }
             }
         }
-
-        info.tty = env::var("SSH_TTY").ok().filter(|value| !value.trim().is_empty());
-        if let Some(path) = env::var_os("SSH_USER_AUTH").map(PathBuf::from) {
-            if let Ok(contents) = fs::read_to_string(path) {
-                for line in contents.lines() {
-                    let mut fields = line.split_whitespace();
-                    let Some(method) = fields.next() else { continue };
-                    if info.auth_method.is_none() {
-                        info.auth_method = Some(method.to_string());
-                    }
-                    // OpenSSH ExposeAuthInfo public-key lines include the
-                    // server-verified SHA256 fingerprint. Never retain key material.
-                    if let Some(fingerprint) = line.split_whitespace()
-                        .find(|field| field.starts_with("SHA256:"))
-                    {
-                        info.key_fingerprint = Some(fingerprint.to_string());
-                        info.auth_method = Some(method.to_string());
-                        break;
-                    }
+        info.tty = ssh_tty.map(str::trim).filter(|value| !value.is_empty()).map(str::to_string);
+        if let Some(contents) = auth_info {
+            for line in contents.lines() {
+                let mut fields = line.split_whitespace();
+                let Some(method) = fields.next() else { continue };
+                if info.auth_method.is_none() {
+                    info.auth_method = Some(method.to_string());
+                }
+                // OpenSSH ExposeAuthInfo public-key lines include the
+                // server-verified SHA256 fingerprint. Never retain key material.
+                if let Some(fingerprint) = line.split_whitespace().find(|field| field.starts_with("SHA256:")) {
+                    info.key_fingerprint = Some(fingerprint.to_string());
+                    info.auth_method = Some(method.to_string());
+                    break;
                 }
             }
         }
@@ -131,19 +140,43 @@ mod tests {
     use super::SshConnectionInfo;
 
     #[test]
-    fn parses_openssh_connection_tuple_and_rejects_invalid_addresses() {
-        let connection = "2001:db8::42 51234 2001:db8::1 22";
-        let fields = connection.split_whitespace().collect::<Vec<_>>();
-        assert_eq!(fields[0].parse::<std::net::IpAddr>().unwrap().to_string(), "2001:db8::42");
-        assert_eq!(fields[1].parse::<u16>().unwrap(), 51234);
-        assert_eq!(fields[2].parse::<std::net::IpAddr>().unwrap().to_string(), "2001:db8::1");
-        assert_eq!(fields[3].parse::<u16>().unwrap(), 22);
-        assert!("not-an-ip".parse::<std::net::IpAddr>().is_err());
+    fn parses_complete_openssh_connection_and_public_key_fingerprint() {
+        let info = SshConnectionInfo::from_values(
+            Some("2001:db8::42 51234 2001:db8::1 22"),
+            None,
+            Some("/dev/pts/7"),
+            Some("publickey ssh-ed25519 SHA256:abcdefghijklmnop"),
+        );
+        assert_eq!(info.client_ip.as_deref(), Some("2001:db8::42"));
+        assert_eq!(info.client_port, Some(51234));
+        assert_eq!(info.server_ip.as_deref(), Some("2001:db8::1"));
+        assert_eq!(info.server_port, Some(22));
+        assert_eq!(info.tty.as_deref(), Some("/dev/pts/7"));
+        assert_eq!(info.auth_method.as_deref(), Some("publickey"));
+        assert_eq!(info.key_fingerprint.as_deref(), Some("SHA256:abcdefghijklmnop"));
     }
 
     #[test]
-    fn empty_connection_info_is_local_and_safe() {
-        let info = SshConnectionInfo::default();
+    fn ssh_client_is_a_compatibility_fallback_and_invalid_values_are_ignored() {
+        let info = SshConnectionInfo::from_values(
+            Some("broken tuple"),
+            Some("192.0.2.12 443 22"),
+            None,
+            None,
+        );
+        assert_eq!(info.client_ip.as_deref(), Some("192.0.2.12"));
+        assert_eq!(info.client_port, Some(443));
+        assert!(info.server_ip.is_none());
+        assert!(info.server_port.is_none());
+
+        let invalid = SshConnectionInfo::from_values(Some("not-an-ip nope bad-ip nope"), None, None, None);
+        assert!(invalid.client_ip.is_none());
+        assert!(invalid.client_port.is_none());
+    }
+
+    #[test]
+    fn connectionless_launch_is_marked_local() {
+        let info = SshConnectionInfo::from_values(None, None, None, None);
         assert!(info.client_ip.is_none());
         assert!(info.client_port.is_none());
         assert!(info.server_ip.is_none());
