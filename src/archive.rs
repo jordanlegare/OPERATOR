@@ -5,11 +5,12 @@
 //! hits, so archive size does not determine the search result memory footprint.
 
 use std::{
-    fs::File,
-    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
+    fs::{self, File, OpenOptions},
+    io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
     thread,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::storage::{Entry, EntryKind};
@@ -139,6 +140,83 @@ impl ArchiveSearcher {
         }
         Ok(entry)
     }
+
+    /// Export the full records represented by the currently displayed local
+    /// archive-search page. The durable JSONL source is never modified.
+    pub fn export_hits(
+        &self,
+        destination: &Path,
+        query: &str,
+        mode: &str,
+        total: usize,
+        offset: usize,
+        hits: &[ArchiveSearchHit],
+    ) -> io::Result<()> {
+        if hits.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "there are no search results on the current page to export",
+            ));
+        }
+        if let Some(parent) = destination.parent().filter(|path| !path.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
+        }
+
+        let file_name = destination.file_name().and_then(|name| name.to_str()).unwrap_or("search-results.txt");
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temporary = destination.with_file_name(format!(
+            ".{file_name}.{}.{}.tmp",
+            std::process::id(),
+            nonce
+        ));
+
+        let result = (|| {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let file = options.open(&temporary)?;
+            let mut output = BufWriter::new(file);
+            writeln!(output, "OPERATOR search results")?;
+            writeln!(output, "Query: {query}")?;
+            writeln!(output, "Mode: {mode}")?;
+            writeln!(output, "Matches: {total}")?;
+            writeln!(output, "Exported page: {} record(s), offset {offset}", hits.len())?;
+
+            for (position, hit) in hits.iter().enumerate() {
+                let entry = self.read_hit(hit)?;
+                writeln!(
+                    output,
+                    "\n--- Result {} · {} · {} · JSONL line {} ---",
+                    offset.saturating_add(position).saturating_add(1),
+                    entry.timestamp,
+                    entry_kind_name(entry.kind),
+                    hit.line_number
+                )?;
+                output.write_all(entry.text.as_bytes())?;
+                if !entry.text.ends_with('\n') {
+                    output.write_all(b"\n")?;
+                }
+            }
+
+            output.flush()?;
+            let file = output.into_inner().map_err(|error| error.into_error())?;
+            file.sync_all()?;
+            fs::rename(&temporary, destination)?;
+            Ok(())
+        })();
+
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
 }
 
 fn search_file(path: &Path, request_id: u64, raw_query: &str) -> ArchiveSearchResult {
@@ -183,6 +261,9 @@ fn search_file(path: &Path, request_id: u64, raw_query: &str) -> ArchiveSearchRe
             return result;
         }
     };
+    // Normalize the query once before scanning. Stored text is normalized
+    // per record in collect_match, so both sides use the same case semantics.
+    let needle = needle.to_lowercase();
     let page_start = total.saturating_sub(offset.saturating_add(limit));
     let page_end = total.saturating_sub(offset);
     let (_, mut hits) = match scan_archive(path, archive_len, &needle, Some((page_start, page_end))) {
