@@ -166,6 +166,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(instance_id) = audit_context.operator_instance_id.as_deref() {
         paths::set_compatible_env("OPERATOR_INSTANCE_ID", instance_id);
     }
+    if let Some(value) = audit_context.ssh_username.as_deref() {
+        paths::set_compatible_env("OPERATOR_SSH_USERNAME", value);
+    }
+    if let Some(value) = audit_context.unix_uid {
+        paths::set_compatible_env("OPERATOR_UNIX_UID", value.to_string());
+    }
+    if let Some(value) = audit_context.ssh.client_ip.as_deref() {
+        paths::set_compatible_env("OPERATOR_SSH_CLIENT_IP", value);
+    }
+    if let Some(value) = audit_context.ssh.client_port {
+        paths::set_compatible_env("OPERATOR_SSH_CLIENT_PORT", value.to_string());
+    }
+    if let Some(value) = audit_context.ssh.server_ip.as_deref() {
+        paths::set_compatible_env("OPERATOR_SSH_SERVER_IP", value);
+    }
+    if let Some(value) = audit_context.ssh.server_port {
+        paths::set_compatible_env("OPERATOR_SSH_SERVER_PORT", value.to_string());
+    }
+    if let Some(value) = audit_context.ssh.tty.as_deref() {
+        paths::set_compatible_env("OPERATOR_SSH_TTY", value);
+    }
+    if let Some(value) = audit_context.ssh.auth_method.as_deref() {
+        paths::set_compatible_env("OPERATOR_SSH_AUTH_METHOD", value);
+    }
+    if let Some(value) = audit_context.ssh.key_fingerprint.as_deref() {
+        paths::set_compatible_env("OPERATOR_SSH_KEY_FINGERPRINT", value);
+    }
 
     let shell_rows = size.height.saturating_sub(12).max(8);
     let mut shell = match ShellSession::spawn(size.width, shell_rows) {
