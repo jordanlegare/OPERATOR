@@ -2510,6 +2510,7 @@ fn is_operator_command(line: &str) -> bool {
             | "/export"
             | "/export-search"
             | "/export-results"
+            | "/export-jsonl"
             | "/quit"
             | "/q"
     )
