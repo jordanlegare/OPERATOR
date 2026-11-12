@@ -26,6 +26,7 @@ pub struct ShellSession {
     reader_closed: bool,
     shell_program: PathBuf,
     audit_file_path: Option<PathBuf>,
+    audit_rcfile_path: Option<PathBuf>,
     audit_file_cursor: u64,
     audit_file_pending: Vec<u8>,
 }
@@ -88,6 +89,7 @@ impl ShellSession {
         let supports_bash_audit = shell.file_name()
             .is_some_and(|name| name.to_string_lossy().to_ascii_lowercase().contains("bash"));
         let audit_file_path = requested_audit_path.filter(|_| supports_bash_audit);
+        let audit_rcfile_path = audit_file_path.as_ref().map(|path| path.with_extension("bashrc"));
         if let Some(path) = audit_file_path.as_ref() {
             let mut options = OpenOptions::new();
             options.create_new(true).read(true).write(true);
@@ -97,6 +99,40 @@ impl ShellSession {
                 options.mode(0o600);
             }
             options.open(path)?;
+        }
+        if let (Some(command_path), Some(rcfile_path)) = (audit_file_path.as_ref(), audit_rcfile_path.as_ref()) {
+            let rc_source = r#"
+if [[ -r "$HOME/.bashrc" ]]; then
+  source "$HOME/.bashrc"
+elif [[ -r /etc/bash.bashrc ]]; then
+  source /etc/bash.bashrc
+fi
+__operator_audit_capture() {
+  local current line
+  current="${HISTCMD:-0}"
+  if [[ "$current" != "${__OPERATOR_AUDIT_LAST_HISTCMD:-}" ]]; then
+    line="$(fc -ln -1 2>/dev/null)"
+    line="${line#"${line%%[![:space:]]*}"}"
+    if [[ -n "$line" ]]; then
+      printf '%s\\0' "$line" >> "$OPERATOR_AUDIT_COMMAND_FILE"
+    fi
+    __OPERATOR_AUDIT_LAST_HISTCMD="$current"
+  fi
+}
+PROMPT_COMMAND="__operator_audit_capture${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+trap '__operator_audit_capture' EXIT
+"#;
+            let mut options = OpenOptions::new();
+            options.create_new(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut rcfile = options.open(rcfile_path)?;
+            rcfile.write_all(rc_source.as_bytes())?;
+            rcfile.sync_all()?;
+            let _ = command_path;
         }
         let mut command = CommandBuilder::new(&shell);
         // Keep PostgreSQL credentials in the OPERATOR process only; do not
@@ -123,17 +159,9 @@ impl ShellSession {
         command.env("SHELL", &shell);
         if let Some(path) = audit_file_path.as_ref() {
             command.env("OPERATOR_AUDIT_COMMAND_FILE", path);
-            command.env("PROMPT_COMMAND", r#"__operator_audit_capture() {
-  local line
-  line="$(fc -ln -1 2>/dev/null)"
-  line="${line#"${line%%[![:space:]]*}"}"
-  if [[ -n "$line" && "$line" != "${__OPERATOR_AUDIT_LAST:-}" ]]; then
-    printf '%s\0' "$line" >> "$OPERATOR_AUDIT_COMMAND_FILE"
-    __OPERATOR_AUDIT_LAST="$line"
-  fi
-}
-PROMPT_COMMAND=__operator_audit_capture
-trap __operator_audit_capture EXIT"#);
+            if let Some(rcfile) = audit_rcfile_path.as_ref() {
+                command.arg("--rcfile").arg(rcfile);
+            }
         }
 
         // Start the configured interactive shell normally so Debian's shell
@@ -147,6 +175,9 @@ trap __operator_audit_capture EXIT"#);
             Ok(child) => child,
             Err(error) => {
                 if let Some(path) = audit_file_path.as_ref() {
+                    let _ = fs::remove_file(path);
+                }
+                if let Some(path) = audit_rcfile_path.as_ref() {
                     let _ = fs::remove_file(path);
                 }
                 return Err(io::Error::other(error.to_string()));
@@ -196,6 +227,7 @@ trap __operator_audit_capture EXIT"#);
             reader_closed: false,
             shell_program: shell,
             audit_file_path,
+            audit_rcfile_path,
             audit_file_cursor: 0,
             audit_file_pending: Vec::new(),
         })
@@ -579,6 +611,9 @@ impl Drop for ShellSession {
             let _ = self.child.kill();
         }
         if let Some(path) = self.audit_file_path.take() {
+            let _ = fs::remove_file(path);
+        }
+        if let Some(path) = self.audit_rcfile_path.take() {
             let _ = fs::remove_file(path);
         }
     }
