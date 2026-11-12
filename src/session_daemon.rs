@@ -92,6 +92,7 @@ mod unix_impl {
         history: VecDeque<u8>,
         clients: HashMap<u64, Sender<OutputPacket>>,
         controller: Option<u64>,
+        detached_unix_ms: Option<u128>,
         exited: bool,
     }
 
@@ -176,6 +177,7 @@ mod unix_impl {
             }
             let replay = if replay_enabled { output.history.iter().copied().collect() } else { Vec::new() };
             output.controller = Some(client_id);
+            output.detached_unix_ms = None;
             output.clients.insert(client_id, sender);
             Ok((client_id, replay, receiver))
         }
@@ -185,6 +187,10 @@ mod unix_impl {
             output.clients.remove(&client_id);
             if output.controller == Some(client_id) {
                 output.controller = None;
+                output.detached_unix_ms = Some(
+                    SystemTime::now().duration_since(UNIX_EPOCH)
+                        .unwrap_or_default().as_millis(),
+                );
             }
         }
 
@@ -378,9 +384,13 @@ mod unix_impl {
                     .filter(|session| {
                         let output = session.output.lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        output.controller.is_none()
+                        output.controller.is_none() && output.detached_unix_ms.is_some()
                     })
-                    .max_by_key(|session| session.created_unix_ms)
+                    .max_by_key(|session| {
+                        let output = session.output.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        output.detached_unix_ms.unwrap_or(session.created_unix_ms)
+                    })
                     .cloned()
             };
             if let Some(session) = existing {
