@@ -146,6 +146,41 @@ fn run_operator_command(command: OperatorCommand) -> io::Result<()> {
     }
 }
 
+fn adopt_daemon_session_origin(
+    context: &mut OperatorSessionContext,
+    session: &session_daemon::SessionInfo,
+) {
+    context.operator_session_id = session.id.clone();
+    let origin = &session.origin;
+    if let Some(value) = origin.get("OPERATOR_SSH_USERNAME") {
+        context.ssh_username = Some(value.clone());
+    }
+    if let Some(value) = origin.get("OPERATOR_UNIX_UID").and_then(|value| value.parse().ok()) {
+        context.unix_uid = Some(value);
+    }
+    if let Some(value) = origin.get("OPERATOR_SSH_CLIENT_IP") {
+        context.ssh.client_ip = Some(value.clone());
+    }
+    if let Some(value) = origin.get("OPERATOR_SSH_CLIENT_PORT").and_then(|value| value.parse().ok()) {
+        context.ssh.client_port = Some(value);
+    }
+    if let Some(value) = origin.get("OPERATOR_SSH_SERVER_IP") {
+        context.ssh.server_ip = Some(value.clone());
+    }
+    if let Some(value) = origin.get("OPERATOR_SSH_SERVER_PORT").and_then(|value| value.parse().ok()) {
+        context.ssh.server_port = Some(value);
+    }
+    if let Some(value) = origin.get("OPERATOR_SSH_TTY") {
+        context.ssh.tty = Some(value.clone());
+    }
+    if let Some(value) = origin.get("OPERATOR_SSH_AUTH_METHOD") {
+        context.ssh.auth_method = Some(value.clone());
+    }
+    if let Some(value) = origin.get("OPERATOR_SSH_KEY_FINGERPRINT") {
+        context.ssh.key_fingerprint = Some(value.clone());
+    }
+}
+
 fn session_origin_from_environment() -> std::collections::HashMap<String, String> {
     [
         "OPERATOR_SSH_USERNAME",
@@ -157,6 +192,8 @@ fn session_origin_from_environment() -> std::collections::HashMap<String, String
         "OPERATOR_SSH_TTY",
         "OPERATOR_SSH_AUTH_METHOD",
         "OPERATOR_SSH_KEY_FINGERPRINT",
+        "OPERATOR_SESSION_ID",
+        "STREENOTE_OPERATOR_SESSION_ID",
         "OPERATOR_HERMES_REVIEW_SESSION_DIR",
         "OPERATOR_HERMES_INBOX",
         "STREENOTE_HERMES_INBOX",
@@ -268,7 +305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let audit_context = OperatorSessionContext::from_environment(
+    let mut audit_context = OperatorSessionContext::from_environment(
         review_server.instance_id().map(str::to_string),
     );
     paths::set_compatible_env("OPERATOR_SESSION_ID", &audit_context.operator_session_id);
@@ -288,15 +325,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     set_optional_compatible_env("OPERATOR_SSH_KEY_FINGERPRINT", audit_context.ssh.key_fingerprint.as_deref());
 
     let shell_rows = size.height.saturating_sub(12).max(8);
-    let mut shell = match ShellSession::spawn(size.width, shell_rows) {
-        Ok(session) => Some(session),
-        Err(_error) => {
-            // Note-taking remains available even if the host has no usable shell.
-            None
+    let use_session_daemon = std::env::var_os("SSH_CONNECTION").is_some()
+        || std::env::var("OPERATOR_SESSION_DAEMON").is_ok_and(|value| value == "1");
+    let mut daemon_start_error = None;
+    let daemon_primary_session = if use_session_daemon {
+        match session_daemon::ensure_running().and_then(|()| {
+            session_daemon::get_or_create_session(
+                "primary",
+                size.width,
+                shell_rows,
+                false,
+                session_origin_from_environment(),
+            )
+        }) {
+            Ok(session) => {
+                adopt_daemon_session_origin(&mut audit_context, &session);
+                Some(session)
+            }
+            Err(error) => {
+                daemon_start_error = Some(error.to_string());
+                None
+            }
         }
+    } else {
+        None
+    };
+
+    // A resumed shell keeps its original SSH attribution and session ID. The
+    // current TUI still has its own reviewer-instance identity and inbox.
+    paths::set_compatible_env("OPERATOR_SESSION_ID", &audit_context.operator_session_id);
+    paths::set_compatible_env("STREENOTE_OPERATOR_SESSION_ID", &audit_context.operator_session_id);
+    set_optional_compatible_env("OPERATOR_INSTANCE_ID", audit_context.operator_instance_id.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_USERNAME", audit_context.ssh_username.as_deref());
+    let uid = audit_context.unix_uid.map(|value| value.to_string());
+    set_optional_compatible_env("OPERATOR_UNIX_UID", uid.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_CLIENT_IP", audit_context.ssh.client_ip.as_deref());
+    let client_port = audit_context.ssh.client_port.map(|value| value.to_string());
+    set_optional_compatible_env("OPERATOR_SSH_CLIENT_PORT", client_port.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_SERVER_IP", audit_context.ssh.server_ip.as_deref());
+    let server_port = audit_context.ssh.server_port.map(|value| value.to_string());
+    set_optional_compatible_env("OPERATOR_SSH_SERVER_PORT", server_port.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_TTY", audit_context.ssh.tty.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_AUTH_METHOD", audit_context.ssh.auth_method.as_deref());
+    set_optional_compatible_env("OPERATOR_SSH_KEY_FINGERPRINT", audit_context.ssh.key_fingerprint.as_deref());
+
+    let mut daemon_session_id = None;
+    let mut shell = if let Some(session) = daemon_primary_session.as_ref() {
+        match ShellSession::spawn_daemon_proxy(size.width, shell_rows, session, false) {
+            Ok(proxy) => {
+                daemon_session_id = Some(session.id.clone());
+                Some(proxy)
+            }
+            Err(error) => {
+                daemon_start_error = Some(format!("daemon session created but could not attach: {error}"));
+                ShellSession::spawn(size.width, shell_rows).ok()
+            }
+        }
+    } else {
+        ShellSession::spawn(size.width, shell_rows).ok()
     };
 
     let mut app = App::new(journal, startup_message);
+    if let Some(error) = daemon_start_error {
+        app.record_system(format!("Persistent session daemon unavailable; using a local shell for this login: {error}"));
+    }
     app.journal.set_operator_session_context(audit_context.clone());
     app.record_operator_session_event(
         EntryKind::OperatorSessionStart,
@@ -331,6 +423,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut shell,
         &mut hermes_bridge,
         &mut review_server,
+        daemon_session_id.clone(),
     );
     // Import any Hermes events queued before shutdown, then drain shell output.
     if let Err(error) = drain_shared_journal_updates(&mut app, &mut hermes_bridge) {
@@ -1389,6 +1482,7 @@ fn run(
     shell: &mut Option<ShellSession>,
     hermes_bridge: &mut HermesBridge,
     review_server: &mut HermesReviewServer,
+    daemon_session_id: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     app.active_reviewer_count = review_server.active_reviewer_count();
     let mut last_reviewer_count_refresh = Instant::now();
