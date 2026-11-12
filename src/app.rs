@@ -1230,6 +1230,11 @@ impl App {
                     EntryKind::HermesHistory => "PRIOR CONTEXT",
                     EntryKind::HermesInterim => "INTERIM MESSAGE",
                     EntryKind::HermesSession => "SESSION EVENT",
+                    EntryKind::OperatorSessionStart => "OPERATOR SESSION START",
+                    EntryKind::OperatorSessionHeartbeat => "OPERATOR SESSION HEARTBEAT",
+                    EntryKind::OperatorSessionEnd => "OPERATOR SESSION END",
+                    EntryKind::OperatorWorkspaceStart => "F1 WORKSPACE START",
+                    EntryKind::OperatorWorkspaceEnd => "F1 WORKSPACE END",
                     _ => "HERMES",
                 };
                 (label, entry.text.as_str())
