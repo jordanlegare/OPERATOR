@@ -45,6 +45,30 @@ struct InboxEvent {
     tool_call_id: Option<String>,
     #[serde(default)]
     iteration: Option<u32>,
+    #[serde(default)]
+    operator_session_id: Option<String>,
+    #[serde(default)]
+    operator_instance_id: Option<String>,
+    #[serde(default)]
+    ssh_username: Option<String>,
+    #[serde(default)]
+    unix_uid: Option<u32>,
+    #[serde(default)]
+    ssh_client_ip: Option<String>,
+    #[serde(default)]
+    ssh_client_port: Option<u16>,
+    #[serde(default)]
+    ssh_server_ip: Option<String>,
+    #[serde(default)]
+    ssh_server_port: Option<u16>,
+    #[serde(default)]
+    ssh_tty: Option<String>,
+    #[serde(default)]
+    ssh_auth_method: Option<String>,
+    #[serde(default)]
+    ssh_key_fingerprint: Option<String>,
+    #[serde(default)]
+    operator_surface: Option<String>,
 }
 
 impl Default for HermesBridge {
@@ -128,7 +152,7 @@ impl HermesBridge {
             } else {
                 Local::now().to_rfc3339_opts(SecondsFormat::Secs, false)
             };
-            let entry = Entry::with_external_event(
+            let mut entry = Entry::with_external_event(
                 event.kind,
                 event.text,
                 timestamp,
@@ -140,6 +164,20 @@ impl HermesBridge {
                 event.tool_call_id.filter(|id| !id.is_empty() && id.len() <= 256),
                 event.iteration,
             );
+            // Inbox fan-out copies retain the original originating login, not
+            // the reviewer instance that happened to import this copy.
+            entry.operator_session_id = event.operator_session_id.filter(|id| !id.is_empty() && id.len() <= 128);
+            entry.operator_instance_id = event.operator_instance_id.filter(|id| !id.is_empty() && id.len() <= 64);
+            entry.ssh_username = event.ssh_username.filter(|value| !value.is_empty() && value.len() <= 256);
+            entry.unix_uid = event.unix_uid;
+            entry.ssh_client_ip = event.ssh_client_ip.and_then(|value| value.parse::<std::net::IpAddr>().ok()).map(|ip| ip.to_string());
+            entry.ssh_client_port = event.ssh_client_port;
+            entry.ssh_server_ip = event.ssh_server_ip.and_then(|value| value.parse::<std::net::IpAddr>().ok()).map(|ip| ip.to_string());
+            entry.ssh_server_port = event.ssh_server_port;
+            entry.ssh_tty = event.ssh_tty.filter(|value| !value.is_empty() && value.len() <= 256);
+            entry.ssh_auth_method = event.ssh_auth_method.filter(|value| !value.is_empty() && value.len() <= 64);
+            entry.ssh_key_fingerprint = event.ssh_key_fingerprint.filter(|value| !value.is_empty() && value.len() <= 256);
+            entry.operator_surface = event.operator_surface.filter(|value| matches!(value.as_str(), "hermes" | "transcript" | "f1_workspace"));
 
             // If the journal cannot flush this entry, leave the inbox file in
             // place. A later poll retries it; event IDs prevent duplicate rows.
