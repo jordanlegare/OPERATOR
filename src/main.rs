@@ -349,6 +349,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }) {
             Ok(session) => {
                 adopt_daemon_session_origin(&mut audit_context, &session);
+                paths::set_compatible_env("OPERATOR_SHELL", &session.shell);
                 Some(session)
             }
             Err(error) => {
