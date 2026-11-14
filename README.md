@@ -1,6 +1,8 @@
 # OPERATOR
 
 A Rust terminal workspace combining a live **Debian shell**, a persistent command/output transcript, and a fast append-only note stream. Built with **Ratatui**, **Crossterm**, and **portable-pty**.
+![Transcript view](transcript.png)
+![F1 with hermes](F1_Hermes.png)
 
 ### Bidirectional clipboard over SSH
 
