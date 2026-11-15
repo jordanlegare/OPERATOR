@@ -63,6 +63,7 @@ pub enum ConversationView {
 struct ConversationCache {
     entry_count: usize,
     total_text_bytes: usize,
+    conversation_generation: u64,
     threads: Vec<ConversationThread>,
     /// Main transcript rows: ordinary journal records plus Hermes user prompts.
     transcript_indices: Vec<usize>,
@@ -73,6 +74,7 @@ impl Default for ConversationCache {
         Self {
             entry_count: usize::MAX,
             total_text_bytes: usize::MAX,
+            conversation_generation: u64::MAX,
             threads: Vec::new(),
             transcript_indices: Vec::new(),
         }
@@ -347,6 +349,13 @@ impl App {
         self.conversation_cache.borrow().transcript_indices.clone()
     }
 
+    /// Copy only the requested viewport instead of cloning every visible row.
+    pub fn visible_transcript_window(&self, start: usize, count: usize) -> Vec<usize> {
+        self.refresh_conversation_cache();
+        let cache = self.conversation_cache.borrow();
+        cache.transcript_indices.iter().skip(start).take(count).copied().collect()
+    }
+
     pub fn visible_transcript_count(&self) -> usize {
         self.refresh_conversation_cache();
         self.conversation_cache.borrow().transcript_indices.len()
@@ -355,23 +364,33 @@ impl App {
     fn refresh_conversation_cache(&self) {
         let entry_count = self.journal.entries.len();
         let total_text_bytes = self.journal.total_text_bytes;
+        let conversation_generation = self.journal.conversation_generation();
         let mut cache = self.conversation_cache.borrow_mut();
-        if cache.entry_count != entry_count || cache.total_text_bytes != total_text_bytes {
+
+        let invalidated_by_prune = cache.entry_count > entry_count;
+        let conversations_changed = cache.conversation_generation != conversation_generation;
+        if invalidated_by_prune || conversations_changed || cache.entry_count == usize::MAX {
             cache.threads = build_threads(&self.journal.entries);
-            cache.transcript_indices = self
-                .journal
-                .entries
-                .iter()
-                .enumerate()
+            cache.transcript_indices = self.journal.entries.iter().enumerate()
                 .filter_map(|(index, entry)| {
                     ((!is_hermes_event(entry.kind) || entry.kind == EntryKind::HermesUser)
-                && entry.kind != EntryKind::OperatorSessionHeartbeat)
-                        .then_some(index)
+                        && entry.kind != EntryKind::OperatorSessionHeartbeat).then_some(index)
                 })
                 .collect();
-            cache.entry_count = entry_count;
-            cache.total_text_bytes = total_text_bytes;
+        } else if cache.entry_count < entry_count {
+            // Ordinary shell output updates the transcript projection without
+            // rebuilding Hermes conversation threads from the complete journal.
+            for (index, entry) in self.journal.entries.iter().enumerate().skip(cache.entry_count) {
+                if (!is_hermes_event(entry.kind) || entry.kind == EntryKind::HermesUser)
+                    && entry.kind != EntryKind::OperatorSessionHeartbeat {
+                    cache.transcript_indices.push(index);
+                }
+            }
         }
+
+        cache.entry_count = entry_count;
+        cache.total_text_bytes = total_text_bytes;
+        cache.conversation_generation = conversation_generation;
     }
 
     /// True when the highlighted row is the latest visible transcript record

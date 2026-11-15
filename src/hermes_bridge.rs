@@ -108,6 +108,8 @@ impl HermesBridge {
         paths.sort();
 
         let mut imported = 0usize;
+        let mut batch_entries = Vec::new();
+        let mut imported_paths = Vec::new();
         for path in paths.into_iter().take(MAX_EVENTS_PER_POLL) {
             let metadata = fs::metadata(&path)?;
             if metadata.len() > MAX_EVENT_BYTES {
@@ -181,11 +183,17 @@ impl HermesBridge {
 
             // If the journal cannot flush this entry, leave the inbox file in
             // place. A later poll retries it; event IDs prevent duplicate rows.
-            journal.append(entry)?;
-            fs::remove_file(&path)?;
+            batch_entries.push(entry);
+            imported_paths.push(path);
             imported += 1;
         }
 
+        if !batch_entries.is_empty() {
+            journal.append_batch(batch_entries)?;
+            for path in imported_paths {
+                fs::remove_file(&path)?;
+            }
+        }
         Ok(imported)
     }
 }

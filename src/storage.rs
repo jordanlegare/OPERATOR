@@ -202,6 +202,7 @@ pub struct Journal {
     pub path: PathBuf,
     pub entries: Vec<Entry>,
     pub total_text_bytes: usize,
+    conversation_generation: u64,
     pub skipped_corrupt_lines: usize,
     pending: Vec<Entry>,
     /// Event IDs already durably present in the journal.
@@ -370,6 +371,7 @@ impl Journal {
             path,
             entries,
             total_text_bytes,
+            conversation_generation: 0,
             skipped_corrupt_lines,
             pending: Vec::new(),
             cached_event_ids: persisted_event_ids.clone(),
@@ -401,6 +403,7 @@ impl Journal {
             path,
             entries: Vec::new(),
             total_text_bytes: 0,
+            conversation_generation: 0,
             skipped_corrupt_lines: 0,
             pending: Vec::new(),
             persisted_event_ids: HashSet::new(),
@@ -736,11 +739,25 @@ impl Journal {
         }
     }
 
+    pub fn conversation_generation(&self) -> u64 {
+        self.conversation_generation
+    }
+
     fn push_entry_to_memory(&mut self, entry: Entry) {
         if !is_hot_entry(&entry) {
             return;
         }
+        let is_conversation_event = matches!(
+            entry.kind,
+            EntryKind::HermesUser | EntryKind::HermesAssistant | EntryKind::HermesToolCall
+                | EntryKind::HermesToolResult | EntryKind::HermesStreamStart
+                | EntryKind::HermesStreamDelta | EntryKind::HermesStreamEnd
+                | EntryKind::HermesHistory | EntryKind::HermesInterim | EntryKind::HermesSession
+        );
         self.total_text_bytes = self.total_text_bytes.saturating_add(entry.text.len());
+        if is_conversation_event {
+            self.conversation_generation = self.conversation_generation.wrapping_add(1);
+        }
         if let Some(previous) = self.entries.last_mut().filter(|previous| {
             can_merge_stream_delta(previous, &entry)
         }) {
@@ -916,10 +933,18 @@ impl Journal {
         if self.postgres.is_some() {
             let refresh_error = self.refresh_external_entries().err();
             let mut accepted = Vec::with_capacity(entries.len());
+            let mut seen_records = HashSet::new();
+            let mut seen_events = HashSet::new();
             for mut entry in entries {
                 entry.ensure_record_id();
-                if entry.record_id.as_ref().is_some_and(|id| self.cached_record_ids.contains(id))
-                    || entry.event_id.as_ref().is_some_and(|id| self.cached_event_ids.contains(id))
+                if entry.record_id.as_ref().is_some_and(|id| self.pending_record_ids.contains(id))
+                    || entry.event_id.as_ref().is_some_and(|id| self.pending_event_ids.contains(id)) {
+                    return Err(io::Error::new(io::ErrorKind::WouldBlock, "batch contains an identity awaiting durable retry"));
+                }
+                let record_id = entry.record_id.as_deref();
+                let event_id = entry.event_id.as_deref();
+                if record_id.is_some_and(|id| self.cached_record_ids.contains(id) || !seen_records.insert(id.to_string()))
+                    || event_id.is_some_and(|id| self.cached_event_ids.contains(id) || !seen_events.insert(id.to_string()))
                 {
                     continue;
                 }
@@ -963,6 +988,36 @@ impl Journal {
 
         let _journal_lock = JournalFileLock::acquire(&self.path)?;
         self.refresh_external_entries_locked()?;
+
+        let mut unique_entries = Vec::with_capacity(entries.len());
+        let mut seen_records = HashSet::new();
+        let mut seen_events = HashSet::new();
+        for entry in entries {
+            let hot = is_hot_entry(&entry);
+            if entry.event_id.as_deref().is_some_and(|id| self.pending_event_ids.contains(id))
+                || entry.record_id.as_deref().is_some_and(|id| self.pending_record_ids.contains(id)) {
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, "batch contains an identity awaiting durable retry"));
+            }
+            if let Some(event_id) = entry.event_id.as_deref() {
+                if self.cached_event_ids.contains(event_id)
+                    || !seen_events.insert(event_id.to_string())
+                    || (!hot && !self.persisted_event_ids.contains(event_id)
+                        && archive_contains_event_id(&self.path, event_id)?) {
+                    continue;
+                }
+            }
+            if let Some(record_id) = entry.record_id.as_deref() {
+                if self.cached_record_ids.contains(record_id)
+                    || !seen_records.insert(record_id.to_string())
+                    || (!hot && !self.persisted_record_ids.contains(record_id)
+                        && archive_contains_record_id(&self.path, record_id)?) {
+                    continue;
+                }
+            }
+            unique_entries.push(entry);
+        }
+        let entries = unique_entries;
+        if entries.is_empty() { return Ok(()); }
 
         for entry in &entries {
             let hot = is_hot_entry(entry);

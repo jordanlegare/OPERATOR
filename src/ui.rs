@@ -992,18 +992,16 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
         return;
     }
 
+    let visible_count = app.visible_transcript_count();
     let title = format!(
         " TRANSCRIPT  ·  {} ROWS  ·  30-DAY WINDOW  ·  {}  ·  SEARCHABLE ",
-        app.visible_transcript_count(),
+        visible_count,
         if app.wrap_transcript { "WORD WRAP" } else { "UNWRAPPED" }
     );
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
-        .title(Span::styled(
-            title,
-            Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
-        ))
+        .title(Span::styled(title, Style::default().fg(theme.primary).add_modifier(Modifier::BOLD)))
         .style(Style::default().bg(theme.panel));
     let inner = block.inner(area);
     app.feed_area = inner;
@@ -1011,46 +1009,36 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     frame.render_widget(block, area);
 
     let top = app.current_top();
-    let visible_indices = app.visible_transcript_indices();
-    let visible: Vec<Line> = visible_indices
-        .iter()
-        .skip(top)
-        .filter_map(|index| {
-            app.journal
-                .entries
-                .get(*index)
-                .map(|entry| entry_line(entry, *index, app, theme))
-        })
-        .collect();
+    // Fixed-height rows can be virtualized. Wrapped rows retain the complete
+    // suffix because their visual heights depend on the current terminal width.
+    let render_count = if app.wrap_transcript {
+        visible_count.saturating_sub(top)
+    } else {
+        inner.height.max(1) as usize
+    };
+    let visible_indices = app.visible_transcript_window(top, render_count);
+    let visible: Vec<Line> = visible_indices.iter().filter_map(|index| {
+        app.journal.entries.get(*index).map(|entry| entry_line(entry, *index, app, theme))
+    }).collect();
 
     let lines = if visible.is_empty() {
         vec![Line::from(vec![
             Span::styled("  No terminal output yet. ", Style::default().fg(theme.muted)),
-            Span::styled(
-                "Run a Debian command below, or Ctrl+T to capture notes.",
-                Style::default().fg(theme.text),
-            ),
+            Span::styled("Run a Debian command below, or Ctrl+T to capture notes.", Style::default().fg(theme.text)),
         ])]
-    } else {
-        visible
-    };
+    } else { visible };
 
     let paragraph = Paragraph::new(lines);
     if app.wrap_transcript {
-        let visual_rows: usize = visible_indices
-            .iter()
-            .skip(top)
+        let visual_rows: usize = visible_indices.iter()
             .filter_map(|index| app.journal.entries.get(*index))
             .map(|entry| {
                 let width = UnicodeWidthStr::width(entry_transcript_text(entry, 0).as_str());
                 width.max(1).div_ceil(inner.width.max(1) as usize)
-            })
-            .sum();
+            }).sum();
         let vertical_scroll = if app.follow_tail {
             visual_rows.saturating_sub(inner.height as usize)
-        } else {
-            0
-        };
+        } else { 0 };
         frame.render_widget(
             paragraph.wrap(Wrap { trim: false }).scroll((vertical_scroll.min(u16::MAX as usize) as u16, 0)),
             inner,
@@ -1058,9 +1046,6 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     } else {
         frame.render_widget(paragraph.scroll((0, app.feed_hscroll)), inner);
     }
-
-    // Paint the watermark only into unused cells, so transcript text, selections,
-    // and wide-character continuation cells always remain untouched.
 
     if app.show_canada_watermark {
         draw_maple_watermark(frame, inner, theme);

@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fmt,
     fs::{self, OpenOptions},
     io::{self, BufRead, BufReader, BufWriter, Write},
@@ -393,7 +393,7 @@ async fn initialize_database(
                 };
                 entry.text = sanitize_entry_text(entry.kind, &entry.text);
                 entry.ensure_record_id();
-                if insert_entry(&mut transaction, &entry)
+                if insert_entry(&mut transaction, &entry, true)
                     .await
                     .map_err(|error| format!("import JSONL record: {error}"))?
                     .is_some()
@@ -435,6 +435,7 @@ async fn acquire_writer_lock(
 async fn insert_entry(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     entry: &Entry,
+    index_document: bool,
 ) -> Result<Option<i64>, sqlx::Error> {
     let record_id = entry.record_id.as_deref().unwrap_or_default();
     let payload = serde_json::to_string(entry).map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
@@ -488,8 +489,58 @@ async fn insert_entry(
         return Ok(None);
     };
     let entry_id: i64 = row.try_get("id")?;
-    upsert_search_document(&mut **transaction, entry, record_id, entry_id, occurred_at).await?;
+    if index_document {
+        upsert_search_document(&mut **transaction, entry, record_id, entry_id, occurred_at).await?;
+    }
     Ok(Some(entry_id))
+}
+
+/// Apply search-document mutations after the journal rows have been inserted.
+/// Consecutive deltas from one Hermes stream are joined before updating generated
+/// tsvector and GIN indexes, reducing write amplification during streaming.
+async fn upsert_batch_search_documents(
+    connection: &mut PgConnection,
+    documents: &[(Entry, i64, DateTime<Utc>)],
+) -> Result<(), sqlx::Error> {
+    let mut pending_delta: Option<(Entry, i64, DateTime<Utc>)> = None;
+    for (entry, entry_id, occurred_at) in documents {
+        if entry.kind == EntryKind::HermesStreamDelta {
+            let can_merge = pending_delta.as_ref().is_some_and(|(previous, _, _)| {
+                previous.conversation_id == entry.conversation_id
+                    && previous.turn_id == entry.turn_id
+                    && previous.iteration == entry.iteration
+                    && previous.operator_session_id == entry.operator_session_id
+            });
+            if can_merge {
+                if let Some((previous, previous_id, previous_time)) = pending_delta.as_mut() {
+                    previous.text.push_str(&entry.text);
+                    previous.record_id = entry.record_id.clone();
+                    *previous_id = *entry_id;
+                    *previous_time = occurred_at.clone();
+                }
+                continue;
+            }
+            if let Some((previous, previous_id, previous_time)) = pending_delta.take() {
+                let record_id = previous.record_id.as_deref().unwrap_or_default();
+                upsert_search_document(connection, &previous, record_id, previous_id, previous_time).await?;
+            }
+            pending_delta = Some((entry.clone(), *entry_id, occurred_at.clone()));
+            continue;
+        }
+
+        if let Some((previous, previous_id, previous_time)) = pending_delta.take() {
+            let record_id = previous.record_id.as_deref().unwrap_or_default();
+            upsert_search_document(connection, &previous, record_id, previous_id, previous_time).await?;
+        }
+        let record_id = entry.record_id.as_deref().unwrap_or_default();
+        upsert_search_document(connection, entry, record_id, *entry_id, occurred_at.clone()).await?;
+    }
+
+    if let Some((previous, previous_id, previous_time)) = pending_delta {
+        let record_id = previous.record_id.as_deref().unwrap_or_default();
+        upsert_search_document(connection, &previous, record_id, previous_id, previous_time).await?;
+    }
+    Ok(())
 }
 
 async fn upsert_search_document(
@@ -1071,7 +1122,7 @@ async fn persist_one(
     // Read all earlier committed rows while holding the writer lock, before a
     // new ID can move this instance's cursor past a concurrent commit.
     fetch_new_entries_locked(&mut transaction, last_seen_id, updates).await?;
-    if let Some(id) = insert_entry(&mut transaction, entry)
+    if let Some(id) = insert_entry(&mut transaction, entry, true)
         .await
         .map_err(|error| format!("write journal entry: {error}"))?
     {
@@ -1108,15 +1159,26 @@ async fn persist_batch(
     fetch_new_entries_locked(&mut transaction, last_seen_id, updates).await?;
     let mut newest_id = *last_seen_id;
     let mut inserted = 0usize;
+    let mut index_documents = Vec::with_capacity(entries.len());
 
     for entry in entries {
-        if let Some(id) = insert_entry(&mut transaction, entry)
+        if let Some(id) = insert_entry(&mut transaction, entry, false)
             .await
             .map_err(|error| format!("write journal batch: {error}"))?
         {
             newest_id = newest_id.max(id);
             inserted += 1;
+            let occurred_at = DateTime::parse_from_rfc3339(&entry.timestamp)
+                .map(|value| value.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            index_documents.push((entry.clone(), id, occurred_at));
         }
+    }
+
+    if !index_documents.is_empty() {
+        upsert_batch_search_documents(&mut *transaction, &index_documents)
+            .await
+            .map_err(|error| format!("update batched journal search documents: {error}"))?;
     }
 
     if inserted > 0 {
@@ -1325,7 +1387,10 @@ async fn export_search_results_from_database(
             .map_err(|error| error.to_string())?;
 
         // Bound database result materialization to small batches while retaining
-        // the ordering selected by the search page.
+        // the ordering selected by the search page. Keep O(1) position lookup.
+        let result_positions: HashMap<&str, usize> = record_ids.iter().enumerate()
+            .map(|(position, record_id)| (record_id.as_str(), position))
+            .collect();
         for chunk in record_ids.chunks(32) {
             let rows = sqlx::query(
                 r#"SELECT e.record_id, e.payload::text AS payload,
@@ -1345,7 +1410,7 @@ async fn export_search_results_from_database(
             .await
             .map_err(|error| format!("fetch PostgreSQL search-result records: {error}"))?;
 
-            let mut decoded = Vec::with_capacity(rows.len());
+            let mut decoded = HashMap::with_capacity(rows.len());
             for row in rows {
                 let record_id: String = row.try_get("record_id")
                     .map_err(|error| format!("read exported record ID: {error}"))?;
@@ -1369,19 +1434,17 @@ async fn export_search_results_from_database(
                     entry.timestamp = timestamp.to_rfc3339();
                 }
                 entry.text = sanitize_entry_text(entry.kind, &entry.text);
-                decoded.push((record_id, entry));
+                decoded.insert(record_id, entry);
             }
 
             for record_id in chunk {
-                let Some((_, entry)) = decoded.iter().find(|(id, _)| id == record_id) else {
+                let Some(entry) = decoded.get(record_id) else {
                     return Err(format!("search result record {record_id} no longer exists"));
                 };
                 writeln!(
                     output,
                     "\n--- Result {} · {} · {} ---",
-                    offset.saturating_add(
-                        record_ids.iter().position(|id| id == record_id).unwrap_or(0)
-                    ).saturating_add(1),
+                    offset.saturating_add(result_positions.get(record_id.as_str()).copied().unwrap_or(0)).saturating_add(1),
                     entry.timestamp,
                     entry_kind_name(entry.kind)
                 ).map_err(|error| error.to_string())?;
