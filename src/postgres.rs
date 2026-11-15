@@ -591,11 +591,11 @@ async fn upsert_batch_search_documents(
                     && previous.operator_session_id == entry.operator_session_id
             });
             if can_merge {
-                if let Some((previous, previous_id, previous_time)) = pending_delta.as_mut() {
+                if let Some((previous, _, _)) = pending_delta.as_mut() {
+                    // Keep the first delta's stable record ID and entry ID.
+                    // The logical search document represents the complete stream,
+                    // but opening it must still resolve through its first journal row.
                     previous.text.push_str(&entry.text);
-                    previous.record_id = entry.record_id.clone();
-                    *previous_id = *entry_id;
-                    *previous_time = occurred_at.clone();
                 }
                 continue;
             }
