@@ -19,6 +19,7 @@ use crate::{
 };
 
 const MAX_EVENT_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_BATCH_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_EVENTS_PER_POLL: usize = 64;
 
 #[derive(Debug)]
@@ -110,11 +111,24 @@ impl HermesBridge {
         let mut imported = 0usize;
         let mut batch_entries = Vec::new();
         let mut imported_paths = Vec::new();
+        let mut batch_bytes = 0u64;
         for path in paths.into_iter().take(MAX_EVENTS_PER_POLL) {
             let metadata = fs::metadata(&path)?;
             if metadata.len() > MAX_EVENT_BYTES {
                 quarantine(&path, &failed)?;
                 continue;
+            }
+
+            // Bound memory for history snapshots and other large hook events.
+            // Files in each completed batch are removed only after persistence.
+            if !batch_entries.is_empty()
+                && batch_bytes.saturating_add(metadata.len()) > MAX_BATCH_BYTES
+            {
+                journal.append_batch(std::mem::take(&mut batch_entries))?;
+                for imported_path in std::mem::take(&mut imported_paths) {
+                    fs::remove_file(&imported_path)?;
+                }
+                batch_bytes = 0;
             }
 
             let bytes = fs::read(&path)?;
@@ -183,6 +197,7 @@ impl HermesBridge {
 
             // If the journal cannot flush this entry, leave the inbox file in
             // place. A later poll retries it; event IDs prevent duplicate rows.
+            batch_bytes = batch_bytes.saturating_add(metadata.len());
             batch_entries.push(entry);
             imported_paths.push(path);
             imported += 1;

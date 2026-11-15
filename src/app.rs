@@ -2552,7 +2552,13 @@ impl App {
     }
 
     pub fn is_match(&self, entry_index: usize) -> bool {
-        self.match_lookup.contains(&entry_index)
+        // The matches vector remains publicly writable for compatibility. If a
+        // caller replaces it directly, fall back until the app refreshes the lookup.
+        if self.match_lookup.len() == self.matches.len() {
+            self.match_lookup.contains(&entry_index)
+        } else {
+            self.matches.contains(&entry_index)
+        }
     }
 
     pub fn is_active_match(&self, entry_index: usize) -> bool {
