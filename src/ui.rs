@@ -1072,6 +1072,13 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
     frame.render_widget(block, area);
 
     let mut lines = Vec::new();
+    // Search pages are bounded by the result viewport. Rebuild only enough
+    // result rows to cover the screen rather than formatting every hit on each
+    // terminal refresh. A repeated session heading at the top of a scrolled
+    // audit page is intentional and keeps the context self-contained.
+    let first_result = app.search_scroll.min(app.search_hits.len());
+    let result_count = app.feed_viewport_height.saturating_add(1);
+    let last_result = first_result.saturating_add(result_count).min(app.search_hits.len());
     let mut previous_audit_session: Option<String> = None;
     if let Some(error) = app.search_error.as_deref() {
         lines.push(Line::from(Span::styled(
@@ -1089,7 +1096,7 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
             Style::default().fg(theme.muted),
         )));
     } else {
-        for (position, hit) in app.search_hits.iter().enumerate() {
+        for (position, hit) in app.search_hits.iter().enumerate().take(last_result).skip(first_result) {
             if let Some(session_id) = hit.operator_session_id.as_deref() {
                 if previous_audit_session.as_deref() != Some(session_id) {
                     let username = hit.ssh_username.as_deref().unwrap_or("unknown");
@@ -1151,8 +1158,24 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
             } else {
                 "  UNATTRIBUTED / LEGACY".to_string()
             };
-            let preview = hit.snippet.split_whitespace().collect::<Vec<_>>().join(" ");
-            let preview = preview.chars().take(320).collect::<String>();
+            let mut preview = String::with_capacity(320);
+            let mut pending_space = false;
+            let mut preview_chars = 0usize;
+            for character in hit.snippet.chars() {
+                if character.is_whitespace() {
+                    pending_space = !preview.is_empty();
+                    continue;
+                }
+                if pending_space {
+                    if preview_chars >= 320 { break; }
+                    preview.push(' ');
+                    preview_chars += 1;
+                    pending_space = false;
+                }
+                if preview_chars >= 320 { break; }
+                preview.push(character);
+                preview_chars += 1;
+            }
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("{} {:>5}  ", if selected { "▶" } else { " " }, app.search_page_offset + position + 1),
@@ -1185,7 +1208,7 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
     frame.render_widget(
         Paragraph::new(lines)
             .style(Style::default().fg(theme.text).bg(theme.panel))
-            .scroll(((app.search_scroll.saturating_mul(2)).min(u16::MAX as usize) as u16, app.feed_hscroll)),
+            .scroll((0, app.feed_hscroll)),
         inner,
     );
 }
