@@ -494,6 +494,9 @@ impl Journal {
         let before = self.entries.len();
         self.entries.retain(|entry| is_hot_entry_at(entry, cutoff));
         let removed = before.saturating_sub(self.entries.len());
+        if removed > 0 {
+            self.conversation_generation = self.conversation_generation.wrapping_add(1);
+        }
         let events_before = self.hot_event_timestamps.len();
         let records_before = self.hot_record_timestamps.len();
         self.hot_event_timestamps.retain(|_, timestamp| *timestamp >= cutoff);

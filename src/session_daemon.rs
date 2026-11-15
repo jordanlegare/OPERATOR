@@ -142,9 +142,9 @@ mod unix_impl {
                 Ok(Some(_)) => {
                     let mut output = self.output.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     output.exited = true;
-                    for sender in output.clients.values() {
-                        let _ = sender.send(OutputPacket::Exit);
-                    }
+                    output.clients.retain(|_, sender| {
+                        sender.try_send(OutputPacket::Exit).is_ok()
+                    });
                     true
                 }
                 _ => false,

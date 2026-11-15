@@ -16,7 +16,7 @@ use std::{
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};
 use sqlx::{
     postgres::{PgConnection, PgListener, PgPool, PgPoolOptions},
-    Row,
+    QueryBuilder, Row,
 };
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -498,6 +498,85 @@ async fn insert_entry(
 /// Apply search-document mutations after the journal rows have been inserted.
 /// Consecutive deltas from one Hermes stream are joined before updating generated
 /// tsvector and GIN indexes, reducing write amplification during streaming.
+async fn insert_entries_batch(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entries: &[Entry],
+) -> Result<Vec<(Entry, i64, DateTime<Utc>)>, sqlx::Error> {
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let payloads: Vec<String> = entries.iter().map(|entry| {
+        serde_json::to_string(entry)
+            .map_err(|error| sqlx::Error::Protocol(error.to_string()))
+    }).collect::<Result<_, _>>()?;
+    let occurred_at: Vec<DateTime<Utc>> = entries.iter().map(|entry| {
+        DateTime::parse_from_rfc3339(&entry.timestamp)
+            .map(|value| value.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now())
+    }).collect();
+
+    let mut query = QueryBuilder::<sqlx::Postgres>::new(
+        "INSERT INTO operator_journal_entries \
+         (record_id, event_id, occurred_at, kind, body, conversation_id, \
+          session_id, related_session_id, turn_id, tool_call_id, iteration, payload, \
+          operator_session_id, operator_instance_id, ssh_username, unix_uid, \
+          ssh_client_ip, ssh_client_port, ssh_server_ip, ssh_server_port, ssh_tty, \
+          ssh_auth_method, ssh_key_fingerprint, operator_surface) VALUES "
+    );
+
+    for (index, entry) in entries.iter().enumerate() {
+        if index > 0 {
+            query.push(",");
+        }
+        let iteration = entry.iteration.map(|value| i32::try_from(value).unwrap_or(i32::MAX));
+        let uid = entry.unix_uid.map(i64::from);
+        query.push("(")
+            .push_bind(entry.record_id.as_deref().unwrap_or_default()).push(",")
+            .push_bind(entry.event_id.as_deref()).push(",")
+            .push_bind(occurred_at[index].clone()).push(",")
+            .push_bind(entry_kind_name(entry.kind)).push(",")
+            .push_bind(entry.text.as_str()).push(",")
+            .push_bind(entry.conversation_id.as_deref()).push(",")
+            .push_bind(entry.session_id.as_deref()).push(",")
+            .push_bind(entry.related_session_id.as_deref()).push(",")
+            .push_bind(entry.turn_id.as_deref()).push(",")
+            .push_bind(entry.tool_call_id.as_deref()).push(",")
+            .push_bind(iteration).push(",")
+            .push_bind(payloads[index].as_str()).push("::jsonb,")
+            .push_bind(entry.operator_session_id.as_deref()).push(",")
+            .push_bind(entry.operator_instance_id.as_deref()).push(",")
+            .push_bind(entry.ssh_username.as_deref()).push(",")
+            .push_bind(uid).push(",")
+            .push_bind(entry.ssh_client_ip.as_deref()).push(",")
+            .push_bind(entry.ssh_client_port.map(i32::from)).push(",")
+            .push_bind(entry.ssh_server_ip.as_deref()).push(",")
+            .push_bind(entry.ssh_server_port.map(i32::from)).push(",")
+            .push_bind(entry.ssh_tty.as_deref()).push(",")
+            .push_bind(entry.ssh_auth_method.as_deref()).push(",")
+            .push_bind(entry.ssh_key_fingerprint.as_deref()).push(",")
+            .push_bind(entry.operator_surface.as_deref())
+            .push(")");
+    }
+
+    query.push(" ON CONFLICT DO NOTHING RETURNING id, record_id");
+    let rows = query.build().fetch_all(&mut **transaction).await?;
+    let mut inserted_ids = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let id: i64 = row.try_get("id")?;
+        let record_id: String = row.try_get("record_id")?;
+        inserted_ids.insert(record_id, id);
+    }
+
+    let mut documents = Vec::with_capacity(inserted_ids.len());
+    for (entry, occurred_at) in entries.iter().zip(occurred_at) {
+        if let Some(id) = inserted_ids.get(entry.record_id.as_deref().unwrap_or_default()) {
+            documents.push((entry.clone(), *id, occurred_at));
+        }
+    }
+    Ok(documents)
+}
+
 async fn upsert_batch_search_documents(
     connection: &mut PgConnection,
     documents: &[(Entry, i64, DateTime<Utc>)],
@@ -1157,23 +1236,11 @@ async fn persist_batch(
         .await
         .map_err(|error| format!("lock journal batch: {error}"))?;
     fetch_new_entries_locked(&mut transaction, last_seen_id, updates).await?;
-    let mut newest_id = *last_seen_id;
-    let mut inserted = 0usize;
-    let mut index_documents = Vec::with_capacity(entries.len());
-
-    for entry in entries {
-        if let Some(id) = insert_entry(&mut transaction, entry, false)
-            .await
-            .map_err(|error| format!("write journal batch: {error}"))?
-        {
-            newest_id = newest_id.max(id);
-            inserted += 1;
-            let occurred_at = DateTime::parse_from_rfc3339(&entry.timestamp)
-                .map(|value| value.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-            index_documents.push((entry.clone(), id, occurred_at));
-        }
-    }
+    let index_documents = insert_entries_batch(&mut transaction, entries)
+        .await
+        .map_err(|error| format!("write journal batch: {error}"))?;
+    let inserted = index_documents.len();
+    let newest_id = index_documents.iter().map(|(_, id, _)| *id).max().unwrap_or(*last_seen_id);
 
     if !index_documents.is_empty() {
         upsert_batch_search_documents(&mut *transaction, &index_documents)
