@@ -1018,18 +1018,34 @@ async fn search_records(pool: &PgPool, raw_query: &str, request_id: u64) -> Sear
 
     let query = &spec.query;
     let pattern = like_pattern(query);
-    let common_filters = r#"
-        AND ($3::text IS NULL OR d.kind = $3)
-        AND ($4::text IS NULL OR (e.session_id = $4 OR e.related_session_id = $4))
-        AND ($5::text IS NULL OR e.conversation_id = $5)
-        AND ($6::timestamptz IS NULL OR d.occurred_at >= $6)
-        AND ($7::timestamptz IS NULL OR d.occurred_at < $7)
-        AND ($8::text IS NULL OR e.operator_session_id = $8)
-        AND ($9::text IS NULL OR e.ssh_client_ip = $9)
-        AND ($10::text IS NULL OR e.ssh_username = $10)
-        AND ($11::bigint IS NULL OR e.unix_uid = $11)
-        AND ($12::text IS NULL OR e.ssh_key_fingerprint = $12)
-        AND (d.kind <> 'operator_session_heartbeat' OR $3::text = 'operator_session_heartbeat')
+    // Emit only active predicates so PostgreSQL can use selective indexes
+    // instead of planning a chain of "parameter IS NULL OR ..." expressions.
+    // The typed CTE preserves the stable bind positions used below; PostgreSQL
+    // can eliminate this unreferenced CTE after parameter types are resolved.
+    let mut common_filters = String::new();
+    if spec.kind.is_some() { common_filters.push_str(" AND d.kind = $3"); }
+    if spec.session.is_some() {
+        common_filters.push_str(" AND (e.session_id = $4 OR e.related_session_id = $4)");
+    }
+    if spec.conversation.is_some() { common_filters.push_str(" AND e.conversation_id = $5"); }
+    if spec.after.is_some() { common_filters.push_str(" AND d.occurred_at >= $6"); }
+    if spec.before.is_some() { common_filters.push_str(" AND d.occurred_at < $7"); }
+    if spec.operator_session.is_some() { common_filters.push_str(" AND e.operator_session_id = $8"); }
+    if spec.client_ip.is_some() { common_filters.push_str(" AND e.ssh_client_ip = $9"); }
+    if spec.ssh_user.is_some() { common_filters.push_str(" AND e.ssh_username = $10"); }
+    if spec.unix_uid.is_some() { common_filters.push_str(" AND e.unix_uid = $11"); }
+    if spec.ssh_key_fingerprint.is_some() { common_filters.push_str(" AND e.ssh_key_fingerprint = $12"); }
+    if spec.kind.as_deref() != Some("operator_session_heartbeat") {
+        common_filters.push_str(" AND d.kind <> 'operator_session_heartbeat'");
+    }
+    let typed_filter_params = r#"
+        search_params AS (
+            SELECT $3::text AS kind, $4::text AS session,
+                   $5::text AS conversation, $6::timestamptz AS after_time,
+                   $7::timestamptz AS before_time, $8::text AS operator_session,
+                   $9::text AS client_ip, $10::text AS ssh_user,
+                   $11::bigint AS unix_uid, $12::text AS ssh_key_fingerprint
+        )
     "#;
     let grouped_order = if spec.operator_session.is_some() || spec.client_ip.is_some()
         || spec.ssh_user.is_some() || spec.unix_uid.is_some() || spec.ssh_key_fingerprint.is_some()
@@ -1077,7 +1093,8 @@ async fn search_records(pool: &PgPool, raw_query: &str, request_id: u64) -> Sear
         ),
     };
     let sql = format!(
-        r#"SELECT d.record_id, d.kind, d.occurred_at,
+        r#"WITH {typed_filter_params}
+           SELECT d.record_id, d.kind, d.occurred_at,
                   ({rank_expr})::real AS rank, {snippet_expr} AS snippet,
                   e.operator_session_id, e.operator_instance_id, e.ssh_username,
                   e.unix_uid, e.ssh_client_ip AS ssh_client_ip, e.operator_surface,
@@ -1088,7 +1105,8 @@ async fn search_records(pool: &PgPool, raw_query: &str, request_id: u64) -> Sear
            ORDER BY {order} LIMIT $13 OFFSET $14"#
     );
     let count_sql = format!(
-        "SELECT COUNT(*)::bigint FROM operator_journal_search_documents d
+        "WITH {typed_filter_params}
+         SELECT COUNT(*)::bigint FROM operator_journal_search_documents d
          JOIN operator_journal_entries e ON e.id = d.entry_id
          WHERE ({predicate}) {common_filters}"
     );
