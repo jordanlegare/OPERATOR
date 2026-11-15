@@ -992,18 +992,16 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
         return;
     }
 
+    let visible_count = app.visible_transcript_count();
     let title = format!(
         " TRANSCRIPT  ·  {} ROWS  ·  30-DAY WINDOW  ·  {}  ·  SEARCHABLE ",
-        app.visible_transcript_count(),
+        visible_count,
         if app.wrap_transcript { "WORD WRAP" } else { "UNWRAPPED" }
     );
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
-        .title(Span::styled(
-            title,
-            Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
-        ))
+        .title(Span::styled(title, Style::default().fg(theme.primary).add_modifier(Modifier::BOLD)))
         .style(Style::default().bg(theme.panel));
     let inner = block.inner(area);
     app.feed_area = inner;
@@ -1011,46 +1009,62 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     frame.render_widget(block, area);
 
     let top = app.current_top();
-    let visible_indices = app.visible_transcript_indices();
-    let visible: Vec<Line> = visible_indices
-        .iter()
-        .skip(top)
-        .filter_map(|index| {
-            app.journal
-                .entries
-                .get(*index)
-                .map(|entry| entry_line(entry, *index, app, theme))
-        })
-        .collect();
+    let indices = app.visible_transcript_index_slice();
+    let viewport_lines = inner.height.max(1) as usize;
+    let mut visible_indices = Vec::with_capacity(viewport_lines.saturating_add(2));
+
+    if app.wrap_transcript && app.follow_tail {
+        // Work backward from the live tail until enough wrapped display rows
+        // have been found to cover the viewport.
+        let mut visual_rows = 0usize;
+        for index in indices.iter().rev().copied() {
+            let Some(entry) = app.journal.entries.get(index) else { continue; };
+            let width = UnicodeWidthStr::width(entry_transcript_text(entry, index).as_str());
+            let rows = width.max(1).div_ceil(inner.width.max(1) as usize);
+            visual_rows = visual_rows.saturating_add(rows);
+            visible_indices.push(index);
+            if visual_rows >= viewport_lines { break; }
+        }
+        visible_indices.reverse();
+    } else if app.wrap_transcript {
+        // When scrolled away from LIVE, start at the selected journal row and
+        // walk forward only until the visible wrapped height is covered.
+        let mut visual_rows = 0usize;
+        for index in indices.iter().skip(top).copied() {
+            let Some(entry) = app.journal.entries.get(index) else { continue; };
+            let width = UnicodeWidthStr::width(entry_transcript_text(entry, index).as_str());
+            let rows = width.max(1).div_ceil(inner.width.max(1) as usize);
+            visual_rows = visual_rows.saturating_add(rows);
+            visible_indices.push(index);
+            if visual_rows >= viewport_lines { break; }
+        }
+    } else {
+        visible_indices.extend(indices.iter().skip(top).take(viewport_lines).copied());
+    }
+    drop(indices);
+
+    let visible: Vec<Line> = visible_indices.iter().filter_map(|index| {
+        app.journal.entries.get(*index).map(|entry| entry_line(entry, *index, app, theme))
+    }).collect();
 
     let lines = if visible.is_empty() {
         vec![Line::from(vec![
             Span::styled("  No terminal output yet. ", Style::default().fg(theme.muted)),
-            Span::styled(
-                "Run a Debian command below, or Ctrl+T to capture notes.",
-                Style::default().fg(theme.text),
-            ),
+            Span::styled("Run a Debian command below, or Ctrl+T to capture notes.", Style::default().fg(theme.text)),
         ])]
-    } else {
-        visible
-    };
+    } else { visible };
 
     let paragraph = Paragraph::new(lines);
     if app.wrap_transcript {
-        let visual_rows: usize = visible_indices
-            .iter()
-            .skip(top)
+        let visual_rows: usize = visible_indices.iter()
             .filter_map(|index| app.journal.entries.get(*index))
             .map(|entry| {
                 let width = UnicodeWidthStr::width(entry_transcript_text(entry, 0).as_str());
                 width.max(1).div_ceil(inner.width.max(1) as usize)
-            })
-            .sum();
+            }).sum();
         let vertical_scroll = if app.follow_tail {
             visual_rows.saturating_sub(inner.height as usize)
-        } else {
-            0
-        };
+        } else { 0 };
         frame.render_widget(
             paragraph.wrap(Wrap { trim: false }).scroll((vertical_scroll.min(u16::MAX as usize) as u16, 0)),
             inner,
@@ -1058,9 +1072,6 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     } else {
         frame.render_widget(paragraph.scroll((0, app.feed_hscroll)), inner);
     }
-
-    // Paint the watermark only into unused cells, so transcript text, selections,
-    // and wide-character continuation cells always remain untouched.
 
     if app.show_canada_watermark {
         draw_maple_watermark(frame, inner, theme);
@@ -1087,6 +1098,13 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
     frame.render_widget(block, area);
 
     let mut lines = Vec::new();
+    // Search pages are bounded by the result viewport. Rebuild only enough
+    // result rows to cover the screen rather than formatting every hit on each
+    // terminal refresh. A repeated session heading at the top of a scrolled
+    // audit page is intentional and keeps the context self-contained.
+    let first_result = app.search_scroll.min(app.search_hits.len());
+    let result_count = app.feed_viewport_height.saturating_add(1);
+    let last_result = first_result.saturating_add(result_count).min(app.search_hits.len());
     let mut previous_audit_session: Option<String> = None;
     if let Some(error) = app.search_error.as_deref() {
         lines.push(Line::from(Span::styled(
@@ -1104,7 +1122,7 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
             Style::default().fg(theme.muted),
         )));
     } else {
-        for (position, hit) in app.search_hits.iter().enumerate() {
+        for (position, hit) in app.search_hits.iter().enumerate().take(last_result).skip(first_result) {
             if let Some(session_id) = hit.operator_session_id.as_deref() {
                 if previous_audit_session.as_deref() != Some(session_id) {
                     let username = hit.ssh_username.as_deref().unwrap_or("unknown");
@@ -1166,8 +1184,24 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
             } else {
                 "  UNATTRIBUTED / LEGACY".to_string()
             };
-            let preview = hit.snippet.split_whitespace().collect::<Vec<_>>().join(" ");
-            let preview = preview.chars().take(320).collect::<String>();
+            let mut preview = String::with_capacity(320);
+            let mut pending_space = false;
+            let mut preview_chars = 0usize;
+            for character in hit.snippet.chars() {
+                if character.is_whitespace() {
+                    pending_space = !preview.is_empty();
+                    continue;
+                }
+                if pending_space {
+                    if preview_chars >= 320 { break; }
+                    preview.push(' ');
+                    preview_chars += 1;
+                    pending_space = false;
+                }
+                if preview_chars >= 320 { break; }
+                preview.push(character);
+                preview_chars += 1;
+            }
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("{} {:>5}  ", if selected { "▶" } else { " " }, app.search_page_offset + position + 1),
@@ -1200,7 +1234,7 @@ fn draw_search_results_feed(frame: &mut Frame, area: Rect, app: &mut App, theme:
     frame.render_widget(
         Paragraph::new(lines)
             .style(Style::default().fg(theme.text).bg(theme.panel))
-            .scroll(((app.search_scroll.saturating_mul(2)).min(u16::MAX as usize) as u16, app.feed_hscroll)),
+            .scroll((0, app.feed_hscroll)),
         inner,
     );
 }

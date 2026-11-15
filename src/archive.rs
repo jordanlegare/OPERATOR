@@ -55,6 +55,7 @@ struct SearchRequest {
 #[derive(Debug, Clone, Default)]
 struct ArchiveSearchSpec {
     needle: String,
+    needle_lower: String,
     offset: usize,
     limit: usize,
     kind: Option<String>,
@@ -98,11 +99,12 @@ impl ArchiveSearcher {
         thread::Builder::new()
             .name("operator-archive-search".to_string())
             .spawn(move || {
-                while let Ok(request) = request_rx.recv() {
-                    let result = search_file(&worker_path, request.request_id, &request.query);
-                    if result_tx.send(result).is_err() {
-                        break;
+                while let Ok(mut request) = request_rx.recv() {
+                    while let Ok(newer) = request_rx.try_recv() {
+                        request = newer;
                     }
+                    let result = search_file(&worker_path, request.request_id, &request.query);
+                    if result_tx.send(result).is_err() { break; }
                 }
             })?;
 
@@ -414,7 +416,7 @@ fn collect_match(
         return;
     }
     if !spec.matches(&entry)
-        || (!spec.needle.is_empty() && !entry.text.to_lowercase().contains(&spec.needle.to_lowercase()))
+        || (!spec.needle_lower.is_empty() && !entry.text.to_lowercase().contains(&spec.needle_lower))
     {
         return;
     }
@@ -482,6 +484,7 @@ fn parse_query(raw_query: &str) -> Result<ArchiveSearchSpec, String> {
         }
     }
     spec.needle = terms.join(" ").trim_matches('"').trim_matches('\'').to_string();
+    spec.needle_lower = spec.needle.to_lowercase();
     if spec.needle.is_empty() && !spec.has_audit_filter() {
         return Err("enter search terms or an audit filter such as ip:203.0.113.42".to_string());
     }

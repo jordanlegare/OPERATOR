@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fmt,
     fs::{self, OpenOptions},
     io::{self, BufRead, BufReader, BufWriter, Write},
@@ -16,7 +16,7 @@ use std::{
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};
 use sqlx::{
     postgres::{PgConnection, PgListener, PgPool, PgPoolOptions},
-    Row,
+    QueryBuilder, Row,
 };
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -393,7 +393,7 @@ async fn initialize_database(
                 };
                 entry.text = sanitize_entry_text(entry.kind, &entry.text);
                 entry.ensure_record_id();
-                if insert_entry(&mut transaction, &entry)
+                if insert_entry(&mut transaction, &entry, true)
                     .await
                     .map_err(|error| format!("import JSONL record: {error}"))?
                     .is_some()
@@ -435,6 +435,7 @@ async fn acquire_writer_lock(
 async fn insert_entry(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     entry: &Entry,
+    index_document: bool,
 ) -> Result<Option<i64>, sqlx::Error> {
     let record_id = entry.record_id.as_deref().unwrap_or_default();
     let payload = serde_json::to_string(entry).map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
@@ -488,8 +489,137 @@ async fn insert_entry(
         return Ok(None);
     };
     let entry_id: i64 = row.try_get("id")?;
-    upsert_search_document(&mut **transaction, entry, record_id, entry_id, occurred_at).await?;
+    if index_document {
+        upsert_search_document(&mut **transaction, entry, record_id, entry_id, occurred_at).await?;
+    }
     Ok(Some(entry_id))
+}
+
+/// Apply search-document mutations after the journal rows have been inserted.
+/// Consecutive deltas from one Hermes stream are joined before updating generated
+/// tsvector and GIN indexes, reducing write amplification during streaming.
+async fn insert_entries_batch(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entries: &[Entry],
+) -> Result<Vec<(Entry, i64, DateTime<Utc>)>, sqlx::Error> {
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let payloads: Vec<String> = entries.iter().map(|entry| {
+        serde_json::to_string(entry)
+            .map_err(|error| sqlx::Error::Protocol(error.to_string()))
+    }).collect::<Result<_, _>>()?;
+    let occurred_at: Vec<DateTime<Utc>> = entries.iter().map(|entry| {
+        DateTime::parse_from_rfc3339(&entry.timestamp)
+            .map(|value| value.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now())
+    }).collect();
+
+    let mut query = QueryBuilder::<sqlx::Postgres>::new(
+        "INSERT INTO operator_journal_entries \
+         (record_id, event_id, occurred_at, kind, body, conversation_id, \
+          session_id, related_session_id, turn_id, tool_call_id, iteration, payload, \
+          operator_session_id, operator_instance_id, ssh_username, unix_uid, \
+          ssh_client_ip, ssh_client_port, ssh_server_ip, ssh_server_port, ssh_tty, \
+          ssh_auth_method, ssh_key_fingerprint, operator_surface) VALUES "
+    );
+
+    for (index, entry) in entries.iter().enumerate() {
+        if index > 0 {
+            query.push(",");
+        }
+        let iteration = entry.iteration.map(|value| i32::try_from(value).unwrap_or(i32::MAX));
+        let uid = entry.unix_uid.map(i64::from);
+        query.push("(")
+            .push_bind(entry.record_id.as_deref().unwrap_or_default()).push(",")
+            .push_bind(entry.event_id.as_deref()).push(",")
+            .push_bind(occurred_at[index].clone()).push(",")
+            .push_bind(entry_kind_name(entry.kind)).push(",")
+            .push_bind(entry.text.as_str()).push(",")
+            .push_bind(entry.conversation_id.as_deref()).push(",")
+            .push_bind(entry.session_id.as_deref()).push(",")
+            .push_bind(entry.related_session_id.as_deref()).push(",")
+            .push_bind(entry.turn_id.as_deref()).push(",")
+            .push_bind(entry.tool_call_id.as_deref()).push(",")
+            .push_bind(iteration).push(",")
+            .push_bind(payloads[index].as_str()).push("::jsonb,")
+            .push_bind(entry.operator_session_id.as_deref()).push(",")
+            .push_bind(entry.operator_instance_id.as_deref()).push(",")
+            .push_bind(entry.ssh_username.as_deref()).push(",")
+            .push_bind(uid).push(",")
+            .push_bind(entry.ssh_client_ip.as_deref()).push(",")
+            .push_bind(entry.ssh_client_port.map(i32::from)).push(",")
+            .push_bind(entry.ssh_server_ip.as_deref()).push(",")
+            .push_bind(entry.ssh_server_port.map(i32::from)).push(",")
+            .push_bind(entry.ssh_tty.as_deref()).push(",")
+            .push_bind(entry.ssh_auth_method.as_deref()).push(",")
+            .push_bind(entry.ssh_key_fingerprint.as_deref()).push(",")
+            .push_bind(entry.operator_surface.as_deref())
+            .push(")");
+    }
+
+    query.push(" ON CONFLICT DO NOTHING RETURNING id, record_id");
+    let rows = query.build().fetch_all(&mut **transaction).await?;
+    let mut inserted_ids = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let id: i64 = row.try_get("id")?;
+        let record_id: String = row.try_get("record_id")?;
+        inserted_ids.insert(record_id, id);
+    }
+
+    let mut documents = Vec::with_capacity(inserted_ids.len());
+    for (entry, occurred_at) in entries.iter().zip(occurred_at) {
+        if let Some(id) = inserted_ids.get(entry.record_id.as_deref().unwrap_or_default()) {
+            documents.push((entry.clone(), *id, occurred_at));
+        }
+    }
+    Ok(documents)
+}
+
+async fn upsert_batch_search_documents(
+    connection: &mut PgConnection,
+    documents: &[(Entry, i64, DateTime<Utc>)],
+) -> Result<(), sqlx::Error> {
+    let mut pending_delta: Option<(Entry, i64, DateTime<Utc>)> = None;
+    for (entry, entry_id, occurred_at) in documents {
+        if entry.kind == EntryKind::HermesStreamDelta {
+            let can_merge = pending_delta.as_ref().is_some_and(|(previous, _, _)| {
+                previous.conversation_id == entry.conversation_id
+                    && previous.turn_id == entry.turn_id
+                    && previous.iteration == entry.iteration
+                    && previous.operator_session_id == entry.operator_session_id
+            });
+            if can_merge {
+                if let Some((previous, _, _)) = pending_delta.as_mut() {
+                    // Keep the first delta's stable record ID and entry ID.
+                    // The logical search document represents the complete stream,
+                    // but opening it must still resolve through its first journal row.
+                    previous.text.push_str(&entry.text);
+                }
+                continue;
+            }
+            if let Some((previous, previous_id, previous_time)) = pending_delta.take() {
+                let record_id = previous.record_id.as_deref().unwrap_or_default();
+                upsert_search_document(connection, &previous, record_id, previous_id, previous_time).await?;
+            }
+            pending_delta = Some((entry.clone(), *entry_id, occurred_at.clone()));
+            continue;
+        }
+
+        if let Some((previous, previous_id, previous_time)) = pending_delta.take() {
+            let record_id = previous.record_id.as_deref().unwrap_or_default();
+            upsert_search_document(connection, &previous, record_id, previous_id, previous_time).await?;
+        }
+        let record_id = entry.record_id.as_deref().unwrap_or_default();
+        upsert_search_document(connection, entry, record_id, *entry_id, occurred_at.clone()).await?;
+    }
+
+    if let Some((previous, previous_id, previous_time)) = pending_delta {
+        let record_id = previous.record_id.as_deref().unwrap_or_default();
+        upsert_search_document(connection, &previous, record_id, previous_id, previous_time).await?;
+    }
+    Ok(())
 }
 
 async fn upsert_search_document(
@@ -888,18 +1018,34 @@ async fn search_records(pool: &PgPool, raw_query: &str, request_id: u64) -> Sear
 
     let query = &spec.query;
     let pattern = like_pattern(query);
-    let common_filters = r#"
-        AND ($3::text IS NULL OR d.kind = $3)
-        AND ($4::text IS NULL OR (e.session_id = $4 OR e.related_session_id = $4))
-        AND ($5::text IS NULL OR e.conversation_id = $5)
-        AND ($6::timestamptz IS NULL OR d.occurred_at >= $6)
-        AND ($7::timestamptz IS NULL OR d.occurred_at < $7)
-        AND ($8::text IS NULL OR e.operator_session_id = $8)
-        AND ($9::text IS NULL OR e.ssh_client_ip = $9)
-        AND ($10::text IS NULL OR e.ssh_username = $10)
-        AND ($11::bigint IS NULL OR e.unix_uid = $11)
-        AND ($12::text IS NULL OR e.ssh_key_fingerprint = $12)
-        AND (d.kind <> 'operator_session_heartbeat' OR $3::text = 'operator_session_heartbeat')
+    // Emit only active predicates so PostgreSQL can use selective indexes
+    // instead of planning a chain of "parameter IS NULL OR ..." expressions.
+    // The typed CTE preserves the stable bind positions used below; PostgreSQL
+    // can eliminate this unreferenced CTE after parameter types are resolved.
+    let mut common_filters = String::new();
+    if spec.kind.is_some() { common_filters.push_str(" AND d.kind = $3"); }
+    if spec.session.is_some() {
+        common_filters.push_str(" AND (e.session_id = $4 OR e.related_session_id = $4)");
+    }
+    if spec.conversation.is_some() { common_filters.push_str(" AND e.conversation_id = $5"); }
+    if spec.after.is_some() { common_filters.push_str(" AND d.occurred_at >= $6"); }
+    if spec.before.is_some() { common_filters.push_str(" AND d.occurred_at < $7"); }
+    if spec.operator_session.is_some() { common_filters.push_str(" AND e.operator_session_id = $8"); }
+    if spec.client_ip.is_some() { common_filters.push_str(" AND e.ssh_client_ip = $9"); }
+    if spec.ssh_user.is_some() { common_filters.push_str(" AND e.ssh_username = $10"); }
+    if spec.unix_uid.is_some() { common_filters.push_str(" AND e.unix_uid = $11"); }
+    if spec.ssh_key_fingerprint.is_some() { common_filters.push_str(" AND e.ssh_key_fingerprint = $12"); }
+    if spec.kind.as_deref() != Some("operator_session_heartbeat") {
+        common_filters.push_str(" AND d.kind <> 'operator_session_heartbeat'");
+    }
+    let typed_filter_params = r#"
+        search_params AS (
+            SELECT $3::text AS kind, $4::text AS session,
+                   $5::text AS conversation, $6::timestamptz AS after_time,
+                   $7::timestamptz AS before_time, $8::text AS operator_session,
+                   $9::text AS client_ip, $10::text AS ssh_user,
+                   $11::bigint AS unix_uid, $12::text AS ssh_key_fingerprint
+        )
     "#;
     let grouped_order = if spec.operator_session.is_some() || spec.client_ip.is_some()
         || spec.ssh_user.is_some() || spec.unix_uid.is_some() || spec.ssh_key_fingerprint.is_some()
@@ -947,7 +1093,8 @@ async fn search_records(pool: &PgPool, raw_query: &str, request_id: u64) -> Sear
         ),
     };
     let sql = format!(
-        r#"SELECT d.record_id, d.kind, d.occurred_at,
+        r#"WITH {typed_filter_params}
+           SELECT d.record_id, d.kind, d.occurred_at,
                   ({rank_expr})::real AS rank, {snippet_expr} AS snippet,
                   e.operator_session_id, e.operator_instance_id, e.ssh_username,
                   e.unix_uid, e.ssh_client_ip AS ssh_client_ip, e.operator_surface,
@@ -958,7 +1105,8 @@ async fn search_records(pool: &PgPool, raw_query: &str, request_id: u64) -> Sear
            ORDER BY {order} LIMIT $13 OFFSET $14"#
     );
     let count_sql = format!(
-        "SELECT COUNT(*)::bigint FROM operator_journal_search_documents d
+        "WITH {typed_filter_params}
+         SELECT COUNT(*)::bigint FROM operator_journal_search_documents d
          JOIN operator_journal_entries e ON e.id = d.entry_id
          WHERE ({predicate}) {common_filters}"
     );
@@ -1071,7 +1219,7 @@ async fn persist_one(
     // Read all earlier committed rows while holding the writer lock, before a
     // new ID can move this instance's cursor past a concurrent commit.
     fetch_new_entries_locked(&mut transaction, last_seen_id, updates).await?;
-    if let Some(id) = insert_entry(&mut transaction, entry)
+    if let Some(id) = insert_entry(&mut transaction, entry, true)
         .await
         .map_err(|error| format!("write journal entry: {error}"))?
     {
@@ -1106,17 +1254,16 @@ async fn persist_batch(
         .await
         .map_err(|error| format!("lock journal batch: {error}"))?;
     fetch_new_entries_locked(&mut transaction, last_seen_id, updates).await?;
-    let mut newest_id = *last_seen_id;
-    let mut inserted = 0usize;
+    let index_documents = insert_entries_batch(&mut transaction, entries)
+        .await
+        .map_err(|error| format!("write journal batch: {error}"))?;
+    let inserted = index_documents.len();
+    let newest_id = index_documents.iter().map(|(_, id, _)| *id).max().unwrap_or(*last_seen_id);
 
-    for entry in entries {
-        if let Some(id) = insert_entry(&mut transaction, entry)
+    if !index_documents.is_empty() {
+        upsert_batch_search_documents(&mut *transaction, &index_documents)
             .await
-            .map_err(|error| format!("write journal batch: {error}"))?
-        {
-            newest_id = newest_id.max(id);
-            inserted += 1;
-        }
+            .map_err(|error| format!("update batched journal search documents: {error}"))?;
     }
 
     if inserted > 0 {
@@ -1325,7 +1472,10 @@ async fn export_search_results_from_database(
             .map_err(|error| error.to_string())?;
 
         // Bound database result materialization to small batches while retaining
-        // the ordering selected by the search page.
+        // the ordering selected by the search page. Keep O(1) position lookup.
+        let result_positions: HashMap<&str, usize> = record_ids.iter().enumerate()
+            .map(|(position, record_id)| (record_id.as_str(), position))
+            .collect();
         for chunk in record_ids.chunks(32) {
             let rows = sqlx::query(
                 r#"SELECT e.record_id, e.payload::text AS payload,
@@ -1345,7 +1495,7 @@ async fn export_search_results_from_database(
             .await
             .map_err(|error| format!("fetch PostgreSQL search-result records: {error}"))?;
 
-            let mut decoded = Vec::with_capacity(rows.len());
+            let mut decoded = HashMap::with_capacity(rows.len());
             for row in rows {
                 let record_id: String = row.try_get("record_id")
                     .map_err(|error| format!("read exported record ID: {error}"))?;
@@ -1369,19 +1519,17 @@ async fn export_search_results_from_database(
                     entry.timestamp = timestamp.to_rfc3339();
                 }
                 entry.text = sanitize_entry_text(entry.kind, &entry.text);
-                decoded.push((record_id, entry));
+                decoded.insert(record_id, entry);
             }
 
             for record_id in chunk {
-                let Some((_, entry)) = decoded.iter().find(|(id, _)| id == record_id) else {
+                let Some(entry) = decoded.get(record_id) else {
                     return Err(format!("search result record {record_id} no longer exists"));
                 };
                 writeln!(
                     output,
                     "\n--- Result {} · {} · {} ---",
-                    offset.saturating_add(
-                        record_ids.iter().position(|id| id == record_id).unwrap_or(0)
-                    ).saturating_add(1),
+                    offset.saturating_add(result_positions.get(record_id.as_str()).copied().unwrap_or(0)).saturating_add(1),
                     entry.timestamp,
                     entry_kind_name(entry.kind)
                 ).map_err(|error| error.to_string())?;

@@ -1,6 +1,6 @@
 use std::{
     cell::{Ref, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -62,7 +62,7 @@ pub enum ConversationView {
 #[derive(Debug)]
 struct ConversationCache {
     entry_count: usize,
-    total_text_bytes: usize,
+    conversation_generation: u64,
     threads: Vec<ConversationThread>,
     /// Main transcript rows: ordinary journal records plus Hermes user prompts.
     transcript_indices: Vec<usize>,
@@ -72,7 +72,7 @@ impl Default for ConversationCache {
     fn default() -> Self {
         Self {
             entry_count: usize::MAX,
-            total_text_bytes: usize::MAX,
+            conversation_generation: u64::MAX,
             threads: Vec::new(),
             transcript_indices: Vec::new(),
         }
@@ -101,6 +101,8 @@ pub struct App {
     pub follow_tail: bool,
     pub search_query: Option<String>,
     pub matches: Vec<usize>,
+    /// Constant-time membership lookup for highlighting visible transcript rows.
+    match_lookup: HashSet<usize>,
     /// Dedicated results view; live capture and persistence continue underneath.
     pub search_view: bool,
     pub search_scroll: usize,
@@ -230,6 +232,7 @@ impl App {
             follow_tail: true,
             search_query: None,
             matches: Vec::new(),
+            match_lookup: HashSet::new(),
             search_view: false,
             search_scroll: 0,
             search_total: 0,
@@ -314,6 +317,7 @@ impl App {
                     .map(|hit| index_by_record_id.get(hit.record_id.as_str()).copied())
                     .collect();
                 self.matches = self.search_hit_entry_indices.iter().flatten().copied().collect();
+            self.match_lookup = self.matches.iter().copied().collect();
                 self.selected_row = self.active_match
                     .and_then(|position| self.search_hit_entry_indices.get(position).copied().flatten());
             } else {
@@ -347,6 +351,20 @@ impl App {
         self.conversation_cache.borrow().transcript_indices.clone()
     }
 
+    /// Copy only the requested viewport instead of cloning every visible row.
+    pub fn visible_transcript_window(&self, start: usize, count: usize) -> Vec<usize> {
+        self.refresh_conversation_cache();
+        let cache = self.conversation_cache.borrow();
+        cache.transcript_indices.iter().skip(start).take(count).copied().collect()
+    }
+
+    /// Borrow the cached transcript projection for viewport calculations that
+    /// need to walk from either the selected row or the live tail.
+    pub fn visible_transcript_index_slice(&self) -> Ref<'_, Vec<usize>> {
+        self.refresh_conversation_cache();
+        Ref::map(self.conversation_cache.borrow(), |cache| &cache.transcript_indices)
+    }
+
     pub fn visible_transcript_count(&self) -> usize {
         self.refresh_conversation_cache();
         self.conversation_cache.borrow().transcript_indices.len()
@@ -354,24 +372,32 @@ impl App {
 
     fn refresh_conversation_cache(&self) {
         let entry_count = self.journal.entries.len();
-        let total_text_bytes = self.journal.total_text_bytes;
+        let conversation_generation = self.journal.conversation_generation();
         let mut cache = self.conversation_cache.borrow_mut();
-        if cache.entry_count != entry_count || cache.total_text_bytes != total_text_bytes {
+
+        let invalidated_by_prune = cache.entry_count > entry_count;
+        let conversations_changed = cache.conversation_generation != conversation_generation;
+        if invalidated_by_prune || conversations_changed || cache.entry_count == usize::MAX {
             cache.threads = build_threads(&self.journal.entries);
-            cache.transcript_indices = self
-                .journal
-                .entries
-                .iter()
-                .enumerate()
+            cache.transcript_indices = self.journal.entries.iter().enumerate()
                 .filter_map(|(index, entry)| {
                     ((!is_hermes_event(entry.kind) || entry.kind == EntryKind::HermesUser)
-                && entry.kind != EntryKind::OperatorSessionHeartbeat)
-                        .then_some(index)
+                        && entry.kind != EntryKind::OperatorSessionHeartbeat).then_some(index)
                 })
                 .collect();
-            cache.entry_count = entry_count;
-            cache.total_text_bytes = total_text_bytes;
+        } else if cache.entry_count < entry_count {
+            // Ordinary shell output updates the transcript projection without
+            // rebuilding Hermes conversation threads from the complete journal.
+            for (index, entry) in self.journal.entries.iter().enumerate().skip(cache.entry_count) {
+                if (!is_hermes_event(entry.kind) || entry.kind == EntryKind::HermesUser)
+                    && entry.kind != EntryKind::OperatorSessionHeartbeat {
+                    cache.transcript_indices.push(index);
+                }
+            }
         }
+
+        cache.entry_count = entry_count;
+        cache.conversation_generation = conversation_generation;
     }
 
     /// True when the highlighted row is the latest visible transcript record
@@ -2104,6 +2130,7 @@ impl App {
         self.search_export_error = None;
         self.search_query = None;
         self.matches.clear();
+                self.match_lookup.clear();
         self.active_match = None;
         self.conversation_focus_entry = None;
         self.pending_postgres_search = None;
@@ -2147,6 +2174,7 @@ impl App {
 
             if let Some(error) = result.error {
                 self.matches.clear();
+                self.match_lookup.clear();
                 self.active_match = None;
                 self.search_error = Some(error.clone());
                 self.status = error;
@@ -2166,6 +2194,7 @@ impl App {
                 .map(|hit| index_by_record_id.get(hit.record_id.as_str()).copied())
                 .collect();
             self.matches = self.search_hit_entry_indices.iter().flatten().copied().collect();
+            self.match_lookup = self.matches.iter().copied().collect();
             self.search_query = Some(result.query);
             self.search_total = result.total;
             self.search_page_offset = result.offset;
@@ -2233,6 +2262,7 @@ impl App {
 
             if let Some(error) = result.error {
                 self.matches.clear();
+                self.match_lookup.clear();
                 self.search_hits.clear();
                 self.archive_search_hits.clear();
                 self.active_match = None;
@@ -2271,6 +2301,7 @@ impl App {
                 .map(|hit| index_by_record_id.get(hit.record_id.as_str()).copied())
                 .collect();
             self.matches = self.search_hit_entry_indices.iter().flatten().copied().collect();
+            self.match_lookup = self.matches.iter().copied().collect();
             self.search_query = Some(result.query);
             self.search_total = result.total;
             self.search_page_offset = result.offset;
@@ -2316,6 +2347,7 @@ impl App {
         self.archive_detail_entry = None;
         self.pending_postgres_archive_record = None;
         self.matches.clear();
+                self.match_lookup.clear();
         self.active_match = None;
         self.conversation_view = None;
         self.conversation_focus_entry = None;
@@ -2527,7 +2559,13 @@ impl App {
     }
 
     pub fn is_match(&self, entry_index: usize) -> bool {
-        self.matches.contains(&entry_index)
+        // The matches vector remains publicly writable for compatibility. If a
+        // caller replaces it directly, fall back until the app refreshes the lookup.
+        if self.match_lookup.len() == self.matches.len() {
+            self.match_lookup.contains(&entry_index)
+        } else {
+            self.matches.contains(&entry_index)
+        }
     }
 
     pub fn is_active_match(&self, entry_index: usize) -> bool {

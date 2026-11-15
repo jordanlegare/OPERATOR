@@ -80,3 +80,7 @@ CREATE INDEX IF NOT EXISTS operator_journal_unix_uid_idx
 CREATE INDEX IF NOT EXISTS operator_journal_ssh_fingerprint_idx
     ON operator_journal_entries (ssh_key_fingerprint, occurred_at, id)
     WHERE ssh_key_fingerprint IS NOT NULL;
+
+-- Supports selective kind/date constraints on the searchable archive.
+CREATE INDEX IF NOT EXISTS operator_journal_search_kind_time_idx
+    ON operator_journal_search_documents (kind, occurred_at DESC, entry_id DESC);

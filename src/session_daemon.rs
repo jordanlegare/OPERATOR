@@ -20,7 +20,7 @@ mod unix_impl {
         process,
         sync::{
             atomic::{AtomicU64, Ordering},
-            mpsc::{self, Receiver, Sender},
+            mpsc::{self, Receiver, SyncSender},
             Arc, Mutex, Weak,
         },
         thread,
@@ -38,6 +38,8 @@ mod unix_impl {
     const FRAME_INPUT: u8 = 1;
     const FRAME_RESIZE: u8 = 2;
     const FRAME_DETACH: u8 = 3;
+    const FRAME_OUTPUT_GAP: u8 = 4;
+    const OUTPUT_QUEUE_PACKETS: usize = 64;
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct SessionInfo {
@@ -83,14 +85,14 @@ mod unix_impl {
     }
 
     enum OutputPacket {
-        Data(Vec<u8>),
+        Data(Arc<[u8]>),
         Exit,
     }
 
     #[derive(Default)]
     struct OutputState {
         history: VecDeque<u8>,
-        clients: HashMap<u64, Sender<OutputPacket>>,
+        clients: HashMap<u64, SyncSender<OutputPacket>>,
         controller: Option<u64>,
         detached_unix_ms: Option<u128>,
         exited: bool,
@@ -140,9 +142,9 @@ mod unix_impl {
                 Ok(Some(_)) => {
                     let mut output = self.output.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     output.exited = true;
-                    for sender in output.clients.values() {
-                        let _ = sender.send(OutputPacket::Exit);
-                    }
+                    output.clients.retain(|_, sender| {
+                        sender.try_send(OutputPacket::Exit).is_ok()
+                    });
                     true
                 }
                 _ => false,
@@ -151,20 +153,20 @@ mod unix_impl {
 
         fn publish(&self, bytes: &[u8]) {
             let mut output = self.output.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            for byte in bytes {
-                output.history.push_back(*byte);
-            }
-            while output.history.len() > OUTPUT_HISTORY_BYTES {
-                output.history.pop_front();
-            }
+            for byte in bytes { output.history.push_back(*byte); }
+            while output.history.len() > OUTPUT_HISTORY_BYTES { output.history.pop_front(); }
+
+            // Share one immutable packet across clients. A slow client is removed
+            // when its bounded queue fills; its writer sends a gap notification.
+            let packet = Arc::<[u8]>::from(bytes);
             output.clients.retain(|_, sender| {
-                sender.send(OutputPacket::Data(bytes.to_vec())).is_ok()
+                sender.try_send(OutputPacket::Data(Arc::clone(&packet))).is_ok()
             });
         }
 
         fn subscribe(&self, replay_enabled: bool) -> io::Result<(u64, Vec<u8>, Receiver<OutputPacket>)> {
             let client_id = self.next_client_id.fetch_add(1, Ordering::Relaxed);
-            let (sender, receiver) = mpsc::channel();
+            let (sender, receiver) = mpsc::sync_channel(OUTPUT_QUEUE_PACKETS);
             let mut output = self.output.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if output.exited {
                 return Err(io::Error::new(io::ErrorKind::BrokenPipe, "session has exited"));
@@ -648,15 +650,18 @@ mod unix_impl {
                 if !replay.is_empty() && write_frame(&mut output_stream, FRAME_OUTPUT, &replay).is_err() {
                     return;
                 }
-                while let Ok(packet) = receiver.recv() {
-                    match packet {
-                        OutputPacket::Data(bytes) => {
-                            if write_frame(&mut output_stream, FRAME_OUTPUT, &bytes).is_err() {
-                                break;
-                            }
+                loop {
+                    match receiver.recv() {
+                        Ok(OutputPacket::Data(bytes)) => {
+                            if write_frame(&mut output_stream, FRAME_OUTPUT, &bytes).is_err() { break; }
                         }
-                        OutputPacket::Exit => {
+                        Ok(OutputPacket::Exit) => {
                             let _ = write_frame(&mut output_stream, FRAME_EXIT, &[]);
+                            break;
+                        }
+                        Err(_) => {
+                            let _ = write_frame(&mut output_stream, FRAME_OUTPUT_GAP,
+                                b"PTY output queue overflowed; detach and reattach to replay recent output");
                             break;
                         }
                     }
@@ -815,6 +820,11 @@ mod unix_impl {
                     }
                     Ok((FRAME_EXIT, _)) => {
                         let _ = sender.send(Ok(None));
+                        break;
+                    }
+                    Ok((FRAME_OUTPUT_GAP, message)) => {
+                        let reason = String::from_utf8_lossy(&message).into_owned();
+                        let _ = sender.send(Err(io::Error::new(io::ErrorKind::BrokenPipe, reason)));
                         break;
                     }
                     Ok(_) => {}
