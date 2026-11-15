@@ -1009,14 +1009,40 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     frame.render_widget(block, area);
 
     let top = app.current_top();
-    // Fixed-height rows can be virtualized. Wrapped rows retain the complete
-    // suffix because their visual heights depend on the current terminal width.
-    let render_count = if app.wrap_transcript {
-        visible_count.saturating_sub(top)
+    let indices = app.visible_transcript_index_slice();
+    let viewport_lines = inner.height.max(1) as usize;
+    let mut visible_indices = Vec::with_capacity(viewport_lines.saturating_add(2));
+
+    if app.wrap_transcript && app.follow_tail {
+        // Work backward from the live tail until enough wrapped display rows
+        // have been found to cover the viewport.
+        let mut visual_rows = 0usize;
+        for index in indices.iter().rev().copied() {
+            let Some(entry) = app.journal.entries.get(index) else { continue; };
+            let width = UnicodeWidthStr::width(entry_transcript_text(entry, index).as_str());
+            let rows = width.max(1).div_ceil(inner.width.max(1) as usize);
+            visual_rows = visual_rows.saturating_add(rows);
+            visible_indices.push(index);
+            if visual_rows >= viewport_lines { break; }
+        }
+        visible_indices.reverse();
+    } else if app.wrap_transcript {
+        // When scrolled away from LIVE, start at the selected journal row and
+        // walk forward only until the visible wrapped height is covered.
+        let mut visual_rows = 0usize;
+        for index in indices.iter().skip(top).copied() {
+            let Some(entry) = app.journal.entries.get(index) else { continue; };
+            let width = UnicodeWidthStr::width(entry_transcript_text(entry, index).as_str());
+            let rows = width.max(1).div_ceil(inner.width.max(1) as usize);
+            visual_rows = visual_rows.saturating_add(rows);
+            visible_indices.push(index);
+            if visual_rows >= viewport_lines { break; }
+        }
     } else {
-        inner.height.max(1) as usize
-    };
-    let visible_indices = app.visible_transcript_window(top, render_count);
+        visible_indices.extend(indices.iter().skip(top).take(viewport_lines).copied());
+    }
+    drop(indices);
+
     let visible: Vec<Line> = visible_indices.iter().filter_map(|index| {
         app.journal.entries.get(*index).map(|entry| entry_line(entry, *index, app, theme))
     }).collect();

@@ -358,6 +358,13 @@ impl App {
         cache.transcript_indices.iter().skip(start).take(count).copied().collect()
     }
 
+    /// Borrow the cached transcript projection for viewport calculations that
+    /// need to walk from either the selected row or the live tail.
+    pub fn visible_transcript_index_slice(&self) -> Ref<'_, Vec<usize>> {
+        self.refresh_conversation_cache();
+        Ref::map(self.conversation_cache.borrow(), |cache| &cache.transcript_indices)
+    }
+
     pub fn visible_transcript_count(&self) -> usize {
         self.refresh_conversation_cache();
         self.conversation_cache.borrow().transcript_indices.len()
